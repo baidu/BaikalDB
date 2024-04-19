@@ -207,7 +207,7 @@ int InsertManagerNode::subquery_open(RuntimeState* state) {
                 }
                 // 20190101101112 这种转换现在只支持string类型
                 pb::PrimitiveType field_type = table_field_map[_selected_field_ids[i]]->type;
-                result.float_precision_len = table_field_map[_selected_field_ids[i]]->float_precision_len;
+                result.set_precision_len(table_field_map[_selected_field_ids[i]]->float_precision_len);
                 if (is_datetime_specic(field_type) && result.is_numberic()) {
                     result.cast_to(pb::STRING).cast_to(field_type);
                 } else {
@@ -655,9 +655,9 @@ void InsertManagerNode::update_record(const SmartRecord& record, const SmartReco
         auto& slot = _update_slots[i];
         auto expr = _update_exprs[i];
         auto field = _update_fields[slot.field_id()];
-        if (field->type == pb::FLOAT || field->type == pb::DOUBLE) {
+        if (field->type == pb::FLOAT || field->type == pb::DOUBLE || field->type == pb::DATETIME) {
             auto& expr_value = expr->get_value(row).cast_to(slot.slot_type());
-            expr_value.float_precision_len = field->float_precision_len;
+            expr_value.set_precision_len(field->float_precision_len);
             record->set_value(record->get_field_by_tag(slot.field_id()), expr_value);
         } else {
             record->set_value(record->get_field_by_tag(slot.field_id()),

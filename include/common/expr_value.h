@@ -31,7 +31,7 @@ namespace baikaldb {
 
 struct ExprValue {
     pb::PrimitiveType type;
-    int32_t float_precision_len;
+    int32_t float_precision_len = -1; // -1代表未定义精度，保留原值的最大精度。0代表不保留小数点部分
     union {
         bool bool_val;
         int8_t int8_val;
@@ -50,7 +50,7 @@ struct ExprValue {
 
     explicit ExprValue(pb::PrimitiveType type_ = pb::NULL_TYPE) : type(type_) {
         _u.int64_val = 0;
-        float_precision_len = 0;
+        float_precision_len = -1;
         if (type_ == pb::BITMAP) {
             _u.bitmap = new(std::nothrow) Roaring();
         } else if (type_ == pb::TDIGEST) {
@@ -124,7 +124,7 @@ struct ExprValue {
     }
     explicit ExprValue(const pb::ExprValue& value) {
         type = value.type();
-        float_precision_len = 0;
+        float_precision_len = -1;
         switch (type) {
             case pb::BOOL:
                 _u.bool_val = value.bool_val();
@@ -187,7 +187,7 @@ struct ExprValue {
 
     explicit ExprValue(pb::PrimitiveType primitive_type, const std::string& value_str) {
         type = pb::STRING;
-        float_precision_len = 0;
+        float_precision_len = -1;
         str_val = value_str;
         if (primitive_type == pb::STRING 
             || primitive_type == pb::HEX 
@@ -624,7 +624,7 @@ struct ExprValue {
             case pb::TDIGEST:
                 return str_val;
             case pb::DATETIME:
-                return datetime_to_str(_u.uint64_val);
+                return datetime_to_str(_u.uint64_val, float_precision_len);
             case pb::TIME:
                 return time_to_str(_u.int32_val);
             case pb::TIMESTAMP:
@@ -860,14 +860,18 @@ struct ExprValue {
         return ret;
     }
     // 默认不带us
-    static ExprValue Now(int precision = 0) {
+    static ExprValue Now(int32_t precision = 0) {
         ExprValue tmp(pb::TIMESTAMP);
         tmp._u.uint32_val = time(NULL);
         tmp.cast_to(pb::DATETIME);
-        if (precision == 6) {
+
+        if (precision > 0 and precision <= 6) {
             timeval tv;
             gettimeofday(&tv, NULL);
             tmp._u.uint64_val |= tv.tv_usec;
+            tmp.set_precision_len(precision);
+        } else {
+            tmp.set_precision_len(0);
         }
         return tmp;
     }
@@ -883,7 +887,7 @@ struct ExprValue {
         ExprValue ret(pb::UINT64);
         return ret;
     }
-    static ExprValue UTC_TIMESTAMP() {
+    static ExprValue UTC_TIMESTAMP(int32_t precision = 0) {
         // static int UTC_OFFSET = 8 * 60 * 60;
         time_t current_time;
         struct tm timeinfo;
@@ -896,6 +900,11 @@ struct ExprValue {
         timeval tv;
         gettimeofday(&tv, NULL);
         tmp._u.uint64_val |= tv.tv_usec;
+        if (precision >=0 && precision <= 6) {
+            tmp.set_precision_len(precision);
+        } else {
+            tmp.set_precision_len(0);
+        }
         return tmp;
     }
     // For string, end-self
@@ -924,6 +933,25 @@ struct ExprValue {
             return ev._u.uint64_val;
         }
     };
+
+    void dt_cast_len() {
+         if (float_precision_len >= 0 and float_precision_len <= 6) {
+             uint64_t carry = std::pow(10, (6 - float_precision_len));
+             uint64_t oldmic = _u.uint64_val & 0xffffff;
+             uint64_t newmic = ::round(oldmic / carry) * carry;
+             _u.uint64_val = (_u.uint64_val & ~0xffffff) | newmic;
+         }
+    }
+
+    void set_precision_len(int32_t precision) {
+        if (float_precision_len == precision) {
+            return;
+        }
+        float_precision_len = precision;
+        if (type == pb::DATETIME) {
+            dt_cast_len();
+        }
+    }
 };
 
 using ExprValueFlatSet = butil::FlatSet<ExprValue, ExprValue::HashFunction>;

@@ -66,18 +66,45 @@ ExprValue lpad(const std::vector<ExprValue>& input);
 ExprValue rpad(const std::vector<ExprValue>& input);
 ExprValue instr(const std::vector<ExprValue>& input);
 ExprValue json_extract(const std::vector<ExprValue>& input);
+ExprValue export_set(const std::vector<ExprValue>& input);
+ExprValue to_base64(const std::vector<ExprValue>& input);
+ExprValue from_base64(const std::vector<ExprValue>& input);
+ExprValue make_set(const std::vector<ExprValue>& input);
+ExprValue oct(const std::vector<ExprValue>& input);
+ExprValue hex(const std::vector<ExprValue>& input);
+ExprValue unhex(const std::vector<ExprValue>& input);
+ExprValue bin(const std::vector<ExprValue>& input);
+ExprValue space(const std::vector<ExprValue>& input);
+ExprValue elt(const std::vector<ExprValue>& input);
+ExprValue char_length(const std::vector<ExprValue>& input);
+ExprValue format(const std::vector<ExprValue>& input);
+ExprValue field(const std::vector<ExprValue>& input);
+ExprValue quote(const std::vector<ExprValue>& input);
+ExprValue func_char(const std::vector<ExprValue>& input);
+ExprValue soundex(const std::vector<ExprValue>& input);
+
 
 // datetime functions
 ExprValue unix_timestamp(const std::vector<ExprValue>& input);
 ExprValue from_unixtime(const std::vector<ExprValue>& input);
 ExprValue now(const std::vector<ExprValue>& input);
 ExprValue utc_timestamp(const std::vector<ExprValue>& input);
+ExprValue utc_date(const std::vector<ExprValue>& input);
+ExprValue utc_time(const std::vector<ExprValue>& input);
+ExprValue minute(const std::vector<ExprValue>& input);
+ExprValue second(const std::vector<ExprValue>& input);
+ExprValue microsecond(const std::vector<ExprValue>& input);
+ExprValue func_time(const std::vector<ExprValue>& input);
+ExprValue func_quarter(const std::vector<ExprValue>& input);
+ExprValue period_diff(const std::vector<ExprValue>& input);
+ExprValue period_add(const std::vector<ExprValue>& input);
 ExprValue date_format(const std::vector<ExprValue>& input);
 ExprValue str_to_date(const std::vector<ExprValue>& input);
 ExprValue time_format(const std::vector<ExprValue>& input);
 ExprValue convert_tz(const std::vector<ExprValue>& input);
 ExprValue timediff(const std::vector<ExprValue>& input);
 ExprValue timestampdiff(const std::vector<ExprValue>& input);
+ExprValue timestampadd(const std::vector<ExprValue>& input);
 ExprValue curdate(const std::vector<ExprValue>& input);
 ExprValue current_date(const std::vector<ExprValue>& input);
 ExprValue curtime(const std::vector<ExprValue>& input);
@@ -106,6 +133,11 @@ ExprValue weekday(const std::vector<ExprValue>& input);
 ExprValue extract(const std::vector<ExprValue>& input);
 ExprValue tso_to_timestamp(const std::vector<ExprValue>& input);
 ExprValue timestamp_to_tso(const std::vector<ExprValue>& input);
+ExprValue to_days(const std::vector<ExprValue>& input);
+ExprValue to_seconds(const std::vector<ExprValue>& input);
+ExprValue addtime(const std::vector<ExprValue>& input);
+ExprValue subtime(const std::vector<ExprValue>& input);
+
 // hll functions
 ExprValue hll_add(const std::vector<ExprValue>& input);
 ExprValue hll_merge(const std::vector<ExprValue>& input);
@@ -161,6 +193,7 @@ ExprValue tdigest_location(const std::vector<ExprValue>& input);
 // other
 ExprValue version(const std::vector<ExprValue>& input);
 ExprValue last_insert_id(const std::vector<ExprValue>& input);
+ExprValue find_in_set(const std::vector<ExprValue>& input);
 //transfer (latitude A, longitude A), (latitude B, longitude B) to distance of A to B (m)
 ExprValue point_distance(const std::vector<ExprValue>& input);
 ExprValue cast_to_date(const std::vector<ExprValue>& inpt);

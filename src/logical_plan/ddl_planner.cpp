@@ -219,13 +219,18 @@ int DDLPlanner::plan() {
     return 0;
 }
 
-int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column, bool is_unique_indicator) {
+int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column,
+                               bool is_unique_indicator, const std::string& old_field_name) {
     pb::FieldInfo* field = table.add_fields();
     if (column->name == nullptr || column->name->name.empty()) {
         DB_WARNING("column_name is empty");
         return -1;
     }
     field->set_field_name(column->name->name.value);
+    if (old_field_name != "") {
+        field->set_field_name(old_field_name);
+        field->set_new_field_name(column->name->name.value);
+    }
     if (column->type == nullptr) {
         DB_WARNING("data_type is empty for column: %s", column->name->name.value);
         return -1;
@@ -236,7 +241,7 @@ int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column,
         DB_WARNING("data_type is unsupported: %s", column->name->name.value);
         return -1;
     }
-    if (data_type == pb::FLOAT || data_type == pb::DOUBLE) {
+    if (data_type == pb::FLOAT || data_type == pb::DOUBLE || pb::DATETIME) {
         if (column->type->total_len != -1) {
             field->set_float_total_len((int8_t)column->type->total_len);
         }
@@ -269,7 +274,7 @@ int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column,
         } else if (col_option->type == parser::COLUMN_OPT_DEFAULT_VAL && col_option->expr != nullptr) {
             if (col_option->expr->to_string() == "(current_timestamp())") {
                 if (is_current_timestamp_specic(data_type)) {
-                    field->set_default_literal(ExprValue::Now().get_string());
+                    field->set_default_literal(ExprValue::Now(field->float_precision_len()).get_string());
                     field->set_default_value("(current_timestamp())");
                     continue;
                 } else {
@@ -820,43 +825,44 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                     DB_WARNING("parse create table json comments error [code:%d][%s]", 
                         code, value);
                     return -1;
-                }
-                auto iter = root.FindMember("segment_type");
-                if (iter != root.MemberEnd()) {
-                    std::string segment_type = iter->value.GetString();
-                    pb::SegmentType pb_segment_type = pb::S_DEFAULT;
-                    SegmentType_Parse(segment_type, &pb_segment_type);
-                    index->set_segment_type(pb_segment_type);
-                }
-                iter = root.FindMember("storage_type");
-                pb::StorageType pb_storage_type = pb::ST_ARROW;
-                if (iter != root.MemberEnd()) {
-                    std::string storage_type = iter->value.GetString();
-                    StorageType_Parse(storage_type, &pb_storage_type);
-                }
-                if (!is_fulltext_type_constraint(pb_storage_type, has_arrow_fulltext, has_pb_fulltext)) {
-                    DB_WARNING("fulltext has two types : pb&arrow"); 
-                    return -1;
-                }
-                index->set_storage_type(pb_storage_type);
-                iter = root.FindMember("vector_description");
-                if (iter != root.MemberEnd()) {
-                    index->set_vector_description(iter->value.GetString());
-                }
-                iter = root.FindMember("dimension");
-                if (iter != root.MemberEnd()) {
-                    index->set_dimension(iter->value.GetInt());
-                }
-                iter = root.FindMember("nprobe");
-                if (iter != root.MemberEnd()) {
-                    index->set_nprobe(iter->value.GetInt());
-                }
-                iter = root.FindMember("metric_type");
-                pb::MetricType metric_type = pb::METRIC_L2;
-                if (iter != root.MemberEnd()) {
-                    std::string metric_type_str = iter->value.GetString();
-                    MetricType_Parse(metric_type_str, &metric_type);
-                    index->set_metric_type(metric_type);
+                } else if (root.IsObject()) {
+                    auto iter = root.FindMember("segment_type");
+                    if (iter != root.MemberEnd()) {
+                        std::string segment_type = iter->value.GetString();
+                        pb::SegmentType pb_segment_type = pb::S_DEFAULT;
+                        SegmentType_Parse(segment_type, &pb_segment_type);
+                        index->set_segment_type(pb_segment_type);
+                    }
+                    iter = root.FindMember("storage_type");
+                    pb::StorageType pb_storage_type = pb::ST_ARROW;
+                    if (iter != root.MemberEnd()) {
+                        std::string storage_type = iter->value.GetString();
+                        StorageType_Parse(storage_type, &pb_storage_type);
+                    }
+                    if (!is_fulltext_type_constraint(pb_storage_type, has_arrow_fulltext, has_pb_fulltext)) {
+                        DB_WARNING("fulltext has two types : pb&arrow");
+                        return -1;
+                    }
+                    index->set_storage_type(pb_storage_type);
+                    iter = root.FindMember("vector_description");
+                    if (iter != root.MemberEnd()) {
+                        index->set_vector_description(iter->value.GetString());
+                    }
+                    iter = root.FindMember("dimension");
+                    if (iter != root.MemberEnd()) {
+                        index->set_dimension(iter->value.GetInt());
+                    }
+                    iter = root.FindMember("nprobe");
+                    if (iter != root.MemberEnd()) {
+                        index->set_nprobe(iter->value.GetInt());
+                    }
+                    iter = root.FindMember("metric_type");
+                    pb::MetricType metric_type = pb::METRIC_L2;
+                    if (iter != root.MemberEnd()) {
+                        std::string metric_type_str = iter->value.GetString();
+                        MetricType_Parse(metric_type_str, &metric_type);
+                        index->set_metric_type(metric_type);
+                    }
                 }
             } catch (...) {
                 DB_WARNING("parse create table json comments error [%s]", value);
@@ -914,6 +920,12 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                         code, option->str_value.value);
                     continue;
 //                    return -1;
+                }
+                if (!root.IsObject()) {
+                    // comment = '1' ，json会解析成功，但FindMember会出core
+                    table.set_comment(option->str_value.value);
+                    DB_WARNING("parse create table comment as mysql-format [%s]", option->str_value.value);
+                    continue;
                 }
                 auto json_iter = root.FindMember("resource_tag");
                 if (json_iter != root.MemberEnd()) {
@@ -1353,7 +1365,19 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
     }
     table->set_table_name(stmt->table_name->table.value);
     table->set_namespace_name(_ctx->user_info->namespace_);
-    if (stmt->alter_specs.size() > 1 || stmt->alter_specs.size() == 0) {
+
+    // 支持Alter Table Add Column Field1, Add Column Field2;用法
+    bool has_same_spec_type = true;
+    if (stmt->alter_specs.size() > 1) {
+        for (int i = 0; i < stmt->alter_specs.size(); ++i) {
+            parser::AlterTableSpec* s =  stmt->alter_specs[i];
+            if (s == nullptr || s->spec_type != parser::ALTER_SPEC_ADD_COLUMN) {
+                has_same_spec_type = false;
+                break;
+            }
+        }
+    }
+    if ((stmt->alter_specs.size() > 1 && !has_same_spec_type) || stmt->alter_specs.size() == 0) {
         _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
         _ctx->stat_info.error_msg << "Alter with multiple alter_specifications is not supported in this version";
         return -1;
@@ -1452,6 +1476,23 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
                 return -1;
             }
         }
+        if (has_same_spec_type) {
+            for (int i = 1; i < stmt->alter_specs.size(); ++i) {
+                parser::AlterTableSpec* s =  stmt->alter_specs[i];
+                int column_len = s->new_columns.size();
+                for (int idx = 0; idx < column_len; ++idx) {
+                    parser::ColumnDef* column = s->new_columns[idx];
+                    if (column == nullptr) {
+                        DB_WARNING("column is nullptr");
+                        return -1;
+                    }
+                    if (0 != add_column_def(*table, column, s->is_unique_indicator)) {
+                        DB_WARNING("add column to table failed.");
+                        return -1;
+                    }
+                }
+            }
+        }
         if (table->indexs_size() != 0) {
             _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;
             _ctx->stat_info.error_msg << "add table column with index is not supported in this version";
@@ -1488,6 +1529,31 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
         if (table->indexs_size() != 0) {
             _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
             _ctx->stat_info.error_msg << "modify table column with index is not supported";
+            return -1;
+        }
+    } else if (spec->spec_type == parser::ALTER_SPEC_CHANGE_COLUMN && spec->new_columns.size() > 0) {
+        alter_request.set_op_type(pb::OP_MODIFY_FIELD);
+        int column_len = spec->new_columns.size();
+        if (column_len != 1) {
+            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+            _ctx->stat_info.error_msg << "unsupported multi schema change";
+            return -1;
+        }
+        std::string old_field_name = spec->column_name.value;
+        for (int idx = 0; idx < column_len; ++idx) {
+            parser::ColumnDef* column = spec->new_columns[idx];
+            if (column == nullptr) {
+                DB_WARNING("column is nullptr");
+                return -1;
+            }
+            if (0 != add_column_def(*table, column, spec->is_unique_indicator, old_field_name)) {
+                DB_WARNING("add column to table failed.");
+                return -1;
+            }
+        }
+        if (table->indexs_size() != 0) {
+            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+            _ctx->stat_info.error_msg << "change table column with index is not supported";
             return -1;
         }
     } else if (spec->spec_type == parser::ALTER_SPEC_RENAME_COLUMN) {
@@ -1913,23 +1979,24 @@ int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* co
                 rapidjson::ParseErrorCode code = root.GetParseError();
                 DB_WARNING("parse create table json comments error [code:%d][%s]", 
                     code, value);
-                return -1;
+                // return -1;
+            } else if (root.IsObject()){
+                auto json_iter = root.FindMember("segment_type");
+                if (json_iter != root.MemberEnd()) {
+                    std::string segment_type = json_iter->value.GetString();
+                    pb::SegmentType pb_segment_type = pb::S_DEFAULT;
+                    SegmentType_Parse(segment_type, &pb_segment_type);
+                    index->set_segment_type(pb_segment_type);
+                }
+                
+                auto storage_type_iter = root.FindMember("storage_type");
+                pb::StorageType pb_storage_type = pb::ST_ARROW;
+                if (storage_type_iter != root.MemberEnd()) {
+                    std::string storage_type = storage_type_iter->value.GetString();
+                    StorageType_Parse(storage_type, &pb_storage_type);
+                }
+                index->set_storage_type(pb_storage_type);
             }
-            auto json_iter = root.FindMember("segment_type");
-            if (json_iter != root.MemberEnd()) {
-                std::string segment_type = json_iter->value.GetString();
-                pb::SegmentType pb_segment_type = pb::S_DEFAULT;
-                SegmentType_Parse(segment_type, &pb_segment_type);
-                index->set_segment_type(pb_segment_type);
-            }
-            
-            auto storage_type_iter = root.FindMember("storage_type");
-            pb::StorageType pb_storage_type = pb::ST_ARROW;
-            if (storage_type_iter != root.MemberEnd()) {
-                std::string storage_type = storage_type_iter->value.GetString();
-                StorageType_Parse(storage_type, &pb_storage_type);
-            }
-            index->set_storage_type(pb_storage_type);
         } catch (...) {
             DB_WARNING("parse create table json comments error [%s]", value);
             return -1;

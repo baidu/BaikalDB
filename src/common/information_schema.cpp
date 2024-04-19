@@ -909,7 +909,8 @@ void InformationSchema::init_columns() {
                     }
                     record->set_string(record->get_field_by_name("CHARACTER_SET_NAME"), "utf8");
                     record->set_string(record->get_field_by_name("COLLATION_NAME"), "utf8_general_ci");
-                    record->set_string(record->get_field_by_name("COLUMN_TYPE"), to_mysql_type_full_string(field.type));
+                    record->set_string(record->get_field_by_name("COLUMN_TYPE"),
+                            to_mysql_type_full_string(field.type, field.float_total_len, field.float_precision_len));
                     std::vector<std::string> extra_vec;
                     if (field_index.count(field.id) == 0) {
                         record->set_string(record->get_field_by_name("COLUMN_KEY"), " ");

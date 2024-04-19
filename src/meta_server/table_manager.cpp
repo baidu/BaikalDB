@@ -2052,7 +2052,9 @@ void TableManager::modify_field(const pb::MetaManagerRequest& request,
         return;
     }
     pb::SchemaInfo mem_schema_pb = table_mem.schema_pb;
+    std::unordered_map<int32_t, std::string> id_new_field_map;
     std::vector<std::string> drop_field_names;
+    std::unordered_map<std::string, int32_t> add_field_id_map;
     for (auto& field : request.table_info().fields()) {
         std::string field_name = field.field_name();
         if (_table_info_map[table_id].field_id_map.count(field_name) == 0) {
@@ -2071,7 +2073,7 @@ void TableManager::modify_field(const pb::MetaManagerRequest& request,
         for (auto& mem_field : *mem_schema_pb.mutable_fields()) {
             if (mem_field.field_name() == field_name) {
                 if (field.has_mysql_type()) {
-                    if (!check_field_is_compatible_type(mem_field.mysql_type(), field.mysql_type())) {
+                    if (!check_field_is_compatible_type(mem_field, field)) {
                         // TODO 数据类型变更仅支持meta-only, 有损变更待支持
                         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR,
                                              "modify field data type unsupported lossy changes");
@@ -2115,7 +2117,19 @@ void TableManager::modify_field(const pb::MetaManagerRequest& request,
                         //修改default value需谨慎，会导致存储null数据的值变成新默认值
                         mem_field.set_default_value(field.default_value());
                     }
-                } 
+                }
+                if (field.has_float_total_len()) {
+                    mem_field.set_float_total_len(field.float_total_len());
+                }
+                if (field.has_float_precision_len()) {
+                    mem_field.set_float_precision_len(field.float_precision_len());
+                }
+                if (field.has_new_field_name()) {
+                    mem_field.set_field_name(field.new_field_name());
+                    id_new_field_map[field_id] = field.new_field_name();
+                    add_field_id_map[field.new_field_name()] = field_id;
+                    drop_field_names.push_back(field.field_name());
+                }
             }
         }
     }
@@ -2128,6 +2142,8 @@ void TableManager::modify_field(const pb::MetaManagerRequest& request,
     set_table_pb(mem_schema_pb);
     std::vector<pb::SchemaInfo> schema_infos{mem_schema_pb};
     put_incremental_schemainfo(apply_index, schema_infos);
+    drop_field_mem(table_id, drop_field_names);
+    add_field_mem(table_id, add_field_id_map);
     IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
     DB_NOTICE("modify field type success, request:%s", request.ShortDebugString().c_str());
 }

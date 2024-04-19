@@ -135,6 +135,7 @@ void FunctionManager::register_operators() {
     register_object_ret("lcase", lower, pb::STRING);
     register_object_ret("concat", concat, pb::STRING);
     register_object_ret("substr", substr, pb::STRING);
+    register_object_ret("mid", substr, pb::STRING);
     register_object_ret("left", left, pb::STRING);
     register_object_ret("right", right, pb::STRING);
     register_object_ret("trim", trim, pb::STRING);
@@ -153,6 +154,23 @@ void FunctionManager::register_operators() {
     register_object_ret("rpad", rpad, pb::STRING);
     register_object_ret("instr", instr, pb::INT32);
     register_object_ret("json_extract", json_extract, pb::STRING);
+    register_object_ret("export_set", export_set, pb::STRING);
+    register_object_ret("to_base64", to_base64, pb::STRING);
+    register_object_ret("from_base64", from_base64, pb::STRING);
+    register_object_ret("make_set", make_set, pb::STRING);
+    register_object_ret("oct", oct, pb::STRING);
+    register_object_ret("hex", hex, pb::STRING);
+    register_object_ret("unhex", unhex, pb::STRING);
+    register_object_ret("bin", bin, pb::STRING);
+    register_object_ret("space", space, pb::STRING);
+    register_object_ret("elt", elt, pb::STRING);
+    register_object_ret("char_length", char_length, pb::INT32);
+    register_object_ret("format", format, pb::STRING);
+    register_object_ret("field", field, pb::INT32);
+    register_object_ret("quote", quote, pb::STRING);
+    register_object_ret("char", func_char, pb::STRING);
+    register_object_ret("soundex", soundex, pb::STRING);
+
 
     // date funcs
     register_object_ret("unix_timestamp", unix_timestamp, pb::INT64);
@@ -160,7 +178,20 @@ void FunctionManager::register_operators() {
     register_object_ret("now", now, pb::DATETIME);
     register_object_ret("sysdate", now, pb::DATETIME);
     register_object_ret("utc_timestamp", utc_timestamp, pb::DATETIME);
+    register_object_ret("utc_date", utc_date, pb::DATE);
+    register_object_ret("utc_time", utc_time, pb::TIME);
     register_object_ret("date_format", date_format, pb::STRING);
+    register_object_ret("period_diff", period_diff, pb::INT32);
+    register_object_ret("period_add", period_add, pb::STRING);
+    register_object_ret("minute", minute, pb::INT32);
+    register_object_ret("second", second, pb::INT32);
+    register_object_ret("time", func_time, pb::TIME);
+    register_object_ret("quarter", func_quarter, pb::INT32);
+    register_object_ret("microsecond", microsecond, pb::INT32);
+    register_object_ret("timestampadd", timestampadd, pb::TIMESTAMP);
+    register_object_ret("adddate", date_add, pb::DATETIME);
+    register_object_ret("addtime", addtime, pb::STRING);
+    register_object_ret("subtime", subtime, pb::STRING);
     /*
         str_to_date实现较为复杂，需要满足任意格式的string转换为标准形式的DATETIME，现在为了方便确保str_to_date可以使用，
         默认string是标准形式的date，故其实现内容和date_format函数一致
@@ -174,7 +205,7 @@ void FunctionManager::register_operators() {
     register_object_ret("current_date", current_date, pb::DATE);
     register_object_ret("curtime", curtime, pb::TIME);
     register_object_ret("current_time", current_time, pb::TIME);
-    register_object_ret("current_timestamp", current_timestamp, pb::TIMESTAMP);
+    register_object_ret("current_timestamp", current_timestamp, pb::DATETIME);
     register_object_ret("timestamp", timestamp, pb::TIMESTAMP);
     register_object_ret("date", date, pb::DATE);
     register_object_ret("hour", hour, pb::UINT32);
@@ -192,12 +223,14 @@ void FunctionManager::register_operators() {
     register_object_ret("time_to_sec", time_to_sec, pb::UINT32);
     register_object_ret("sec_to_time", sec_to_time, pb::TIME);
     register_object_ret("weekday", weekday, pb::UINT32);
-    register_object_ret("datediff", datediff, pb::UINT32);
+    register_object_ret("datediff", datediff, pb::INT32);
     register_object_ret("date_add", date_add, pb::DATETIME);
     register_object_ret("date_sub", date_sub, pb::DATETIME);
     register_object_ret("extract", extract, pb::UINT32);
     register_object_ret("tso_to_timestamp", tso_to_timestamp, pb::DATETIME);
     register_object_ret("timestamp_to_tso", timestamp_to_tso, pb::INT64);
+    register_object_ret("to_days", to_days, pb::INT64);
+    register_object_ret("to_seconds", to_seconds, pb::INT64);
     // hll funcs
     register_object_ret("hll_add", hll_add, pb::HLL);
     register_object_ret("hll_merge", hll_merge, pb::HLL);
@@ -210,6 +243,7 @@ void FunctionManager::register_operators() {
     register_object_ret("ifnull", ifnull, pb::STRING);
     register_object_ret("nullif", nullif, pb::STRING);
     register_object_ret("isnull", isnull, pb::BOOL);
+    register_object_ret("find_in_set", find_in_set, pb::INT64);
     // MurmurHash sign
     register_object_ret("murmur_hash", murmur_hash, pb::UINT64);
     register_object_ret("md5", md5, pb::STRING);

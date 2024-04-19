@@ -392,7 +392,8 @@ inline std::string to_mysql_type_string(pb::PrimitiveType type) {
     }
 }
 
-inline std::string to_mysql_type_full_string(pb::PrimitiveType type) {
+inline std::string to_mysql_type_full_string(pb::PrimitiveType type,
+        int32_t float_total_len = -1, int32_t float_precision_len = -1) {
     switch (type) {
         case pb::BOOL:
             return "tinyint(3)";
@@ -413,12 +414,23 @@ inline std::string to_mysql_type_full_string(pb::PrimitiveType type) {
         case pb::UINT64:
             return "bigint(21) unsigned";
         case pb::FLOAT:
+            if (float_total_len != -1 && float_precision_len != -1) {
+                return "float(" + std::to_string(float_total_len) + "," + std::to_string(float_precision_len) + ")";
+            }
             return "float";
         case pb::DOUBLE:
+            if (float_total_len != -1 && float_precision_len != -1) {
+                return "double(" + std::to_string(float_total_len) + "," + std::to_string(float_precision_len) + ")";
+            }
             return "double";
         case pb::STRING:
             return "varchar(1024)";
         case pb::DATETIME:
+            if (float_precision_len == -1) {
+               return "datetime(6)";
+            } else if (float_precision_len > 0 && float_precision_len <= 6) {
+               return "datetime(" + std::to_string(float_precision_len) + ")";
+            }
             return "datetime";
         case pb::DATE:
             return "date";

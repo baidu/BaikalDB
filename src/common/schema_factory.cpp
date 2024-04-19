@@ -767,7 +767,8 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
     std::transform(lower_index_name.begin(), lower_index_name.end(), 
                     lower_index_name.begin(), ::tolower);
     idx_info.name = table_info.name + "." + lower_index_name;
-    idx_info.short_name = lower_index_name;
+    // idx_info.short_name = lower_index_name;
+    idx_info.short_name = index.index_name();
     idx_info.type = index.index_type();
     idx_info.state = index.state();
     idx_info.max_field_id = table_info.max_field_id;
@@ -3137,7 +3138,7 @@ int SchemaFactory::fill_default_value(SmartRecord record, FieldInfo& field) {
     }
     ExprValue default_value = field.default_expr_value;
     if (field.default_value == "(current_timestamp())") {
-        default_value = ExprValue::Now();
+        default_value = ExprValue::Now(field.float_precision_len);
         default_value.cast_to(field.type);
     }
     // mysql非strict mode，不填not null字段会补充空串/0等

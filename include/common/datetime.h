@@ -22,7 +22,7 @@ extern time_t str_to_timestamp(const char* str_time);
 
 // encode DATETIME to string format
 // ref: https://dev.mysql.com/doc/internals/en/date-and-time-data-type-representation.html
-extern std::string datetime_to_str(uint64_t datetime);
+extern std::string datetime_to_str(uint64_t datetime, int precision_len = 0);
 extern uint64_t str_to_datetime(const char* str_time, bool* is_full_datetime = nullptr);
 
 extern time_t datetime_to_timestamp(uint64_t datetime);
@@ -41,6 +41,7 @@ extern int32_t datetime_to_time(uint64_t datetime);
 extern uint64_t time_to_datetime(int32_t time);
 extern std::string time_to_str(int32_t time);
 extern int32_t str_to_time(const char* str_time);
+extern int32_t time_to_seconds(int32_t time);
 extern int32_t seconds_to_time(int32_t seconds);
 struct DateTime;
 extern uint64_t bin_date_to_datetime(DateTime time_struct);

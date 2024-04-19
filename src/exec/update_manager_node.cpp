@@ -246,9 +246,9 @@ void UpdateManagerNode::update_record(RuntimeState* state, SmartRecord record) {
         auto& slot = _update_slots[i];
         auto expr = _update_exprs[i];
         auto field = _update_fields[slot.field_id()];
-        if (field->type == pb::FLOAT || field->type == pb::DOUBLE) {
+        if (field->type == pb::FLOAT || field->type == pb::DOUBLE || field->type == pb::DATETIME) {
             auto& expr_value = expr->get_value(row).cast_to(slot.slot_type());
-            expr_value.float_precision_len = field->float_precision_len;
+            expr_value.set_precision_len(field->float_precision_len);
             record->set_value(record->get_field_by_tag(slot.field_id()), expr_value);
         } else {
             record->set_value(record->get_field_by_tag(slot.field_id()),

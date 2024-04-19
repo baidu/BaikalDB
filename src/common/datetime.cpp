@@ -40,7 +40,7 @@ std::string timestamp_to_str(time_t timestamp, bool is_utc) {
 }
 // encode DATETIME to string format
 // ref: https://dev.mysql.com/doc/internals/en/date-and-time-data-type-representation.html
-std::string datetime_to_str(uint64_t datetime) {
+std::string datetime_to_str(uint64_t datetime, int precision_len) {
     int year_month = ((datetime >> 46) & 0x1FFFF);
     int year = year_month / 13;
     int month = year_month % 13;
@@ -51,12 +51,14 @@ std::string datetime_to_str(uint64_t datetime) {
     int macrosec = (datetime & 0xFFFFFF);
 
     char buf[30] = {0};
-    if (macrosec > 0) {
-        snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d.%06d",
-                year, month, day, hour, minute, second, macrosec);
+    snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d.%06d",
+            year, month, day, hour, minute, second, macrosec);
+    if (precision_len > 0 and precision_len <=6) {
+        buf[20 + precision_len] = '\0';
+    } else if (precision_len == 0) {
+        buf[19] = '\0';
     } else {
-        snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
-                year, month, day, hour, minute, second);
+        buf[26] = '\0';
     }
     return std::string(buf);
 }
@@ -354,6 +356,23 @@ std::string time_to_str(int32_t time) {
     snprintf(buf, sizeof(buf), "%s%02d:%02d:%02d", OP_STR[minus], hour, min, sec);
     return std::string(buf);
 }
+
+int32_t time_to_seconds(int32_t time) {
+    bool minus = false;
+    if (time < 0) {
+        minus = true;
+        time = -time;
+    }
+    int hour = (time >> 12) & 0x3FF;
+    int min = (time >> 6) & 0x3F;
+    int sec = time & 0x3F;
+    int32_t res = sec + min * 60 + hour * 3600;
+    if (minus) {
+        res = res * -1;
+    }
+    return res;
+}
+
 int32_t str_to_time(const char* str_time) {
     while (*str_time == ' ') {
         str_time++;

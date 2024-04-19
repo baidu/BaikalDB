@@ -227,7 +227,7 @@ int UpdatePlanner::parse_kv_list() {
                 node->set_num_children(0);
                 node->set_node_type(pb::STRING_LITERAL);
                 node->set_col_type(pb::STRING);
-                node->mutable_derive_node()->set_string_val(ExprValue::Now().get_string());
+                node->mutable_derive_node()->set_string_val(ExprValue::Now(field_info->float_precision_len).get_string());
             }
         } else if (value_expr.nodes(0).node_type() == pb::NULL_LITERAL
             && !field_info->can_null) {
@@ -249,7 +249,7 @@ int UpdatePlanner::parse_kv_list() {
             node->set_num_children(0);
             node->set_node_type(pb::STRING_LITERAL);
             node->set_col_type(pb::STRING);
-            node->mutable_derive_node()->set_string_val(ExprValue::Now().get_string());
+            node->mutable_derive_node()->set_string_val(ExprValue::Now(field.float_precision_len).get_string());
             auto slot = get_scan_ref_slot(table_info.name, field.table_id, field.id, field.type);
             _update_slots.push_back(slot);
             _update_values.push_back(value_expr);

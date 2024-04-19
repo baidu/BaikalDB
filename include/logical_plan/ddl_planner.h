@@ -42,7 +42,8 @@ private:
     int parse_alter_table(pb::MetaManagerRequest& alter_request);
     int check_partition_key_constraint(pb::SchemaInfo& table, const std::string& field_name);
 
-    int add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column, bool is_unique_indicator);
+    int add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column,
+                       bool is_unique_indicator, const std::string& old_field_name = "");
     int parse_create_namespace(pb::NameSpaceInfo& namespace_info);
     int parse_drop_namespace(pb::NameSpaceInfo& namespace_info);
     int parse_alter_namespace(pb::NameSpaceInfo& namespace_info);

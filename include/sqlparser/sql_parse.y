@@ -191,7 +191,6 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     REFERENCES
     REGEXP
     RENAME
-    REPEAT
     REPLACE
     MERGE
     RESTRICT
@@ -225,8 +224,6 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     USAGE
     USE
     USING
-    UTC_DATE
-    UTC_TIME
     VALUES
     LONG
     VARCHAR
@@ -272,6 +269,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     ANY
     ASCII
     AUTO_INCREMENT
+    AUTOEXTEND_SIZE
     AVG_ROW_LENGTH
     AVG
     BEGINX
@@ -298,6 +296,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     COMPRESSION
     CONNECTION
     CONSISTENT
+    COPY
     DAY
     DATA
     DATE
@@ -310,9 +309,11 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     DUPLICATE
     DYNAMIC
     ENABLE
+    ENCRYPTION
     END
     ENGINE
     ENGINES
+    ENGINE_ATTRIBUTE
     ENUM
     EVENT
     EVENTS
@@ -321,6 +322,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     EXECUTE
     FIELDS
     FIRST
+    LAST
     FIXED
     FILE_T
     FLUSH
@@ -333,6 +335,9 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     IDENTIFIED
     ISOLATION
     INDEXES
+    INPLACE
+    INSERT_METHOD
+    INSTANT
     INVOKER
     JSON
     KEY_BLOCK_SIZE
@@ -379,13 +384,13 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     RELOAD
     REPEATABLE
     REPLICATION
-    REVERSE
     ROLLBACK
     ROUTINE
     ROW
     ROW_COUNT
     ROW_FORMAT
     SECOND
+    SECONDARY_ENGINE_ATTRIBUTE
     SECURITY
     SEPARATOR
     SERIALIZABLE
@@ -400,6 +405,8 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     SHUTDOWN
     START
     STATS_PERSISTENT
+    STATS_AUTO_RECALC
+    STATS_SAMPLE_PAGES
     STATUS
     SUPER
     SOME
@@ -511,6 +518,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     RowExprList
     RowExpr
     ColumnName
+    IndexColumnField
     ExprList
     Expr
     ElseOpt
@@ -544,6 +552,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
 %type <item> 
     ColumnNameListOpt 
     ColumnNameList 
+    IndexColumnList
     TableName
     AssignmentList 
     ByList 
@@ -587,8 +596,16 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     ColumnDefList
     IndexOptionList
     IndexOption
+    DropIndexOpt
     IndexType
     TablePartitionOpt
+    IndexTypeOpt
+    RowFormatOpt
+    AlgorithmVal
+    AlgorighmOpt
+    IndexLockVal
+    IndexLockOpt
+    InsertMethodOpt
     PartitionRange
     PartitionRangeList
     PartitionRangeListOpt
@@ -1091,6 +1108,31 @@ ColumnName:
         name->table = $3;
         name->name = $5;
         $$ = name;
+    }
+    ;
+
+IndexColumnField:
+    ColumnName {
+        $$ = $1;
+    }
+    | ColumnName '(' INTEGER_LIT ')' {
+        $$ = $1;
+    }
+    | IndexColumnField Order {
+        $$ = $1;
+    }
+    ;
+
+IndexColumnList:
+    IndexColumnField {
+        Node* list = new_node(Node);
+        list->children.reserve(10, parser->arena);
+        list->children.push_back($1, parser->arena);
+        $$ = list;
+    }
+    | IndexColumnList ',' IndexColumnField {
+        $1->children.push_back($3, parser->arena);
+        $$ = $1;
     }
     ;
 
@@ -1979,7 +2021,7 @@ FunctionNameDateArith:
      DATE_ADD | DATE_SUB
      ;
 FunctionNameSubstring:
-    SUBSTR | SUBSTRING
+    SUBSTR | SUBSTRING | MID
     ;
 
 TimestampUnit:
@@ -2142,6 +2184,36 @@ FunctionCallNonKeyword:
         fun->children.push_back($3, parser->arena);
         $$ = fun;         
     }
+    | MINUTE '(' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = $1;
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | SECOND '(' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = $1;
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | TIME '(' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = $1;
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | QUARTER '(' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = $1;
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | MICROSECOND '(' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = $1;
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
     | SYSDATE '(' FuncDatetimePrecListOpt ')' {
         FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = $1;
@@ -2164,6 +2236,12 @@ FunctionCallNonKeyword:
     | UTC_TIMESTAMP '(' ')' {
         FuncExpr* fun = new_node(FuncExpr);
         fun->fn_name = $1;
+        $$ = fun;
+    }
+    | UTC_TIMESTAMP '(' INTEGER_LIT ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = $1;
+        fun->children.push_back($3, parser->arena);
         $$ = fun;
     }
     | TIMESTAMP '(' ExprList ')' {
@@ -2377,7 +2455,9 @@ FunctionCallNonKeyword:
         $$ = fun;
     }
     | TIMESTAMPADD '(' TimestampUnit ',' Expr ',' Expr ')' {
-        $$ = nullptr;
+        FuncExpr* fun = FuncExpr::new_ternary_op_node(FT_COMMON, $3, $5, $7, parser->arena);
+        fun->fn_name = $1;
+        $$ = fun;
     }
     | TIMESTAMPDIFF '(' TimestampUnit ',' Expr ',' Expr ')' {
         FuncExpr* fun = FuncExpr::new_ternary_op_node(FT_COMMON, $3, $5, $7, parser->arena);
@@ -2418,6 +2498,34 @@ FunctionCallNonKeyword:
         fun->fn_name = "mod";
         fun->children.push_back($3, parser->arena);
         fun->children.push_back($5, parser->arena);
+        $$ = fun;
+    }
+    | FORMAT '(' Expr ',' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "format";
+        fun->children.push_back($3, parser->arena);
+        fun->children.push_back($5, parser->arena);
+        $$ = fun;
+    }
+    | INSERT '(' Expr ',' Expr ',' Expr ',' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "insert";
+        fun->children.push_back($3, parser->arena);
+        fun->children.push_back($5, parser->arena);
+        fun->children.push_back($7, parser->arena);
+        fun->children.push_back($9, parser->arena);
+        $$ = fun;
+    }
+    | ASCII '(' Expr ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "ascii";
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | CHAR '(' ExprList ')' {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "char";
+        fun->children = $3->children;
         $$ = fun;
     }
     ;
@@ -2692,6 +2800,7 @@ AllIdent:
     | ANY
     | ASCII
     | AUTO_INCREMENT
+    | AUTOEXTEND_SIZE
     | AVG_ROW_LENGTH
     | AVG
     | BEGINX
@@ -2718,6 +2827,7 @@ AllIdent:
     | COMPRESSION
     | CONNECTION
     | CONSISTENT
+    | COPY
     | DAY
     | DATA
     | DATE
@@ -2730,9 +2840,11 @@ AllIdent:
     | DUPLICATE
     | DYNAMIC
     | ENABLE
+    | ENCRYPTION
     | END
     | ENGINE
     | ENGINES
+    | ENGINE_ATTRIBUTE
     | ENUM
     | EVENT
     | EVENTS
@@ -2741,6 +2853,7 @@ AllIdent:
     | EXECUTE
     | FIELDS
     | FIRST
+    | LAST
     | FIXED
     | FILE_T
     | FLUSH
@@ -2753,7 +2866,10 @@ AllIdent:
     | IDENTIFIED
     | ISOLATION
     | INDEXES
+    | INPLACE
+    | INSERT_METHOD
     | INVOKER
+    | INSTANT
     | JSON
     | KEY_BLOCK_SIZE
     | DYNAMIC_PARTITION_ATTR
@@ -2799,13 +2915,13 @@ AllIdent:
     | RELOAD
     | REPEATABLE
     | REPLICATION
-    | REVERSE
     | ROLLBACK
     | ROUTINE
     | ROW
     | ROW_COUNT
     | ROW_FORMAT
     | SECOND
+    | SECONDARY_ENGINE_ATTRIBUTE
     | SECURITY
     | SEPARATOR
     | SERIALIZABLE
@@ -2820,6 +2936,8 @@ AllIdent:
     | SHUTDOWN
     | START
     | STATS_PERSISTENT
+    | STATS_AUTO_RECALC
+    | STATS_SAMPLE_PAGES
     | STATUS
     | SUPER
     | SOME
@@ -3475,8 +3593,10 @@ DefaultValue:
 
 FunctionCallCurTimestamp:
     NOW '(' ')'
+    | NOW '(' NumLiteral ')'
     | FunctionNameCurTimestamp
     | FunctionNameCurTimestamp '(' ')'
+    | FunctionNameCurTimestamp '(' NumLiteral ')'
     ;
 FunctionNameCurTimestamp:
     CURRENT_TIMESTAMP 
@@ -3519,17 +3639,17 @@ ConstraintKeywordOpt:
     ;
 
 ConstraintElem:
-    PRIMARY KEY '(' ColumnNameList ')' IndexOptionList
+    PRIMARY KEY IndexTypeOpt '(' IndexColumnList ')' IndexOptionList
     {
         Constraint* item = new_node(Constraint);
         item->type = CONSTRAINT_PRIMARY;
-        for (int idx = 0; idx < $4->children.size(); ++idx) {
-            item->columns.push_back((ColumnName*)($4->children[idx]), parser->arena);
+        for (int idx = 0; idx < $5->children.size(); ++idx) {
+            item->columns.push_back((ColumnName*)($5->children[idx]), parser->arena);
         }
-        item->index_option = (IndexOption*)$6;
+        item->index_option = (IndexOption*)$7;
         $$ = item;
     }
-    | FULLTEXT KeyOrIndexOpt IndexName '(' ColumnNameList ')' IndexOptionList
+    | FULLTEXT KeyOrIndexOpt IndexName '(' IndexColumnList ')' IndexOptionList
     {
         Constraint* item = new_node(Constraint);
         item->type = CONSTRAINT_FULLTEXT;
@@ -3551,50 +3671,50 @@ ConstraintElem:
         item->index_option = (IndexOption*)$7;
         $$ = item;
     }
-    | KeyOrIndex IndexName '(' ColumnNameList ')' IndexOptionList
+    | KeyOrIndex IndexName IndexTypeOpt '(' IndexColumnList ')' IndexOptionList
     {
         Constraint* item = new_node(Constraint);
         item->type = CONSTRAINT_INDEX;
         item->name = $2;
-        for (int idx = 0; idx < $4->children.size(); ++idx) {
-            item->columns.push_back((ColumnName*)($4->children[idx]), parser->arena);
-        }
-        item->index_option = (IndexOption*)$6;
-        $$ = item;
-    }
-    | UNIQUE KeyOrIndexOpt IndexName '(' ColumnNameList ')' IndexOptionList
-    {
-        Constraint* item = new_node(Constraint);
-        item->type = CONSTRAINT_UNIQ;
-        item->name = $3;
         for (int idx = 0; idx < $5->children.size(); ++idx) {
             item->columns.push_back((ColumnName*)($5->children[idx]), parser->arena);
         }
         item->index_option = (IndexOption*)$7;
         $$ = item;
     }
-    | KeyOrIndex GlobalOrLocal IndexName '(' ColumnNameList ')' IndexOptionList
+    | UNIQUE KeyOrIndexOpt IndexName IndexTypeOpt '(' IndexColumnList ')' IndexOptionList
+    {
+        Constraint* item = new_node(Constraint);
+        item->type = CONSTRAINT_UNIQ;
+        item->name = $3;
+        for (int idx = 0; idx < $6->children.size(); ++idx) {
+            item->columns.push_back((ColumnName*)($6->children[idx]), parser->arena);
+        }
+        item->index_option = (IndexOption*)$8;
+        $$ = item;
+    }
+    | KeyOrIndex GlobalOrLocal IndexName IndexTypeOpt '(' IndexColumnList ')' IndexOptionList
     {
         Constraint* item = new_node(Constraint);
         item->type = CONSTRAINT_INDEX;
         item->index_dist = static_cast<IndexDistibuteType>($2);
         item->name = $3;
-        for (int idx = 0; idx < $5->children.size(); ++idx) {
-            item->columns.push_back((ColumnName*)($5->children[idx]), parser->arena);
+        for (int idx = 0; idx < $6->children.size(); ++idx) {
+            item->columns.push_back((ColumnName*)($6->children[idx]), parser->arena);
         }
-        item->index_option = (IndexOption*)$7;
+        item->index_option = (IndexOption*)$8;
         $$ = item;
     }
-    | UNIQUE KeyOrIndexOpt GlobalOrLocal IndexName '(' ColumnNameList ')' IndexOptionList
+    | UNIQUE KeyOrIndexOpt GlobalOrLocal IndexName IndexTypeOpt '(' IndexColumnList ')' IndexOptionList
     {
         Constraint* item = new_node(Constraint);
         item->type = CONSTRAINT_UNIQ;
         item->index_dist = static_cast<IndexDistibuteType>($3);
         item->name = $4;
-        for (int idx = 0; idx < $6->children.size(); ++idx) {
-            item->columns.push_back((ColumnName*)($6->children[idx]), parser->arena);
+        for (int idx = 0; idx < $7->children.size(); ++idx) {
+            item->columns.push_back((ColumnName*)($7->children[idx]), parser->arena);
         }
-        item->index_option = (IndexOption*)$8;
+        item->index_option = (IndexOption*)$9;
         $$ = item;
     }
     ;
@@ -3640,6 +3760,31 @@ IndexOptionList:
     }
     ;
 
+AlgorighmOpt:
+    ALGORITHM EqOpt AlgorithmVal {
+
+        $$ = nullptr;
+    }
+    ;
+
+IndexLockOpt:
+    LOCK EqOpt IndexLockVal {
+        $$ = nullptr;
+    }
+    ;
+
+DropIndexOpt:
+    {
+        $$ = nullptr;
+    }
+    | AlgorighmOpt {
+        $$ = nullptr;
+    }
+    | IndexLockOpt {
+
+    }
+    ;
+
 IndexOption:
     KEY_BLOCK_SIZE EqOpt INTEGER_LIT {
         $$ = nullptr;
@@ -3652,6 +3797,13 @@ IndexOption:
         op->comment = ((LiteralExpr*)$2)->_u.str_val;
         $$ = op;
     }
+    | AlgorighmOpt {
+
+        $$ = nullptr;
+    }
+    | IndexLockOpt {
+        $$ = nullptr;
+    }
     ;
 
 IndexType:
@@ -3662,6 +3814,14 @@ IndexType:
         $$ = nullptr;
     }
     ;
+
+IndexTypeOpt:
+    {
+        $$ = nullptr;
+    }
+    | IndexType {
+        $$ = nullptr;
+    };
 
 /*************************************Type Begin***************************************/
 Type:
@@ -4067,6 +4227,11 @@ DateAndTimeType:
         // TODO: fractional seconds precision
         FieldType* field_type = new_node(FieldType);
         field_type->type = MYSQL_TYPE_DATETIME;
+        if ($2 >= 1 && $2 <= 6) {
+            field_type->float_len = $2;
+        } else {
+            field_type->float_len = 0;
+        }
         $$ = field_type;
     }
     | TIMESTAMP OptFieldLen
@@ -4254,12 +4419,16 @@ TableOptionList:
     }
     | TableOptionList TableOption
     {
-        $1->children.push_back($2, parser->arena);
+        if ($2 != nullptr) {
+            $1->children.push_back($2, parser->arena);
+        }
         $$ = $1;
     }
     | TableOptionList ','  TableOption
     {
-        $1->children.push_back($3, parser->arena);
+        if ($3 != nullptr) {
+            $1->children.push_back($3, parser->arena);
+        }
         $$ = $1;
     }
     ;
@@ -4325,6 +4494,10 @@ TableOption:
         TableOption* option = (TableOption*)$3;
         option->type = TABLE_OPT_PARTITION;
         $$ = option;
+    }
+    | IgnoreTableOption
+    {
+        $$ = nullptr;
     }
     ;
 
@@ -4428,6 +4601,43 @@ PartitionRangeListOpt:
     {
         $$ = $1;
     }
+    ;
+InsertMethodOpt:
+    NO | FIRST | LAST
+    ;
+
+RowFormatOpt:
+    DEFAULT | DYNAMIC | FIXED | COMPRESSED | REDUNDANT | COMPACT
+    ;
+
+AlgorithmVal:
+    DEFAULT | INSTANT | INPLACE | COPY
+    ;
+
+IndexLockVal:
+    DEFAULT | NONE | SHARED | EXCLUSIVE
+    ;
+
+IgnoreTableOption:
+    ROW_FORMAT EqOpt RowFormatOpt
+    | STATS_PERSISTENT EqOpt NumLiteral
+    | STATS_PERSISTENT EqOpt DEFAULT
+    | STATS_AUTO_RECALC EqOpt NumLiteral
+    | STATS_AUTO_RECALC EqOpt DEFAULT
+    | STATS_SAMPLE_PAGES EqOpt NumLiteral
+    | CHECKSUM EqOpt NumLiteral
+    | MAX_ROWS EqOpt NumLiteral
+    | MIN_ROWS EqOpt NumLiteral
+    | PACK_KEYS EqOpt NumLiteral
+    | PACK_KEYS EqOpt DEFAULT
+    | ENCRYPTION EqOpt STRING_LIT
+    | ENGINE_ATTRIBUTE EqOpt STRING_LIT
+    | SECONDARY_ENGINE_ATTRIBUTE EqOpt STRING_LIT
+    | INSERT_METHOD EqOpt InsertMethodOpt
+    | DELAY_KEY_WRITE EqOpt NumLiteral
+    | CONNECTION EqOpt STRING_LIT
+    | COMPRESSION EqOpt STRING_LIT
+    | AUTOEXTEND_SIZE EqOpt NumLiteral
     ;
 
 TablePartitionOpt:
@@ -4937,32 +5147,14 @@ AlterTableStmt:
         }
         $$ = stmt;
     }
-    | CREATE KeyOrIndex GlobalOrLocalOpt IndexName ON TableName '(' ColumnNameList ')' IndexOptionList
-    {
-        AlterTableStmt* stmt = new_node(AlterTableStmt);
-        stmt->table_name = (TableName*)$6;
-        Constraint* item = new_node(Constraint);
-        item->type = CONSTRAINT_INDEX;
-        item->index_dist = static_cast<IndexDistibuteType>($3);
-        item->name = $4;
-        for (int idx = 0; idx < $8->children.size(); ++idx) {
-            item->columns.push_back((ColumnName*)($8->children[idx]), parser->arena);
-        }
-        item->index_option = (IndexOption*)$10;
-        AlterTableSpec* spec = new_node(AlterTableSpec);
-        spec->spec_type = ALTER_SPEC_ADD_INDEX;
-        spec->new_constraints.push_back((Constraint*)item, parser->arena);
-        stmt->alter_specs.push_back((AlterTableSpec*)spec, parser->arena);
-        $$ = stmt;
-    }
-    | CREATE UNIQUE KeyOrIndexOpt GlobalOrLocalOpt IndexName ON TableName '(' ColumnNameList ')' IndexOptionList
+    | CREATE KeyOrIndex GlobalOrLocalOpt IndexName IndexTypeOpt ON TableName '(' IndexColumnList ')' IndexOptionList
     {
         AlterTableStmt* stmt = new_node(AlterTableStmt);
         stmt->table_name = (TableName*)$7;
         Constraint* item = new_node(Constraint);
-        item->type = CONSTRAINT_UNIQ;
-        item->index_dist = static_cast<IndexDistibuteType>($4);
-        item->name = $5;
+        item->type = CONSTRAINT_INDEX;
+        item->index_dist = static_cast<IndexDistibuteType>($3);
+        item->name = $4;
         for (int idx = 0; idx < $9->children.size(); ++idx) {
             item->columns.push_back((ColumnName*)($9->children[idx]), parser->arena);
         }
@@ -4970,6 +5162,35 @@ AlterTableStmt:
         AlterTableSpec* spec = new_node(AlterTableSpec);
         spec->spec_type = ALTER_SPEC_ADD_INDEX;
         spec->new_constraints.push_back((Constraint*)item, parser->arena);
+        stmt->alter_specs.push_back((AlterTableSpec*)spec, parser->arena);
+        $$ = stmt;
+    }
+    | CREATE UNIQUE KeyOrIndexOpt GlobalOrLocalOpt IndexName IndexTypeOpt ON TableName '(' IndexColumnList ')' IndexOptionList
+    {
+        AlterTableStmt* stmt = new_node(AlterTableStmt);
+        stmt->table_name = (TableName*)$8;
+        Constraint* item = new_node(Constraint);
+        item->type = CONSTRAINT_UNIQ;
+        item->index_dist = static_cast<IndexDistibuteType>($4);
+        item->name = $5;
+        for (int idx = 0; idx < $10->children.size(); ++idx) {
+            item->columns.push_back((ColumnName*)($10->children[idx]), parser->arena);
+        }
+        item->index_option = (IndexOption*)$12;
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_ADD_INDEX;
+        spec->new_constraints.push_back((Constraint*)item, parser->arena);
+        stmt->alter_specs.push_back((AlterTableSpec*)spec, parser->arena);
+        $$ = stmt;
+    }
+    | DROP INDEX IndexName ON TableName ForceOrNot DropIndexOpt
+    {
+        AlterTableStmt* stmt = new_node(AlterTableStmt);
+        stmt->table_name = (TableName*)$5;
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_DROP_INDEX;
+        spec->index_name = $3;
+        spec->force = $6;
         stmt->alter_specs.push_back((AlterTableSpec*)spec, parser->arena);
         $$ = stmt;
     }
@@ -5171,6 +5392,14 @@ AlterSpec:
         for (int idx = 0; idx < $4->children.size(); ++idx) {
             spec->partition_range->options.push_back((PartitionOption*)($4->children[idx]), parser->arena);
         }
+        $$ = spec;
+    }
+    | CHANGE ColumnKwdOpt AllIdent ColumnDef ColumnPosOpt
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_CHANGE_COLUMN;
+        spec->column_name = $3;
+        spec->new_columns.push_back((ColumnDef*)$4, parser->arena);
         $$ = spec;
     }
     ;

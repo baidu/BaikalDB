@@ -23,6 +23,20 @@
 
 namespace baikaldb {
 using namespace range;
+
+int get_field_hit_type_weight(RangeType &ty) {
+    if (ty == EQ || ty == LIKE_EQ) {
+        return 10;
+    }
+    if (ty == IN) {
+        return 9;
+    }
+    if (ty == RANGE || ty == LIKE_PREFIX) {
+        return 5;
+    }
+    return 0;
+}
+
 int IndexSelector::analyze(QueryContext* ctx) {
     ExecNode* root = ctx->root;
     _ctx = ctx;
@@ -156,6 +170,7 @@ void IndexSelector::hit_row_field_range(ExprNode* expr,
     for (auto& pair : slots) {
         field_ids.push_back(pair.second->field_id());
     }
+    RangeType tmp_type;
     switch (expr->node_type()) {
         case pb::FUNCTION_CALL: {
             int32_t fn_op = static_cast<ScalarFnCall*>(expr)->fn().fn_op();
@@ -182,6 +197,10 @@ void IndexSelector::hit_row_field_range(ExprNode* expr,
                     if (field_range_map[field_id].left.size() > 0) {
                         return;
                     }
+                    tmp_type = RANGE;
+                    if (get_field_hit_type_weight(field_range_map[field_id].type) > get_field_hit_type_weight(tmp_type)) {
+                        return;
+                    }
                     for (auto pair : values) {
                         field_range_map[field_id].left.push_back(pair.second[0]);
                     }
@@ -199,6 +218,10 @@ void IndexSelector::hit_row_field_range(ExprNode* expr,
                     }
                     int32_t field_id = slots[0]->field_id();
                     if (field_range_map[field_id].right.size() > 0) {
+                        return;
+                    }
+                    tmp_type = RANGE;
+                    if (get_field_hit_type_weight(field_range_map[field_id].type) > get_field_hit_type_weight(tmp_type)) {
                         return;
                     }
                     for (auto pair : values) {
@@ -425,6 +448,7 @@ void IndexSelector::hit_field_range(ExprNode* expr,
         *index_predicate_is_null = is_index_predicate(expr);
         return;
     }
+    RangeType tmp_type;
     switch (expr->node_type()) {
         case pb::FUNCTION_CALL: {
             int32_t fn_op = static_cast<ScalarFnCall*>(expr)->fn().fn_op();
@@ -436,6 +460,10 @@ void IndexSelector::hit_field_range(ExprNode* expr,
                     return;
                 case parser::FT_GE:
                 case parser::FT_GT:
+                    tmp_type = RANGE;
+                    if (get_field_hit_type_weight(field_range_map[field_id].type) > get_field_hit_type_weight(tmp_type)) {
+                        return;
+                    }
                     if (field_range_map[field_id].left.size() > 0){
                         field_range_map[field_id].left.clear();
                         field_range_map[field_id].left_row_field_ids.clear();
@@ -448,6 +476,10 @@ void IndexSelector::hit_field_range(ExprNode* expr,
                     return;
                 case parser::FT_LE:
                 case parser::FT_LT:
+                    tmp_type = RANGE;
+                    if (get_field_hit_type_weight(field_range_map[field_id].type) > get_field_hit_type_weight(tmp_type)) {
+                        return;
+                    }
                     if(field_range_map[field_id].right.size() > 0){
                         field_range_map[field_id].right.clear();
                         field_range_map[field_id].right_row_field_ids.clear();
@@ -463,10 +495,14 @@ void IndexSelector::hit_field_range(ExprNode* expr,
             }
         }
         case pb::IN_PREDICATE: {
-            if (field_range_map[field_id].type != NONE &&
+            if (field_range_map[field_id].type == IN &&
                 field_range_map[field_id].eq_in_values.size() <= values.size()) {
                 // 1个字段对应多个in preds时 例如: a in ("a1", "a2") and (a, b) in (("a1","b1")),取数量少的pred
                 return;
+            }
+            tmp_type = IN;
+            if (get_field_hit_type_weight(field_range_map[field_id].type) > get_field_hit_type_weight(tmp_type)) {
+                return ;
             }
             field_range_map[field_id].eq_in_values = values;
             field_range_map[field_id].conditions.clear();
@@ -479,6 +515,20 @@ void IndexSelector::hit_field_range(ExprNode* expr,
             return;
         }
         case pb::LIKE_PREDICATE: {
+            bool is_eq = false;
+            bool is_prefix = false;
+            ExprValue prefix_value(pb::STRING);
+            static_cast<LikePredicate*>(expr)->hit_index(&is_eq, &is_prefix, &(prefix_value.str_val));
+            if (is_eq) {
+                tmp_type = LIKE_EQ;
+            } else if (is_prefix) {
+                tmp_type = LIKE_PREFIX;
+            } else {
+                tmp_type = LIKE;
+            }
+            if (get_field_hit_type_weight(field_range_map[field_id].type) > get_field_hit_type_weight(tmp_type)) {
+                return;
+            }
             range::FieldRange fulltext_and_range;
             field_range_map[field_id].like_values.push_back(values[0]);
             fulltext_and_range.like_values.push_back(values[0]);
@@ -488,10 +538,6 @@ void IndexSelector::hit_field_range(ExprNode* expr,
             }
             field_range_map[field_id].conditions.insert(expr);
             fulltext_and_range.conditions.insert(expr);
-            bool is_eq = false;
-            bool is_prefix = false;
-            ExprValue prefix_value(pb::STRING);
-            static_cast<LikePredicate*>(expr)->hit_index(&is_eq, &is_prefix, &(prefix_value.str_val));
             if (is_eq) {
                 field_range_map[field_id].eq_in_values.push_back(prefix_value);
                 fulltext_and_range.eq_in_values.push_back(prefix_value);
