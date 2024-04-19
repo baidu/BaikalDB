@@ -54,11 +54,11 @@ std::string datetime_to_str(uint64_t datetime, int precision_len) {
     snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d.%06d",
             year, month, day, hour, minute, second, macrosec);
     if (precision_len > 0 and precision_len <=6) {
-        buf[20 + precision_len] = 0;
+        buf[20 + precision_len] = '\0';
     } else if (precision_len == 0) {
-        buf[19] = 0;
+        buf[19] = '\0';
     } else {
-        buf[26] = 0;
+        buf[26] = '\0';
     }
     return std::string(buf);
 }

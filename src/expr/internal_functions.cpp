@@ -938,6 +938,11 @@ ExprValue period_add(const std::vector<ExprValue>& input) {
     if (input.size() != 2) {
         return ExprValue::Null();
     }
+    for (auto s: input) {
+        if (s.is_null()) {
+            return ExprValue::Null();
+        }
+    }
     ExprValue tmp = input[0];
     tmp.cast_to(pb::INT64);
     int year = tmp._u.int64_val / 100;
@@ -957,6 +962,11 @@ ExprValue period_add(const std::vector<ExprValue>& input) {
 ExprValue period_diff(const std::vector<ExprValue>& input) {
     if (input.size() != 2) {
         return ExprValue::Null();
+    }
+    for (auto s: input) {
+        if (s.is_null()) {
+            return ExprValue::Null();
+        }
     }
     ExprValue dt1 = input[0];
     dt1.cast_to(pb::INT64);
