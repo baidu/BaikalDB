@@ -506,7 +506,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
     return ++affected_rows;
 }
 
-int DMLNode::get_lock_row(RuntimeState* state, SmartRecord record, std::string* pk_str, MemRow* row) {
+int DMLNode::get_lock_row(RuntimeState* state, SmartRecord record, std::string* pk_str, MemRow* row, int64_t& ttl_ts) {
     int ret = 0;
     MutTableKey pk_key;
     ret = record->encode_key(*_pri_info, pk_key, -1, false);
@@ -522,7 +522,7 @@ int DMLNode::get_lock_row(RuntimeState* state, SmartRecord record, std::string* 
         record->decode_key(*_pri_info, *pk_str);
     }
     //delete requires all fields (index and non-index fields)
-    ret = _txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_LOCK, true);
+    ret = _txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_LOCK, true, ttl_ts);
     if (ret < 0) {
         return ret;
     }
@@ -637,7 +637,8 @@ int DMLNode::remove_row(RuntimeState* state, SmartRecord record,
 int DMLNode::delete_row(RuntimeState* state, SmartRecord record, MemRow* row) {
     int ret = 0;
     std::string pk_str;
-    ret = get_lock_row(state, record, &pk_str, row);
+    int64_t ttl_ts = 0;
+    ret = get_lock_row(state, record, &pk_str, row, ttl_ts);
     if (ret == -3) {
         //DB_WARNING_STATE(state, "key not in this region:%ld", _region_id);
         return 0;
@@ -673,7 +674,8 @@ bool DMLNode::satisfy_condition_again(RuntimeState* state, MemRow* row) {
 int DMLNode::update_row(RuntimeState* state, SmartRecord record, MemRow* row) {
     int ret = 0;
     std::string pk_str;
-    ret = get_lock_row(state, record, &pk_str, row);
+    int64_t ttl_ts = 0;
+    ret = get_lock_row(state, record, &pk_str, row, ttl_ts);
     if (ret == -3) {
         //DB_WARNING_STATE(state, "key not in this region:%ld", _region_id);
         return 0;
@@ -688,6 +690,13 @@ int DMLNode::update_row(RuntimeState* state, SmartRecord record, MemRow* row) {
         DB_WARNING_STATE(state, "condition changed when update record:%s", record->debug_string().c_str());
         // UndoGetForUpdate(pk_str)? 同一个txn GetForUpdate与UndoGetForUpdate之间不要写pk_str
         return 0;
+    }
+    // _row_ttl_duration == -1 代表保持原ttl意思
+    // TODO: 全局索引 keep ttl功能
+    if (_row_ttl_duration == -1 && _ttl_timestamp_us > 0 && ttl_ts > 0) {
+        _ttl_timestamp_us = ttl_ts;
+        _txn->set_write_ttl_timestamp_us(_ttl_timestamp_us);
+        DB_DEBUG("keep ttl_timestamp_us: %ld", _ttl_timestamp_us);
     }
     _indexes_ptr = &_affected_indexes;
     // 影响了主键需要删除旧的行
