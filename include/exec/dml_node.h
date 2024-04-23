@@ -28,7 +28,7 @@ public:
     virtual void find_place_holder(std::unordered_multimap<int, ExprNode*>& placeholders);
     int insert_row(RuntimeState* state, SmartRecord record, bool is_update = false);
     int delete_row(RuntimeState* state, SmartRecord record, MemRow* row);
-    int get_lock_row(RuntimeState* state, SmartRecord record, std::string* pk_str, MemRow* row);
+    int get_lock_row(RuntimeState* state, SmartRecord record, std::string* pk_str, MemRow* row, int64_t& ttl_ts);
     int remove_row(RuntimeState* state, SmartRecord record, 
             const std::string& pk_str, bool delete_primary = true);
     int update_row(RuntimeState* state, SmartRecord record, MemRow* row);
