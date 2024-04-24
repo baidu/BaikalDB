@@ -446,6 +446,10 @@ int PacketNode::open(RuntimeState* state) {
     }
     _send_buf = state->send_buf();
     int ret = 0;
+    if (state->explain_type == EXPLAIN_SHOW_COST) {
+        handle_show_cost(state);
+        return 0;
+    }
     if (!_return_empty || op_type() == pb::OP_SELECT) {
         ret = ExecNode::open(state);
         if (ret < 0) {
@@ -482,10 +486,6 @@ int PacketNode::open(RuntimeState* state) {
         if (state->is_full_export) {
             state->set_eos();
         }
-        return 0;
-    }
-    if (state->explain_type == EXPLAIN_SHOW_COST) {
-        handle_show_cost(state);
         return 0;
     }
     state->set_num_affected_rows(ret);
