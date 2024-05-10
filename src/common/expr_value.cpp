@@ -63,7 +63,13 @@ SerializeStatus ExprValue::serialize_to_mysql_text_packet(char* buf, size_t size
         case pb::FLOAT: {
             size_t body_len = 0;
             char tmp_buf[100] = {0};
-            body_len = snprintf(tmp_buf, sizeof(tmp_buf), "%.6g", _u.float_val);
+            if (float_precision_len == -1) {
+                body_len = snprintf(tmp_buf, sizeof(tmp_buf), "%.6g", _u.float_val);
+            } else {
+                std::string format= "%." + std::to_string(float_precision_len) + "f";
+                body_len = snprintf(tmp_buf, sizeof(tmp_buf), format.c_str(), _u.float_val);
+            }
+
             len = body_len + 1;
             if (len > size) {
                 return STMPS_NEED_RESIZE;
@@ -76,7 +82,12 @@ SerializeStatus ExprValue::serialize_to_mysql_text_packet(char* buf, size_t size
         case pb::DOUBLE: {
             size_t body_len = 0;
             char tmp_buf[100] = {0};
-            body_len = snprintf(tmp_buf, sizeof(tmp_buf), "%.12g", _u.double_val);
+            if (float_precision_len == -1) {
+                body_len = snprintf(tmp_buf, sizeof(tmp_buf), "%.12g", _u.double_val);
+            } else {
+                std::string format= "%." + std::to_string(float_precision_len) + "lf";
+                body_len = snprintf(tmp_buf, sizeof(tmp_buf), format.c_str(), _u.double_val);
+            }
             len = body_len + 1;
             if (len > size) {
                 return STMPS_NEED_RESIZE;

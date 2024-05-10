@@ -247,6 +247,12 @@ public:
     void set_col_flag(uint32_t col_flag) {
         _col_flag = col_flag;
     }
+    void set_float_precision_len(int32_t float_precision_len) {
+        _float_precision_len = float_precision_len;
+    }
+    int32_t float_precision_len() {
+        return _float_precision_len;
+    }
 
     void flatten_or_expr(std::vector<ExprNode*>* or_exprs) {
         if (node_type() != pb::OR_PREDICATE) {
@@ -297,6 +303,7 @@ protected:
     bool    _replace_agg_to_slot = true;
     int32_t _tuple_id = -1;
     int32_t _slot_id = -1;
+    int32_t _float_precision_len = -1;
     bool is_logical_and_or_not();
 public:
     static int create_expr_node(const pb::ExprNode& node, ExprNode** expr_node);

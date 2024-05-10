@@ -610,12 +610,19 @@ struct ExprValue {
                 return std::to_string(_u.uint64_val);
             case pb::FLOAT: {
                 std::ostringstream oss;
+                if (float_precision_len != -1) {
+                    oss << std::fixed << std::setprecision(float_precision_len);
+                }
                 oss << _u.float_val;
                 return oss.str();
             }
             case pb::DOUBLE: {
                 std::ostringstream oss;
-                oss << std::setprecision(15) << _u.double_val;
+                if (float_precision_len != -1) {
+                    oss << std::fixed << std::setprecision(float_precision_len) << _u.double_val;
+                } else {
+                    oss << std::setprecision(15) << _u.double_val;
+                }
                 return oss.str();
             }
             case pb::STRING:
