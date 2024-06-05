@@ -362,8 +362,8 @@ message UserPrivilege {
     optional bool use_read_index                             = 15; // 读是否走folloewr read use read idx
     optional bool enable_plan_cache                          = 16; // 是否缓存执行计划
     optional RangePartitionType request_range_partition_type = 17; // 访问的Range分区类型
-    optional uint32 acl                                      = 18; //权限控制列表,bitmap
-    optional bool  if_exist                                  = 19;
+    optional uint32 acl                                      = 20; //权限控制列表,bitmap
+    optional bool  if_exist                                  = 21;
 };
 
 //集群信息
