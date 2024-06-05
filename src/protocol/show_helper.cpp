@@ -4611,7 +4611,7 @@ bool ShowHelper::_show_grants(const SmartSocket& client, const std::vector<std::
             std::string with_grant = "";
             std::string priv_str = get_priv_str(user_privilege.acl(), parser::GLOBAL_ACLS, with_grant);
             char msg[1024];
-            snprintf(msg, sizeof(msg), "GRANT %s ON '%s'@'%' TO %s%s",
+            snprintf(msg, sizeof(msg), "GRANT %s ON '%s'@'%%' TO %s%s",
                      priv_str.c_str(), priv_level.c_str(), username.c_str(), with_grant.c_str());
             row.emplace_back(msg);
             rows.emplace_back(row);
@@ -4623,7 +4623,7 @@ bool ShowHelper::_show_grants(const SmartSocket& client, const std::vector<std::
                 std::string with_grant = "";
                 std::string priv_str = get_priv_str(db.acl(), parser::DB_ACLS, with_grant);
                 char msg[1024];
-                snprintf(msg, sizeof(msg), "GRANT %s ON '%s'@'%' TO %s%s",
+                snprintf(msg, sizeof(msg), "GRANT %s ON '%s'@'%%' TO %s%s",
                          priv_str.c_str(), priv_level.c_str(), username.c_str(), with_grant.c_str());
                 row.emplace_back(msg);
                 rows.emplace_back(row);
@@ -4636,7 +4636,7 @@ bool ShowHelper::_show_grants(const SmartSocket& client, const std::vector<std::
                 std::string with_grant = "";
                 std::string priv_str = get_priv_str(table.acl(), parser::TABLE_ACLS, with_grant);
                 char msg[1024];
-                snprintf(msg, sizeof(msg), "GRANT %s ON '%s'@'%' TO %s%s",
+                snprintf(msg, sizeof(msg), "GRANT %s ON '%s'@'%%' TO %s%s",
                          priv_str.c_str(), priv_level.c_str(), username.c_str(), with_grant.c_str());
                 row.emplace_back(msg);
                 rows.emplace_back(row);
