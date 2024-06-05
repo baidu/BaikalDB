@@ -1368,7 +1368,7 @@ void SchemaFactory::update_show_db(const DataBaseVec& db_infos) {
     BAIDU_SCOPED_LOCK(_update_show_db_mutex);
     _show_db_info.clear();
     for (auto db_info : db_infos) {
-        DB_WARNING("update_show_db: %s.%s", db_info.namespace_name().c_str(), db_info.database().c_str())
+        DB_WARNING("update_show_db: %s.%s", db_info.namespace_name().c_str(), db_info.database().c_str());
         if (db_info.namespace_name() == "INTERNAL" && db_info.database() == "baikaldb") {
             //忽略INTERNAL.baikaldb
             continue;

@@ -160,7 +160,7 @@ message StoreReq {
     optional uint64      sql_sign       = 28; // sql 签名
     repeated RegionInfo multi_new_region_infos = 29;
     optional ExtraReq   extra_req       = 30; // 非关键路径上的额外信息可以放在这里，避免该message过度膨胀
-    optional int64    sql_exec_timeout  = 31;
+    optional int64    sql_exec_timeout  = 33;
 };
 
 message RowValue {
@@ -236,7 +236,7 @@ message StoreRes {
     repeated int64 ttl_timestamp = 24;
     optional ExtraRes extra_res  = 25; // 非关键路径上的额外信息可以放在这里，避免该message过度膨胀
     optional BinlogQueryInfo binlog_info     = 26; //存放binlog信息
-    optional int64  read_disk_size =  27;
+    optional int64  read_disk_size =  28;
 };
 message InitRegion {
     required RegionInfo region_info     = 1;

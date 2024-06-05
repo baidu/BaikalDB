@@ -145,4 +145,7 @@ enum OpType {
     OP_SPECIFY_SPLIT_KEYS                   = 199; // 指定RangePartition分区的预分裂Key
     OP_CONVERT_PARTITION                    = 200;
     OP_MODIFY_USER                          = 201; //改user
+    OP_CREATE_VIEW                          = 202; // 新建视图
+    OP_DROP_VIEW                            = 203; // 删除视图
+    OP_DROP_INVALID_PRIVILEGE               = 204; // 删除不存在的数据库/表的权限
 };

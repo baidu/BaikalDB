@@ -2646,7 +2646,7 @@ ExprValue hex(const std::vector<ExprValue>& input) {
         res.str_val = ss.str();
     } else {
         num.cast_to(pb::STRING);
-        char * c = (char *)malloc(2 * num.str_val.size() + 1);
+        char* c = new char[2 * num.str_val.size() + 1];
         int idx = 0;
         for (char ch : num.str_val) {
             sprintf(c + idx, "%02X", static_cast<uint8_t>(ch));
@@ -2654,7 +2654,7 @@ ExprValue hex(const std::vector<ExprValue>& input) {
         }
         c[2 * num.str_val.size()] = 0;
         res.str_val = c;
-        delete c;
+        delete[] c;
     }
     std::transform(res.str_val.begin(), res.str_val.end(), res.str_val.begin(), ::toupper);
     return res;
