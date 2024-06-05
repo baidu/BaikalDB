@@ -55,7 +55,7 @@ std::string datetime_to_str(uint64_t datetime, int precision_len) {
             year, month, day, hour, minute, second, macrosec);
     if (precision_len > 0 and precision_len <=6) {
         buf[20 + precision_len] = '\0';
-    } else if (precision_len == 0) {
+    } else if (precision_len == 0 || macrosec == 0/*兼容以前*/) {
         buf[19] = '\0';
     } else {
         buf[26] = '\0';
