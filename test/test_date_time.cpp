@@ -84,11 +84,11 @@ TEST(test_datetime_str, case_all) {
     EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19:")), "2017-12-03 19:00:00");
     EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19")), "2017-12-03 19:00:00");
     EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19:28:44.000")), "2017-12-03 19:28:44");
-    EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19:28:44.1234567")), "2017-12-03 19:28:44.123456");
-    EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19:28:44.123")), "2017-12-03 19:28:44.123000");
+    EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19:28:44.1234567"), -1), "2017-12-03 19:28:44.123456");
+    EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19:28:44.123"), -1), "2017-12-03 19:28:44.123000");
 
-    EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19:28:44.000123")), "2017-12-03 19:28:44.000123");
-    EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19:28:44.000123456")), "2017-12-03 19:28:44.000123");
+    EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19:28:44.000123"), -1), "2017-12-03 19:28:44.000123");
+    EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19:28:44.000123456"), -1), "2017-12-03 19:28:44.000123");
 
     EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 192:28:44")), "2017-12-03 19:00:00");
     EXPECT_EQ(datetime_to_str(str_to_datetime("2017-12-03 19:284:44")), "2017-12-03 19:28:00");
@@ -100,8 +100,8 @@ TEST(test_datetime_str_other, case_all) {
     EXPECT_EQ(datetime_to_str(str_to_datetime("89-12-03 19:28:44")), "1989-12-03 19:28:44");
     EXPECT_EQ(datetime_to_str(str_to_datetime("891203")), "1989-12-03 00:00:00");
     EXPECT_EQ(datetime_to_str(str_to_datetime("19891203")), "1989-12-03 00:00:00");
-    EXPECT_EQ(datetime_to_str(str_to_datetime("891203192844.111")), "1989-12-03 19:28:44.111000");
-    EXPECT_EQ(datetime_to_str(str_to_datetime("19891203192844.111")), "1989-12-03 19:28:44.111000");
+    EXPECT_EQ(datetime_to_str(str_to_datetime("891203192844.111"), -1), "1989-12-03 19:28:44.111000");
+    EXPECT_EQ(datetime_to_str(str_to_datetime("19891203192844.111"), -1), "1989-12-03 19:28:44.111000");
     std::cout << "tm:" << str_to_datetime("20111303") << std::endl;
     std::cout << "tm2:" << str_to_datetime("0000-00-00 00:00:00") << std::endl;
     std::cout << "tm3:" << datetime_to_timestamp(0) << std::endl;

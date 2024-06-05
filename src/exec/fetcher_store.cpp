@@ -370,7 +370,9 @@ void OnRPCDone::select_addr() {
             FetcherStore::choose_opt_instance(_info.region_id(), _info.peers(), _addr, addr_status, nullptr);
         }
         _request.set_select_without_leader(true);
-    } else if (_op_type == pb::OP_SELECT && _state->txn_id == 0 && _client_conn->query_ctx->peer_index != -1) {
+    } else if (_op_type == pb::OP_SELECT && _state->txn_id == 0 
+            && _client_conn != nullptr
+            && _client_conn->query_ctx->peer_index != -1) {
         int64_t peer_index = _client_conn->query_ctx->peer_index;
         std::vector<std::string> sorted_peers; // leader first
         sorted_peers.emplace_back(_info.leader());

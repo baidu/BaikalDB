@@ -426,9 +426,7 @@ inline std::string to_mysql_type_full_string(pb::PrimitiveType type,
         case pb::STRING:
             return "varchar(1024)";
         case pb::DATETIME:
-            if (float_precision_len == -1) {
-               return "datetime(6)";
-            } else if (float_precision_len > 0 && float_precision_len <= 6) {
+            if (float_precision_len > 0 && float_precision_len <= 6) {
                return "datetime(" + std::to_string(float_precision_len) + ")";
             }
             return "datetime";
