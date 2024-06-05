@@ -313,6 +313,18 @@ inline bool is_binary(uint32_t flag) {
     }
 }
 
+inline bool is_precision(pb::PrimitiveType type) {
+    switch (type) {
+        case pb::FLOAT:
+        case pb::DOUBLE:
+        case pb::DATETIME:
+            return true;
+        default:
+            return false;
+    }
+}
+
+
 inline uint8_t to_mysql_type(pb::PrimitiveType type) {
     switch (type) {
         case pb::BOOL:

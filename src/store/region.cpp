@@ -3258,9 +3258,9 @@ void Region::do_apply(int64_t term, int64_t index, const pb::StoreReq& request, 
                 if (res.has_scan_rows()) {
                     ((DMLClosure*)done)->response->set_scan_rows(res.scan_rows());
                 }
-		if (res.has_read_disk_size()) {
+                if (res.has_read_disk_size()) {
                     ((DMLClosure*)done)->response->set_read_disk_size(res.read_disk_size());
-	        }
+                }
                 if (res.has_filter_rows()) {
                     ((DMLClosure*)done)->response->set_filter_rows(res.filter_rows());
                 }

@@ -459,6 +459,20 @@ int PacketNode::open(RuntimeState* state) {
             DB_WARNING("Expr::open fail:%d", ret);
             return ret;
         }
+        // 设置返回精度
+        if (expr->is_slot_ref() && is_precision(expr->col_type())) {
+            SlotRef* slot_ref = static_cast<SlotRef*>(expr);
+            int64_t table_id = state->get_tuple_desc(slot_ref->tuple_id())->table_id();
+            auto table_info = SchemaFactory::get_instance()->get_table_info_ptr(table_id);
+            if (table_info == nullptr) {
+                continue;
+            }
+            auto field_info = table_info->get_field_ptr(slot_ref->field_id());
+            if (field_info == nullptr) {
+                continue;
+            }
+            slot_ref->set_float_precision_len(field_info->float_precision_len);
+        }
     }
     if (state->is_expr_subquery()) {
         return fatch_expr_subquery_results(state);
