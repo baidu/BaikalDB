@@ -136,46 +136,13 @@ int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& field
         left_primary_field_cnt = std::max(0, (range.left_field_cnt - col_cnt));
         right_primary_field_cnt = std::max(0, (range.right_field_cnt - col_cnt));
     }
-    if (range.left) {
-        int ret = range.left->encode_key(*_index_info, _start, left_secondary_field_cnt, false, like_prefix);
-        if (-2 == ret) {
-            DB_WARNING("left key has null fields: %ld", index_id);
-            _valid = false;
-            return 0;
-        } else if (0 != ret) {
-            DB_FATAL("Fail to encode_key, table: %ld", index_id);
-            return -1;
-        }
-        if (_idx_type == pb::I_KEY && left_primary_field_cnt > 0) {
-            if (0 != range.left->encode_primary_key(*_index_info, _start, left_primary_field_cnt)) {
-                DB_FATAL("Fail to append_index, reg:%ld, tab:%ld", _region, _index_info->pk);
-                return -1;
-            }
-        }
-    } else if (range.left_key.size() > 0) {
+    if (range.left_key.size() > 0) {
         _start.append_index(range.left_key);
     } else {
         //没有指定left bound时，forward遍历从seek region+table开始，backward遍历到左边界停止
         _left_open = false;
     }
-
-    if (range.right) {
-        int ret = range.right->encode_key(*_index_info, _end, right_secondary_field_cnt, false, like_prefix);
-        if (-2 == ret) {
-            DB_WARNING("right key has null fields: %ld", index_id);
-            _valid = false;
-            return 0;
-        } else if (0 != ret) {
-            DB_FATAL("Fail to encode_key, table: %ld", index_id);
-            return -1;
-        }
-        if (_idx_type == pb::I_KEY && right_primary_field_cnt > 0) {
-            if (0 != range.right->encode_primary_key(*_index_info, _end, right_primary_field_cnt)) {
-                DB_FATAL("Fail to append_index, reg:%ld, tab:%ld", _region, _index_info->pk);
-                return -1;
-            }
-        }
-    } else if (range.right_key.size() > 0) {
+    if (range.right_key.size() > 0) {
         _end.append_index(range.right_key);
     } else {
         _right_open = false;

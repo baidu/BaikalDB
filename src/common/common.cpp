@@ -321,6 +321,7 @@ void stripslashes(std::string& str, bool is_gbk) {
     size_t fast = 0;
     bool has_slash = false;
     static std::unordered_map<char, char> trans_map = {
+        {'0', '\x00'},
         {'\\', '\\'},
         {'\"', '\"'},
         {'\'', '\''},
@@ -461,6 +462,7 @@ int primitive_to_proto_type(pb::PrimitiveType type) {
         { pb::BOOL,         FieldDescriptorProto::TYPE_BOOL},
         { pb::BITMAP,       FieldDescriptorProto::TYPE_BYTES},
         { pb::TDIGEST,      FieldDescriptorProto::TYPE_BYTES},
+        { pb::JSON,         FieldDescriptorProto::TYPE_BYTES},
         { pb::NULL_TYPE,    FieldDescriptorProto::TYPE_BOOL}
     };
     if (_mysql_pb_type_mapping.count(type) == 0) {

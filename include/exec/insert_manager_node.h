@@ -143,7 +143,7 @@ public:
     }
 
 private:
-    void update_record(const SmartRecord& record, const SmartRecord& origin_record);
+    void update_record(const SmartRecord& record, const SmartRecord& origin_record, RuntimeState* state = nullptr);
     int64_t     _table_id = -1;
     int32_t     _tuple_id = -1;
     int32_t     _values_tuple_id = -1;

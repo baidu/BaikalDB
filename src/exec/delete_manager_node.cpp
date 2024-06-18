@@ -16,6 +16,7 @@
 #include "network_socket.h"
 #include "query_context.h"
 #include "binlog_context.h"
+#include "filter_node.h"
 
 namespace baikaldb {
 int DeleteManagerNode::open(RuntimeState* state) {
@@ -69,6 +70,27 @@ int DeleteManagerNode::open_global_delete(RuntimeState* state) {
         DB_WARNING("select manager node fail");
         return ret;
     }
+    ExprNode* last_value_expr = nullptr; // not own it
+    FilterNode* where_filter_node = static_cast<FilterNode*>(
+            select_manager_or_limit_node->get_node(pb::WHERE_FILTER_NODE));
+    if (where_filter_node != nullptr) {
+        last_value_expr = where_filter_node->get_last_value();
+    }
+    FilterNode* table_filter_node = static_cast<FilterNode*>(
+            select_manager_or_limit_node->get_node(pb::TABLE_FILTER_NODE));
+    if (table_filter_node != nullptr) {
+        last_value_expr = table_filter_node->get_last_value();
+    }
+    if (last_value_expr != nullptr) {
+        ret = last_value_expr->open();
+        ON_SCOPE_EXIT(([last_value_expr]() {
+            last_value_expr->close();
+        }));
+        if (ret < 0) {
+            DB_WARNING("expr open fail, log_id:%lu ret:%d", state->log_id(), ret);
+            return ret;
+        }
+    }
     _tuple_id = state->tuple_descs()[0].tuple_id();
     SmartRecord record_template = SchemaFactory::get_instance()->new_record(*_table_info);
     bool eos = false;
@@ -86,6 +108,9 @@ int DeleteManagerNode::open_global_delete(RuntimeState* state) {
             //将mem_table的值填到table_record中
             for (auto slot : _primary_slots) {
                 record->set_value(record->get_field_by_tag(slot.field_id()),  row->get_value(_tuple_id, slot.slot_id()));
+            }
+            if (last_value_expr != nullptr) {
+                state->client_conn()->last_value += redis_encode(last_value_expr->get_value(row).get_string());
             }
             scan_records.push_back(record);
         }

@@ -28,7 +28,7 @@ public:
     virtual void find_place_holder(std::unordered_multimap<int, ExprNode*>& placeholders);
     int insert_row(RuntimeState* state, SmartRecord record, bool is_update = false);
     int delete_row(RuntimeState* state, SmartRecord record, MemRow* row);
-    int get_lock_row(RuntimeState* state, SmartRecord record, std::string* pk_str, MemRow* row);
+    int get_lock_row(RuntimeState* state, SmartRecord record, std::string* pk_str, MemRow* row, int64_t& ttl_ts);
     int remove_row(RuntimeState* state, SmartRecord record, 
             const std::string& pk_str, bool delete_primary = true);
     int update_row(RuntimeState* state, SmartRecord record, MemRow* row);
@@ -81,6 +81,7 @@ public:
         return _table_info;
     }
 
+
 protected:
     int init_schema_info(RuntimeState* state);
     void add_delete_conditon_fields();
@@ -128,6 +129,7 @@ protected:
     int64_t _ttl_timestamp_us = 0; //ttl写入时间，0表示无ttl
     bool  _ddl_need_write = false;
     int64_t  _ddl_index_id = -1;
+    ExprNode* _last_value_expr = nullptr; // not own it
 };
 }
 

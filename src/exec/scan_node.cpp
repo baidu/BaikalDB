@@ -15,7 +15,6 @@
 #include <map>
 #include <cfloat>
 #include "scan_node.h"
-#include "filter_node.h"
 #include "join_node.h"
 #include "schema_factory.h"
 #include "scalar_fn_call.h"
@@ -87,6 +86,7 @@ int64_t AccessPathMgr::select_index_common() {
             prefix_ratio_index_score = 0;
         }
         prefix_ratio_id_mapping.insert(std::make_pair(prefix_ratio_index_score, index_id));
+        path->prefix_ratio_index_score = prefix_ratio_index_score;
         //DB_NOTICE("index_id:%ld prefix_ratio_index_score:%u", index_id,prefix_ratio_index_score);
         // 优先选倒排或向量，没有就取第一个
         switch (info.type) {
@@ -180,7 +180,18 @@ void ScanNode::show_explain(std::vector<std::map<std::string, std::string>>& out
             explain_info["partitions"] = pt;
         }
     }
-    if (!has_index() && _scan_indexs.empty()) {
+    if (_merge_index_infos.size() > 0) {
+        explain_info["type"] = "index_merge";
+        explain_info["key"] = "";
+        for (auto& merge_index_info : _merge_index_infos) {
+            int64_t index_id = merge_index_info._select_idx;
+            explain_info["key"] += factory->get_index_info(index_id).short_name;
+            explain_info["key"] += ",";
+        }
+        if (!explain_info["key"].empty()) {
+            explain_info["key"].pop_back();
+        }
+    } else if (!has_index() && _scan_indexs.empty()) {
         explain_info["type"] = "ALL";
     } else {
         explain_info["possible_keys"] = "";
@@ -204,9 +215,9 @@ void ScanNode::show_explain(std::vector<std::map<std::string, std::string>>& out
         explain_info["type"] = "range";
         auto& pos_index = _main_path.path(index_id)->pos_index;
         if (pos_index.ranges_size() == 1) {
-            int field_cnt = pos_index.ranges(0).left_field_cnt();
+            int field_cnt = pos_index.has_left_field_cnt() ? pos_index.left_field_cnt() : pos_index.ranges(0).left_field_cnt();
             if (field_cnt == (int)index_info.fields.size() && 
-                    pos_index.ranges(0).left_pb_record() == pos_index.ranges(0).right_pb_record()) {
+                    pos_index.ranges(0).left_key() == pos_index.ranges(0).right_key()) {
                 explain_info["type"] = "eq_ref";
                 if (index_info.type == pb::I_UNIQ || index_info.type == pb::I_PRIMARY) {
                     explain_info["type"] = "const";
@@ -624,15 +635,15 @@ int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {
             std::vector<ExprNode*> learner_condition;
             learner_condition.insert(learner_condition.end(), learner_path->other_condition.begin(),
                     learner_path->other_condition.end());
-            if (get_parent()->node_type() == pb::TABLE_FILTER_NODE ||
-                get_parent()->node_type() == pb::WHERE_FILTER_NODE) {
+            if (get_parent() != nullptr && (get_parent()->node_type() == pb::TABLE_FILTER_NODE ||
+                get_parent()->node_type() == pb::WHERE_FILTER_NODE)) {
                 static_cast<FilterNode*>(get_parent())->modifiy_pruned_conjuncts_by_index_learner(learner_condition);
             }
         }
     }
     // modify filter conjuncts
-    if (get_parent()->node_type() == pb::TABLE_FILTER_NODE ||
-        get_parent()->node_type() == pb::WHERE_FILTER_NODE) {
+    if (get_parent() != nullptr && (get_parent()->node_type() == pb::TABLE_FILTER_NODE ||
+        get_parent()->node_type() == pb::WHERE_FILTER_NODE)) {
         static_cast<FilterNode*>(get_parent())->modifiy_pruned_conjuncts_by_index(filter_condition);
     }
     _select_idx = select_idx;
@@ -794,6 +805,48 @@ int ScanNode::create_fulltext_index_tree() {
         }
     }
     return 0;
+}
+bool ScanNode::need_index_merge() {
+    if (backup_scan_index() != nullptr) {
+        return false;
+    }
+    if (_main_path.use_fulltext_or_vector() || _main_path.use_cost()) {
+        return false;
+    }
+
+    if (get_parent()->node_type() == pb::TABLE_FILTER_NODE ||
+        get_parent()->node_type() == pb::WHERE_FILTER_NODE) {
+        _filter_node = static_cast<FilterNode*>(get_parent());
+    } else {
+        return false;
+    }
+
+    auto path = select_path();
+    std::vector<ExprNode*> conditions;
+    conditions.insert(conditions.end(), path->other_condition.begin(), path->other_condition.end());
+    conditions.insert(conditions.end(), path->index_other_condition.begin(), path->index_other_condition.end());
+    if (conditions.empty()) {
+        return false;
+    }
+    _or_conjunct = nullptr;
+    for (auto conjunct : conditions) {
+        if (conjunct->node_type() == pb::OR_PREDICATE && _or_conjunct == nullptr) {
+            _or_conjunct = conjunct;
+        }
+    }
+    if (_or_conjunct == nullptr) {
+        return false;
+    }
+
+    _conjuncts_without_or.clear();
+    for (auto conjunct : _filter_node->conjuncts()) {
+        if (_or_conjunct != conjunct) {
+            _conjuncts_without_or.push_back(conjunct);
+        }
+    }
+    _or_sub_conjuncts.clear();
+    _or_conjunct->flatten_or_expr(&_or_sub_conjuncts);
+    return true;
 }
 }
 

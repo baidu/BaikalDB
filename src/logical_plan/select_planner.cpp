@@ -96,6 +96,10 @@ int SelectPlanner::plan() {
         return -1;
     }
 
+    if (0 != minmax_remove()) {
+        return -1;
+    }
+
     if (_ctx->is_base_subscribe) {
         if (0 != get_base_subscribe_scan_ref_slot()) {
             return -1;
@@ -342,6 +346,65 @@ void SelectPlanner::get_slot_column_mapping() {
     }    
 }
 
+int SelectPlanner::minmax_remove() {
+    if (!_distinct_agg_funcs.empty() || ! _group_exprs.empty()) {
+        return 0;
+    }
+    if (_select_exprs.size() != 1 || _select_exprs[0].nodes(0).node_type() != pb::AGG_EXPR) {
+        return 0;
+    }
+    if (_group_slots.size() != 0 || _order_exprs.size() != 0 || _group_exprs.size() != 0) {
+        return 0;
+    }
+    pb::Expr select_expr = _select_exprs[0];
+    if (select_expr.nodes_size() != 2) {
+        return 0;
+    }
+    if (select_expr.nodes(0).node_type() != pb::AGG_EXPR) {
+        return 0;
+    }
+    std::string fn_name = select_expr.nodes(0).fn().name();
+    if (fn_name != "max" && fn_name != "min") {
+        return 0;
+    }
+    pb::ExprNode slot = select_expr.nodes(1);
+    if (slot.node_type() != pb::SLOT_REF) {
+        return 0;
+    }
+    _select_exprs.clear();
+    _group_exprs.clear();
+    _agg_funcs.clear();
+    pb::Expr new_select;
+    new_select.set_database(select_expr.database());
+    new_select.set_table(select_expr.table());
+    auto add_node = new_select.add_nodes();
+    *add_node = slot;
+    _select_exprs.push_back(new_select);
+    pb::Expr order_expr;
+    order_expr.set_database(select_expr.database());
+    order_expr.set_table(select_expr.table());
+    add_node = order_expr.add_nodes();
+    *add_node = slot;
+    _order_exprs.push_back(order_expr);
+    if (fn_name == "max") {
+        _order_ascs.push_back(false);
+    } else {
+        _order_ascs.push_back(true);
+    }
+    _ctx->get_runtime_state()->must_have_one = true;
+    _limit_offset.clear_nodes();
+    auto offset = _limit_offset.add_nodes();
+    offset->mutable_derive_node()->set_int_val(0);
+    offset->set_node_type(pb::INT_LITERAL);
+    offset->set_col_type(pb::INT64);
+    _limit_count.clear_nodes();
+    auto limit = _limit_count.add_nodes();
+    limit->mutable_derive_node()->set_int_val(1);
+    limit->set_node_type(pb::INT_LITERAL);
+    limit->set_col_type(pb::INT64);
+    return 0;
+}
+
 int SelectPlanner::subquery_rewrite() {
     if (!_ctx->expr_params.is_expr_subquery) {
         return 0;
@@ -427,7 +490,8 @@ void SelectPlanner::create_dual_scan_node() {
 }
 
 int SelectPlanner::create_limit_node() {
-    if (_select->limit == nullptr) {
+//    if (_select->limit == nullptr && 
+    if (_limit_offset.nodes_size() == 0) {
         return 0;
     }
     pb::PlanNode* limit_node = _ctx->add_plan_node();
@@ -454,29 +518,15 @@ int SelectPlanner::create_limit_node() {
 int SelectPlanner::create_agg_node() {
     if (_select->select_opt != nullptr && _select->select_opt->distinct == true) {
         // select distinct ()xxx, xxx from xx.xx (no group by)
-        if (!_agg_funcs.empty() || !_distinct_agg_funcs.empty() || !_group_exprs.empty()) {
-            DB_WARNING("distinct query doesnot support group by");
-            return -1;
+        // distinct转group by
+        if (_group_exprs.empty()) {
+            for (uint32_t idx = 0; idx < _select_exprs.size(); ++idx) {
+                //非agg func的列加到group exprs中
+                if (_select_exprs[idx].nodes(0).node_type() != pb::AGG_EXPR) {
+                    _group_exprs.push_back(_select_exprs[idx]);
+                }
+            }
         }
-        pb::PlanNode* agg_node = _ctx->add_plan_node();
-        agg_node->set_node_type(pb::AGG_NODE);
-        agg_node->set_limit(-1);
-        agg_node->set_is_explain(_ctx->is_explain);
-        agg_node->set_num_children(1); //TODO 
-        pb::DerivePlanNode* derive = agg_node->mutable_derive_node();
-        pb::AggNode* agg = derive->mutable_agg_node();
-
-        for (uint32_t idx = 0; idx < _select_exprs.size(); ++idx) {
-            pb::Expr* expr = agg->add_group_exprs();
-            expr->CopyFrom(_select_exprs[idx]);
-//            if (_select_exprs[idx].nodes_size() != 1) {
-//                DB_WARNING("invalid distinct expr");
-//                return -1;
-//            }
-//            expr->add_nodes()->CopyFrom(_select_exprs[idx].nodes(0));
-        }
-        agg->set_agg_tuple_id(-1);
-        return 0;
     }
     if (_agg_funcs.empty() && _distinct_agg_funcs.empty() && _group_exprs.empty()) {
         return 0;

@@ -65,6 +65,7 @@ enum PrimitiveType {
     BITMAP = 21;
     TDIGEST = 22;
     MAXVALUE_TYPE = 23;
+    JSON = 24;
 };
 
 enum SchemaType {

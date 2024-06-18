@@ -435,6 +435,7 @@ public:
     ExplainType       explain_type = EXPLAIN_NULL;
     std::shared_ptr<CMsketch> cmsketch = nullptr;
     int64_t          last_insert_id = INT64_MIN; //存储baikalStore last_insert_id(expr)更新的字段
+    std::string      last_value = "";
     pb::StoreRes*    response = nullptr;
 
     bool             need_statistics = true; // 用于动态超时的时间统计，如果请求的实例非NORMAL或着返回backup的结果，则不记入统计
@@ -458,6 +459,7 @@ public:
     int                 range_count_limit = 0;
     int64_t           _sql_exec_timeout = -1;
     bool              _is_ddl_work = false;
+    bool              must_have_one = false;
 private:
     bool _is_inited    = false;
     bool _is_cancelled = false;

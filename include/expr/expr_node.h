@@ -100,12 +100,72 @@ public:
     }
     virtual ExprNode* get_last_insert_id() {
         for (auto c : _children) {
-            if (c->get_last_insert_id() != nullptr) {
+            auto expr = c->get_last_insert_id();
+            if (expr != nullptr) {
                 return c;
             }
         }
         return nullptr;
     }
+    virtual ExprNode* get_last_value() {
+        for (auto c : _children) {
+            auto expr = c->get_last_value();
+            if (expr != nullptr) {
+                return expr;
+            }
+        }
+        return nullptr;
+    }
+    virtual bool is_valid_int_cast(MemRow* row) {
+        if (_node_type == pb::SLOT_REF ||
+            _node_type == pb::STRING_LITERAL) {
+            auto v = get_value(row);
+            if (v.type == pb::STRING) {
+                char* end = nullptr;
+                strtoll(v.str_val.c_str(), &end, 10);
+                if (strlen(end) > 0) {
+                    return false;
+                }
+                if (errno == ERANGE) {
+                    errno = 0;
+                    return false;
+                }
+            }
+            return true;
+        }
+        for (auto c : _children) {
+            if (!c->is_valid_int_cast(row)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    virtual bool is_valid_double_cast(MemRow* row) {
+        if (_node_type == pb::SLOT_REF ||
+            _node_type == pb::STRING_LITERAL) {
+            auto v = get_value(row);
+            if (v.type == pb::STRING) {
+                char* end = nullptr;
+                strtod(v.str_val.c_str(), &end);
+                if (strlen(end) > 0) {
+                    return false;
+                }
+                if (errno == ERANGE) {
+                    errno = 0;
+                    return false;
+                }
+            }
+            return true;
+        }
+        for (auto c : _children) {
+            if (!c->is_valid_double_cast(row)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     bool is_row_expr() {
         return _node_type == pb::ROW_EXPR;
     }
@@ -134,6 +194,7 @@ public:
 
     // optimize or node to in node
     static void  or_node_optimize(ExprNode** expr_node);
+    static void like_node_optimize(ExprNode** root, std::vector<ExprNode*>& new_exprs);
     bool has_same_children();
     bool is_vaild_or_optimize_tree(int32_t level, std::unordered_set<int32_t>* tuple_set);
     static int change_or_node_to_in(ExprNode** expr_node);
@@ -261,6 +322,15 @@ public:
         }
         for (auto c : _children) {
             c->flatten_or_expr(or_exprs);
+        }
+    }
+    void flatten_and_expr(std::vector<ExprNode*>* and_exprs) {
+        if (node_type() != pb::AND_PREDICATE) {
+            and_exprs->push_back(this);
+            return;
+        }
+        for (auto c : _children) {
+            c->flatten_and_expr(and_exprs);
         }
     }
     virtual void transfer_pb(pb::ExprNode* pb_node);
