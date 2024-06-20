@@ -2944,10 +2944,18 @@ int LogicalPlanner::create_scan_nodes() {
 }
 
 void LogicalPlanner::set_dml_txn_state(int64_t table_id) {
-    if (_ctx->is_prepared || _ctx->is_explain) {
+    if (_ctx->is_explain) {
         return;
     }
     auto client = _ctx->client_conn;
+    //is_gloabl_ddl 打开时，该连接处理全局二级索引增量数据，不需要处理binlog。
+    if (_factory->has_open_binlog(table_id) && !client->is_index_ddl) {
+        client->open_binlog = true;
+        _ctx->open_binlog = true;
+    }
+    if (_ctx->is_prepared) {
+        return;
+    }
     if (client->txn_id == 0) {
         DB_DEBUG("enable_2pc %d global index %d, binlog %d", 
             _ctx->enable_2pc, _factory->has_global_index(table_id), _factory->has_open_binlog(table_id));
@@ -2957,11 +2965,6 @@ void LogicalPlanner::set_dml_txn_state(int64_t table_id) {
             client->on_begin();
             DB_DEBUG("get txn %ld", client->txn_id);
             client->seq_id = 0;
-            //is_gloabl_ddl 打开时，该连接处理全局二级索引增量数据，不需要处理binlog。
-            if (!_ctx->no_binlog && _factory->has_open_binlog(table_id) && !client->is_index_ddl) {
-                client->open_binlog = true;
-                _ctx->open_binlog = true;
-            }
         } else {
             client->txn_id = 0;
             client->seq_id = 0;
@@ -2969,10 +2972,6 @@ void LogicalPlanner::set_dml_txn_state(int64_t table_id) {
         //DB_WARNING("DEBUG client->txn_id:%ld client->seq_id: %d", client->txn_id, client->seq_id);
         _ctx->get_runtime_state()->set_single_sql_autocommit(true);
     } else {
-        if (!_ctx->no_binlog && _factory->has_open_binlog(table_id) && !client->is_index_ddl) {
-            client->open_binlog = true;
-            _ctx->open_binlog = true;
-        }
         //DB_WARNING("DEBUG client->txn_id:%ld client->seq_id: %d", client->txn_id, client->seq_id);
         _ctx->get_runtime_state()->set_single_sql_autocommit(false);
     }
