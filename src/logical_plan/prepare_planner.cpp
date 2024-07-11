@@ -245,7 +245,9 @@ int PreparePlanner::stmt_execute(const std::string& stmt_name, std::vector<pb::E
     if (!prepare_ctx->is_select) {
         // TODO dml的plan复用
         // enable_2pc=true or table has global index need generate txn_id
-        set_dml_txn_state(prepare_ctx->prepared_table_id);
+        if (!prepare_ctx->is_select && prepare_ctx->prepared_table_id != -1) {
+            set_dml_txn_state(prepare_ctx->prepared_table_id);
+        }
         _ctx->plan.CopyFrom(prepare_ctx->plan);
         int ret = set_dml_local_index_binlog(prepare_ctx->prepared_table_id);
         if (ret < 0) {
