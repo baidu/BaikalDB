@@ -683,7 +683,8 @@ int FilterNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
             state->memory_limit_release(state->num_scan_rows(), row->used_size());
         }
         if (reached_limit()) {
-            DB_WARNING_STATE(state, "reach limit size:%lu", batch->size());
+            // DB_WARNING_STATE(state, "reach limit size:%lu", batch->size());
+            DB_DEBUG("reach limit size:%lu, logid: %lu", batch->size(), state->log_id());
             *eos = true;
             return 0;
         }
