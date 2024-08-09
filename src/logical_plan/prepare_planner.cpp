@@ -236,6 +236,22 @@ int PreparePlanner::stmt_execute(const std::string& stmt_name, std::vector<pb::E
     }
 
     std::shared_ptr<QueryContext> prepare_ctx = iter->second;
+    prepare_ctx->get_runtime_state()->prepare_reset();
+    _ctx->stat_info.family = prepare_ctx->stat_info.family;
+    _ctx->stat_info.table = prepare_ctx->stat_info.table;
+    _ctx->stat_info.sample_sql << prepare_ctx->stat_info.sample_sql.str();
+    _ctx->stat_info.sign = prepare_ctx->stat_info.sign;
+    _ctx->is_full_export = prepare_ctx->is_full_export;
+    _ctx->debug_region_id = prepare_ctx->debug_region_id;
+    _ctx->execute_global_flow = prepare_ctx->execute_global_flow;
+    if (params.size() != prepare_ctx->placeholders.size()) {
+        _ctx->stat_info.error_code = ER_WRONG_ARGUMENTS;
+        _ctx->stat_info.error_msg << "Incorrect arguments to EXECUTE: " 
+                                  << params.size() << ", " 
+                                  << prepare_ctx->placeholders.size();
+        return -1;
+    }
+    auto& tuple_descs = prepare_ctx->tuple_descs();
     // ttl沿用prepare的注释
     DB_DEBUG("row_ttl_duration %ld", prepare_ctx->row_ttl_duration);
     _ctx->row_ttl_duration = prepare_ctx->row_ttl_duration;
