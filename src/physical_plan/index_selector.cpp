@@ -171,6 +171,8 @@ void IndexSelector::hit_row_field_range(ExprNode* expr,
         field_ids.push_back(pair.second->field_id());
     }
     RangeType tmp_type;
+    int old_weight;
+    int cur_weight;
     switch (expr->node_type()) {
         case pb::FUNCTION_CALL: {
             int32_t fn_op = static_cast<ScalarFnCall*>(expr)->fn().fn_op();
@@ -201,6 +203,9 @@ void IndexSelector::hit_row_field_range(ExprNode* expr,
                     if (get_field_hit_type_weight(field_range_map[field_id].type) > get_field_hit_type_weight(tmp_type)) {
                         return;
                     }
+                    if (tmp_type != field_range_map[field_id].type) {
+                        field_range_map[field_id] = FieldRange();
+                    }
                     for (auto pair : values) {
                         field_range_map[field_id].left.push_back(pair.second[0]);
                     }
@@ -223,6 +228,9 @@ void IndexSelector::hit_row_field_range(ExprNode* expr,
                     tmp_type = RANGE;
                     if (get_field_hit_type_weight(field_range_map[field_id].type) > get_field_hit_type_weight(tmp_type)) {
                         return;
+                    }
+                    if (tmp_type != field_range_map[field_id].type) {
+                        field_range_map[field_id] = FieldRange();
                     }
                     for (auto pair : values) {
                         field_range_map[field_id].right.push_back(pair.second[0]);
@@ -454,6 +462,11 @@ void IndexSelector::hit_field_range(ExprNode* expr,
             int32_t fn_op = static_cast<ScalarFnCall*>(expr)->fn().fn_op();
             switch (fn_op) {
                 case parser::FT_EQ:
+                    tmp_type = EQ;
+                    if (get_field_hit_type_weight(field_range_map[field_id].type) > get_field_hit_type_weight(tmp_type)) {
+                        return;
+                    } 
+                    field_range_map[field_id] = FieldRange();
                     field_range_map[field_id].eq_in_values = values;
                     field_range_map[field_id].conditions.insert(expr);
                     field_range_map[field_id].type = EQ;
@@ -463,6 +476,9 @@ void IndexSelector::hit_field_range(ExprNode* expr,
                     tmp_type = RANGE;
                     if (get_field_hit_type_weight(field_range_map[field_id].type) > get_field_hit_type_weight(tmp_type)) {
                         return;
+                    } 
+                    if (tmp_type != field_range_map[field_id].type) {
+                        field_range_map[field_id] = FieldRange();
                     }
                     if (field_range_map[field_id].left.size() > 0){
                         field_range_map[field_id].left.clear();
@@ -479,6 +495,9 @@ void IndexSelector::hit_field_range(ExprNode* expr,
                     tmp_type = RANGE;
                     if (get_field_hit_type_weight(field_range_map[field_id].type) > get_field_hit_type_weight(tmp_type)) {
                         return;
+                    } 
+                    if (tmp_type != field_range_map[field_id].type) {
+                        field_range_map[field_id] = FieldRange();
                     }
                     if(field_range_map[field_id].right.size() > 0){
                         field_range_map[field_id].right.clear();
@@ -504,6 +523,7 @@ void IndexSelector::hit_field_range(ExprNode* expr,
             if (get_field_hit_type_weight(field_range_map[field_id].type) > get_field_hit_type_weight(tmp_type)) {
                 return ;
             }
+            field_range_map[field_id] = FieldRange();
             field_range_map[field_id].eq_in_values = values;
             field_range_map[field_id].conditions.clear();
             field_range_map[field_id].conditions.insert(expr);
@@ -529,6 +549,7 @@ void IndexSelector::hit_field_range(ExprNode* expr,
             if (get_field_hit_type_weight(field_range_map[field_id].type) > get_field_hit_type_weight(tmp_type)) {
                 return;
             }
+            field_range_map[field_id] = FieldRange();
             range::FieldRange fulltext_and_range;
             field_range_map[field_id].like_values.push_back(values[0]);
             fulltext_and_range.like_values.push_back(values[0]);
