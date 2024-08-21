@@ -81,15 +81,7 @@ public:
 
     ~UserInfo() {}
 
-    bool is_exceed_quota() {
-        if (query_cost.get_time() > 1000000) {
-            query_cost.reset();
-            query_count = 0;
-            return false;
-        }
-        return query_count++ > query_quota;
-    }
-
+    bool is_exceed_quota();
     bool connection_inc() {
         bool res = false;
         std::lock_guard<std::mutex> guard(conn_mutex);
