@@ -821,6 +821,9 @@ int Separate::separate_update(QueryContext* ctx) {
     if (ret < 0) {
         return -1;
     }
+    if (ctx->row_ttl_duration > 0) {
+        _row_ttl_duration = ctx->row_ttl_duration;
+    }
     int64_t main_table_id = update_node->table_id();
     if (!need_separate_plan(ctx, main_table_id)) {
         auto region_infos = static_cast<RocksdbScanNode*>(scan_nodes[0])->region_infos();
