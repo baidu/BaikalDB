@@ -168,7 +168,7 @@ int AggNode::open(RuntimeState* state) {
         ExecNode* packet = get_parent_node(pb::PACKET_NODE);
         // baikaldb才有packet_node;只在baikaldb上产生数据
         // TODB:join和子查询后续如果要完全推到store运行得注意
-        if (packet != nullptr) {
+        if (packet != nullptr || _is_merger) {
             std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
             uint8_t null_flag = 0;
             MutTableKey key;
