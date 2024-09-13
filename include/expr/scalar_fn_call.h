@@ -40,6 +40,54 @@ public:
         }
         return ExprNode::get_last_insert_id();
     }
+    ExprNode* get_last_value() {
+        if (_fn.name() == "last_value") {
+            return this;
+        }
+        return ExprNode::get_last_value();
+    }
+    virtual bool is_valid_int_cast(MemRow* row) {
+        if (_fn.fn_op() == parser::FT_ADD || _fn.fn_op() == parser::FT_MINUS) {
+            if (_children.size() != 2 || !_children[0]->is_valid_int_cast(row) || !_children[1]->is_valid_int_cast(row)) {
+                return false;
+            }
+            auto left = children(0)->get_value(row).cast_to(pb::INT64)._u.int64_val;
+            auto right = children(1)->get_value(row).cast_to(pb::INT64)._u.int64_val;
+            auto s = get_value(row).cast_to(pb::INT64)._u.int64_val;
+            if (_fn.fn_op() == parser::FT_MINUS) {
+                right = -right;
+            }
+            if (left >= 0 && right >= 0 && s < 0) {
+                return false; // 上溢
+            }
+            if (left < 0 && right < 0 && s >= 0) {
+                return false; // 下溢
+            }
+            return true;
+        }
+        return ExprNode::is_valid_int_cast(row);
+    }
+    virtual bool is_valid_double_cast(MemRow* row) {
+        if (_fn.fn_op() == parser::FT_ADD || _fn.fn_op() == parser::FT_MINUS) {
+            if (_children.size() != 2 || !_children[0]->is_valid_double_cast(row) || !_children[1]->is_valid_double_cast(row)) {
+                return false;
+            }
+            auto left = children(0)->get_value(row).cast_to(pb::DOUBLE)._u.double_val;
+            auto right = children(1)->get_value(row).cast_to(pb::DOUBLE)._u.double_val;
+            auto s = get_value(row).cast_to(pb::DOUBLE)._u.double_val;
+            if (_fn.fn_op() == parser::FT_MINUS) {
+                right = -right;
+            }
+            if (left >= 0 && right >= 0 && s < 0) {
+                return false; // 上溢
+            }
+            if (left < 0 && right < 0 && s >= 0) {
+                return false; // 下溢
+            }
+            return true;
+        }
+        return ExprNode::is_valid_int_cast(row);
+    }
 private:
     ExprValue multi_eq_value(MemRow* row) {
         for (size_t i = 0; i < children(0)->children_size(); i++) {

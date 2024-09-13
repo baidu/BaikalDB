@@ -20,17 +20,28 @@
 
 namespace baikaldb {
 int JoinReorder::analyze(QueryContext* ctx) {
-    JoinNode* join = static_cast<JoinNode*>(ctx->root->get_node(pb::JOIN_NODE));
+    return reorder(ctx, ctx->root);
+}
+int JoinReorder::reorder(QueryContext* ctx, ExecNode* exec_node) {
+    JoinNode* join = static_cast<JoinNode*>(exec_node->get_node(pb::JOIN_NODE));
     if (join == nullptr) {
         return 0;
     }
+    int ret = 0;
     std::map<int32_t, ExecNode*> tuple_join_child_map;  // join的所有非join孩子
     std::map<int32_t, std::set<int32_t>> tuple_equals_map; // 等值条件信息
     std::vector<int32_t> tuple_order; // 目前join顺序
     std::vector<ExprNode*> conditions; // join的全部条件,reorder需要重新下推
     // 获取所有信息
     if (!join->need_reorder(tuple_join_child_map, tuple_equals_map, tuple_order, conditions)) {
-        return 0;
+        if (join->children_size() == 2) {
+            ret = reorder(ctx, join->children(0));
+            if (ret != 0) {
+                return ret;
+            }
+            ret = reorder(ctx, join->children(1));
+        }
+        return ret;
     }
     ScanNode* first_node = static_cast<ScanNode*>(
             tuple_join_child_map[tuple_order[0]]->get_node(pb::SCAN_NODE));

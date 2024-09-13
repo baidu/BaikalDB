@@ -198,18 +198,12 @@ std::unique_ptr<ScanNode> DDLWorkPlanner::create_scan_node() {
     _pos_index.Clear();
     _pos_index.set_index_id(_table_id);
     auto range_index = _pos_index.add_ranges();
+    _pos_index.set_left_field_cnt(_field_num);
+    _pos_index.set_left_open(true);
     if (_start_key != "") {
         range_index->set_left_key(_start_key);
         range_index->set_left_full(_ddl_pk_key_is_full);
-        range_index->set_left_field_cnt(_field_num);
-        range_index->set_left_open(true);
     }
-    // 暂时用不上
-    // if (_end_key != "") {
-    //     range_index->set_right_pb_record(_end_key);
-    //     range_index->set_right_field_cnt(_field_num);
-    //     range_index->set_right_open(true);
-    // }
     if (!_is_global_index) {
         if (_is_column_ddl) {
             pb_scan_node->set_ddl_work_type(pb::DDL_COLUMN);

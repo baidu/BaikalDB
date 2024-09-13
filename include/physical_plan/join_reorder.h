@@ -20,6 +20,7 @@ namespace baikaldb {
 class JoinReorder {
 public:
     int analyze(QueryContext* ctx);
+    int reorder(QueryContext* ctx, ExecNode* node);
 };
 }
 

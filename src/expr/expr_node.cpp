@@ -341,6 +341,93 @@ void ExprNode::or_node_optimize(ExprNode** root) {
     return;
 }
 
+void ExprNode::like_node_optimize(ExprNode** root, std::vector<ExprNode*>& new_exprs) {
+    if (*root == nullptr) {
+        return;
+    }
+    if ((*root)->node_type() != pb::LIKE_PREDICATE) {
+        return;
+    }
+    auto expr = *root;
+    SlotRef* slot = (SlotRef*)expr->children(0);
+    if (slot->col_type() != pb::STRING) {
+        return;
+    }
+    if (expr->children(1)->is_constant()) {
+        expr->children(1)->open();
+    } else {
+        return;
+    }
+    bool is_eq = false;
+    bool is_prefix = false;
+    ExprValue prefix_value(pb::STRING);
+    static_cast<LikePredicate*>(expr)->hit_index(&is_eq, &is_prefix, &(prefix_value.str_val));
+    std::string old_val = expr->children(1)->get_value(nullptr).get_string();
+    if (!is_prefix || old_val.length() > prefix_value.str_val.length() + 1) {
+        return;
+    }
+    if (is_eq) {
+        ScalarFnCall * eqexpr = new ScalarFnCall();
+        SlotRef *sloteq = slot->clone();
+        Literal *eqval = new Literal(prefix_value);
+        pb::ExprNode node;
+        node.set_node_type(pb::FUNCTION_CALL);
+        node.set_col_type(pb::BOOL);
+        pb::Function* func = node.mutable_fn();
+        func->set_name("eq_string_string");
+        func->set_fn_op(parser::FT_EQ);
+        eqexpr->init(node);
+        eqexpr->set_is_constant(false);
+        eqexpr->add_child(sloteq);
+        eqexpr->add_child(eqval);
+        *root = eqexpr;
+        ExprNode::destroy_tree(expr);
+        return ;
+    } else if (is_prefix) {
+        ScalarFnCall *geexpr = new ScalarFnCall();
+        SlotRef *slotge = slot->clone();
+        Literal *geval = new Literal(prefix_value);
+        pb::ExprNode node;
+        node.set_node_type(pb::FUNCTION_CALL);
+        node.set_col_type(pb::BOOL);
+        pb::Function* func = node.mutable_fn();
+        func->set_name("ge_string_string");
+        func->set_fn_op(parser::FT_GE);
+        geexpr->init(node);
+        geexpr->set_is_constant(false);
+        geexpr->add_child(slotge);
+        geexpr->add_child(geval);
+        *root = geexpr;
+
+        ScalarFnCall *ltexpr = new ScalarFnCall();
+        SlotRef* ltslot = slot->clone();
+        ExprValue end_val = prefix_value;
+        int i = end_val.str_val.length() - 1;
+        for (; i >= 0; i --) {
+            uint8_t c = end_val.str_val[i];
+            if (c == 255) {
+                continue;
+            }
+            end_val.str_val[i] = char(c + 1);
+            break;
+        }
+        end_val.str_val = end_val.str_val.substr(0, i + 1);
+        Literal *ltval = new Literal(end_val);
+        pb::ExprNode ltnode;
+        ltnode.set_node_type(pb::FUNCTION_CALL);
+        ltnode.set_col_type(pb::BOOL);
+        func = ltnode.mutable_fn();
+        func->set_name("lt_string_string");
+        func->set_fn_op(parser::FT_LT);
+        ltexpr->init(ltnode);
+        ltexpr->set_is_constant(false);
+        ltexpr->add_child(ltslot);
+        ltexpr->add_child(ltval);
+        new_exprs.push_back(ltexpr);
+        ExprNode::destroy_tree(expr);
+    }      
+}
+
 int ExprNode::create_expr_node(const pb::ExprNode& node, ExprNode** expr_node) {
     switch (node.node_type()) {
         case pb::SLOT_REF:

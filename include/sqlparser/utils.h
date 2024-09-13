@@ -88,6 +88,7 @@ struct String {
         size_t fast = 0;
         bool has_slash = false;
         static std::unordered_map<char, char> trans_map = {
+            {'0', '\x00'},
             {'\\', '\\'},
             {'\"', '\"'},
             {'\'', '\''},
@@ -96,7 +97,6 @@ struct String {
             {'n', '\n'},
             {'b', '\b'},
             {'Z', '\x1A'},
-            {'0', '\0'},
         };
         while (fast < length) {
             if (has_slash) {

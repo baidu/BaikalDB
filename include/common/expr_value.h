@@ -167,6 +167,7 @@ struct ExprValue {
             case pb::HLL:
             case pb::HEX:
             case pb::TDIGEST:
+            case pb::JSON:
                 str_val = value.string_val();
                 break;
             case pb::BITMAP: {
@@ -190,6 +191,7 @@ struct ExprValue {
         float_precision_len = -1;
         str_val = value_str;
         if (primitive_type == pb::STRING 
+            || primitive_type == pb::JSON
             || primitive_type == pb::HEX 
             || primitive_type == pb::BITMAP 
             || primitive_type == pb::HLL 
@@ -323,6 +325,7 @@ struct ExprValue {
             case pb::STRING:
             case pb::HEX:
             case pb::BITMAP:
+            case pb::JSON:
             case pb::TDIGEST:
                 value->set_string_val(str_val);
                 break;
@@ -422,6 +425,7 @@ struct ExprValue {
             case pb::STRING:
             case pb::HEX:
             case pb::HLL:
+            case pb::JSON:
             case pb::TDIGEST:
                 return str_val.length();
             case pb::DATETIME:
@@ -522,6 +526,9 @@ struct ExprValue {
             case pb::STRING:
                 str_val = get_string();
                 break;
+            case pb::JSON:
+                str_val = get_string();
+                break;
             case pb::BITMAP: {
                 _u.bitmap = new(std::nothrow) Roaring();
                 if (str_val.size() > 0) {
@@ -576,6 +583,7 @@ struct ExprValue {
                 butil::MurmurHash3_x64_128(&_u, 8, seed, out);
                 return out[0];
             case pb::STRING: 
+            case pb::JSON:
             case pb::HEX: {
                 butil::MurmurHash3_x64_128(str_val.c_str(), str_val.size(), seed, out);
                 return out[0];
@@ -627,6 +635,7 @@ struct ExprValue {
             }
             case pb::STRING:
             case pb::HEX:
+            case pb::JSON:
             case pb::HLL:
             case pb::TDIGEST:
                 return str_val;
@@ -741,6 +750,7 @@ struct ExprValue {
                     (_u.double_val < other._u.double_val ? -1 : 0);
             case pb::STRING:
             case pb::HEX:
+            case pb::JSON:
                 return str_val.compare(other.str_val);
             case pb::NULL_TYPE:
                 return -1;
@@ -795,7 +805,7 @@ struct ExprValue {
     }
 
     bool is_string() const {
-        return type == pb::STRING || type == pb::HEX || type == pb::BITMAP || type == pb::HLL || type == pb::TDIGEST;
+        return type == pb::STRING || type == pb::HEX || type == pb::BITMAP || type == pb::HLL || type == pb::TDIGEST || type == pb::JSON;
     }
 
     bool is_double() const {
@@ -869,15 +879,16 @@ struct ExprValue {
     // 默认不带us
     static ExprValue Now(int32_t precision = 0) {
         ExprValue tmp(pb::TIMESTAMP);
-        tmp._u.uint32_val = time(NULL);
-        tmp.cast_to(pb::DATETIME);
-
         if (precision > 0 and precision <= 6) {
             timeval tv;
             gettimeofday(&tv, NULL);
+            tmp._u.uint32_val = tv.tv_sec;
+            tmp.cast_to(pb::DATETIME);
             tmp._u.uint64_val |= tv.tv_usec;
             tmp.set_precision_len(precision);
         } else {
+            tmp._u.uint32_val = time(NULL);
+            tmp.cast_to(pb::DATETIME);
             tmp.set_precision_len(0);
         }
         return tmp;
@@ -902,14 +913,16 @@ struct ExprValue {
         long offset = timeinfo.tm_gmtoff;
 
         ExprValue tmp(pb::TIMESTAMP);
-        tmp._u.uint32_val = time(NULL) - offset;
-        tmp.cast_to(pb::DATETIME);
-        timeval tv;
-        gettimeofday(&tv, NULL);
-        tmp._u.uint64_val |= tv.tv_usec;
         if (precision >=0 && precision <= 6) {
+            timeval tv;
+            gettimeofday(&tv, NULL);
+            tmp._u.uint32_val = tv.tv_sec - offset;
+            tmp.cast_to(pb::DATETIME);
+            tmp._u.uint64_val |= tv.tv_usec;
             tmp.set_precision_len(precision);
         } else {
+            tmp._u.uint32_val = time(NULL) - offset;
+            tmp.cast_to(pb::DATETIME);
             tmp.set_precision_len(0);
         }
         return tmp;
@@ -934,7 +947,7 @@ struct ExprValue {
 
     struct HashFunction {
         size_t operator()(const ExprValue& ev) const {
-            if (ev.type == pb::STRING || ev.type == pb::HEX) {
+            if (ev.type == pb::STRING || ev.type == pb::HEX || ev.type == pb::JSON) {
                 return ev.hash();
             }
             return ev._u.uint64_val;

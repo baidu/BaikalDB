@@ -64,6 +64,7 @@ private:
     std::vector<int64_t>     _affected_index_ids;
     std::vector<ExprNode*> _conjuncts;
     bool _conjuncts_need_destory = false;
+    ExprNode* _last_value_expr = nullptr; // not own it
 };
 
 }

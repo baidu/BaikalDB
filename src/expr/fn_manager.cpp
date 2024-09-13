@@ -124,6 +124,7 @@ void FunctionManager::register_operators() {
     register_object_ret("least", least, pb::DOUBLE);
     register_object_ret("ceil", ceil, pb::INT64);
     register_object_ret("ceiling", ceil, pb::INT64);
+    register_object_ret("bit_count", bit_count, pb::INT64);
 
     // str funcs
     register_object_ret("length", length, pb::INT64);
@@ -154,6 +155,11 @@ void FunctionManager::register_operators() {
     register_object_ret("rpad", rpad, pb::STRING);
     register_object_ret("instr", instr, pb::INT32);
     register_object_ret("json_extract", json_extract, pb::STRING);
+    register_object_ret("json_extract1", json_extract1, pb::STRING);
+    register_object_ret("json_type", json_type, pb::STRING);
+    register_object_ret("json_array", json_array, pb::STRING);
+    register_object_ret("json_object", json_object, pb::STRING);
+    register_object_ret("json_valid", json_valid, pb::BOOL);
     register_object_ret("export_set", export_set, pb::STRING);
     register_object_ret("to_base64", to_base64, pb::STRING);
     register_object_ret("from_base64", from_base64, pb::STRING);
@@ -170,7 +176,7 @@ void FunctionManager::register_operators() {
     register_object_ret("quote", quote, pb::STRING);
     register_object_ret("char", func_char, pb::STRING);
     register_object_ret("soundex", soundex, pb::STRING);
-
+    register_object_ret("setrange", setrange, pb::STRING);
 
     // date funcs
     register_object_ret("unix_timestamp", unix_timestamp, pb::INT64);
@@ -231,6 +237,8 @@ void FunctionManager::register_operators() {
     register_object_ret("timestamp_to_tso", timestamp_to_tso, pb::INT64);
     register_object_ret("to_days", to_days, pb::INT64);
     register_object_ret("to_seconds", to_seconds, pb::INT64);
+    register_object_ret("timeseq", timeseq, pb::INT64);
+    register_object_ret("timeseq_to_str", timeseq_to_str, pb::STRING);
     // hll funcs
     register_object_ret("hll_add", hll_add, pb::HLL);
     register_object_ret("hll_merge", hll_merge, pb::HLL);
@@ -287,6 +295,7 @@ void FunctionManager::register_operators() {
 
     register_object_ret("version", version, pb::STRING);
     register_object_ret("last_insert_id", last_insert_id, pb::INT64);
+    register_object_ret("last_value", last_value, pb::STRING);
     //
     register_object_ret("point_distance", point_distance, pb::INT64);
     register_object_ret("cast_to_date", cast_to_date, pb::DATE);
@@ -296,6 +305,16 @@ void FunctionManager::register_operators() {
     register_object_ret("cast_to_signed", cast_to_signed, pb::INT64);
     register_object_ret("cast_to_unsigned", cast_to_unsigned, pb::INT64);
     register_object_ret("cast_to_double", cast_to_double, pb::DOUBLE);
+
+    // redis bitmap funcs
+    register_object_ret("bset", bset, pb::STRING);
+    register_object_ret("band", band, pb::STRING);
+    register_object_ret("bor",  bor, pb::STRING);
+    register_object_ret("bxor", bxor, pb::STRING);
+    register_object_ret("bnot", bnot, pb::STRING);
+    register_object_ret("bget", bget, pb::INT64);
+    register_object_ret("bpos", bpos, pb::INT64);
+    register_object_ret("bcount", bcount, pb::INT64);
 }
 
 int FunctionManager::init() {

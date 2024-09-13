@@ -92,7 +92,8 @@ bool AccessPath::check_sort_use_index(Property& sort_property) {
     std::vector<ExprNode*>& order_exprs = sort_property.slot_order_exprs;
     SlotRef* slot_ref = static_cast<SlotRef*>(order_exprs[0]);
     size_t idx = 0;
-    auto& fields = index_info_ptr->fields;
+    std::vector<FieldInfo>fields(index_info_ptr->fields.begin(), index_info_ptr->fields.end());
+    fields.insert(fields.end(),index_info_ptr->pk_fields.begin(), index_info_ptr->pk_fields.end());
     for (; idx < fields.size(); ++idx) {
         if (tuple_id == slot_ref->tuple_id() && fields[idx].id == slot_ref->field_id()) {
             break;
@@ -498,6 +499,11 @@ void AccessPath::calc_index_range(int64_t partition_field_id, const std::map<std
         }
     }
     pos_index.set_is_eq(_is_eq_or_in);
+    pos_index.set_left_field_cnt(_left_field_cnt);
+    pos_index.set_right_field_cnt(_right_field_cnt);
+    pos_index.set_like_prefix(_like_prefix);
+    pos_index.set_left_open(_left_open);
+    pos_index.set_right_open(_right_open);
     if (_left_field_cnt == 0 && _right_field_cnt == 0) {
         pos_index.clear_is_eq();//无命中条件非eq
         pos_index.add_ranges();
@@ -529,16 +535,7 @@ void AccessPath::calc_index_range(int64_t partition_field_id, const std::map<std
                 }
                 range->set_right_key(rg.right_key.data());
                 range->set_right_full(rg.right_key.get_full());
-            } else {
-                // eq通过标记判断，后续可以删掉
-                range->set_right_key(rg.left_key.data());
-                range->set_right_full(rg.left_key.get_full());
             }
-            range->set_left_field_cnt(_left_field_cnt);
-            range->set_right_field_cnt(_right_field_cnt);
-            range->set_left_open(_left_open);
-            range->set_right_open(_right_open);
-            range->set_like_prefix(_like_prefix);
         }
     } else {
         is_possible = true;
@@ -548,23 +545,20 @@ void AccessPath::calc_index_range(int64_t partition_field_id, const std::map<std
             && !_like_prefix) {
             left_key.set_full(true);
         }
-        if (_right_field_cnt == index_info_ptr->fields.size()
-            && (index_type == pb::I_PRIMARY || index_type == pb::I_UNIQ)
-            && !_like_prefix) {
-            right_key.set_full(true);
-        }
         if (partition_id != -1) {
             range->set_partition_id(partition_id);
         }
         range->set_left_key(left_key.data());
         range->set_left_full(left_key.get_full());
-        range->set_right_key(right_key.data());
-        range->set_right_full(right_key.get_full());
-        range->set_left_field_cnt(_left_field_cnt);
-        range->set_right_field_cnt(_right_field_cnt);
-        range->set_left_open(_left_open);
-        range->set_right_open(_right_open);
-        range->set_like_prefix(_like_prefix);
+        if (!_is_eq_or_in) {
+            if (_right_field_cnt == index_info_ptr->fields.size()
+                && (index_type == pb::I_PRIMARY || index_type == pb::I_UNIQ)
+                && !_like_prefix) {
+                right_key.set_full(true);
+            }
+            range->set_right_key(right_key.data());
+            range->set_right_full(right_key.get_full());
+        }
     }
 }
 
@@ -610,10 +604,12 @@ void AccessPath::calc_fulltext(Property& sort_property) {
         default:
             break;
     }
+    pos_index.set_index_id(index_id);
+    pos_index.set_left_field_cnt(1);
+    pos_index.set_left_open(false);
     if (hit_index && values != nullptr) {
         hit_index_field_ids.emplace(field_id);
         is_possible = true;
-        pos_index.set_index_id(index_id);
         butil::FlatSet<std::string> filter;
         filter.init(ajust_flat_size(values->size()));
         for (auto value : *values) {
@@ -624,8 +620,6 @@ void AccessPath::calc_fulltext(Property& sort_property) {
             filter.insert(str);
             auto range = pos_index.add_ranges();
             range->set_left_key(str);
-            range->set_left_field_cnt(1);
-            range->set_left_open(false);
             if (range_type == MATCH_LANGUAGE) {
                 range->set_match_mode(pb::M_NARUTAL_LANGUAGE);
             } else if (range_type == MATCH_BOOLEAN) {

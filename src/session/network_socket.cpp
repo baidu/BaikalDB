@@ -50,6 +50,7 @@ NetworkSocket::NetworkSocket() {
     packet_read_len = 0;
     is_handshake_send_partly = 0;
     last_insert_id = 0;
+    last_value = "";
     has_error_packet = false;
     is_auth_result_send_partly = 0;
     query_ctx.reset(new QueryContext);

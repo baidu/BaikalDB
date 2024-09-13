@@ -243,7 +243,11 @@ ErrorType OnRPCDone::fill_request() {
     if (scan_node != nullptr) {
         bool use_global_backup = _fetcher_store->global_backup_type == GBT_LEARNER;
         scan_node->set_index_useage_and_lock(use_global_backup);
+        if (_primary_indexes != nullptr) {
+            scan_node->scan_indexs()[0].region_primary[_region_id] = *_primary_indexes;
+        }
     }
+
 
     ExecNode::create_pb_plan(_old_region_id, _request.mutable_plan(), _store_request);
 
@@ -865,6 +869,11 @@ ErrorType OnRPCDone::handle_response(const std::string& remote_side) {
     if (_response.has_last_insert_id()) {
         _client_conn->last_insert_id = _response.last_insert_id();
     }
+    if (_response.has_extra_res()) {
+        if (_response.extra_res().has_last_value()) {
+            _client_conn->last_value = _response.extra_res().last_value();
+        }
+    }
     if (_op_type != pb::OP_SELECT && _op_type != pb::OP_SELECT_FOR_UPDATE && _op_type != pb::OP_ROLLBACK && _op_type != pb::OP_COMMIT) {
         _fetcher_store->affected_rows += _response.affected_rows();
         _client_conn->txn_affected_rows += _response.affected_rows();
@@ -942,13 +951,21 @@ ErrorType OnRPCDone::handle_response(const std::string& remote_side) {
     }
     {
         BAIDU_SCOPED_LOCK(_fetcher_store->region_lock);
-        // merge可能会重复请求相同的region_id
-        if (_fetcher_store->region_batch.count(_region_id) == 1) {
-            _fetcher_store->region_batch[_region_id] = batch;
+        if (!_fetcher_store->is_pipeline()) {
+            // merge可能会重复请求相同的region_id
+            if (_fetcher_store->region_batch.count(_region_id) == 1) {
+                _fetcher_store->region_batch[_region_id] = batch;
+            } else {
+                //分裂单独处理start_key_sort
+                _fetcher_store->start_key_sort.emplace(_info.start_key(), _region_id);
+                _fetcher_store->region_batch[_region_id] = batch;
+            }
         } else {
-            //分裂单独处理start_key_sort
-            _fetcher_store->start_key_sort.emplace(_info.start_key(), _region_id);
-            _fetcher_store->region_batch[_region_id] = batch;
+            auto &batch_list = _fetcher_store->region_batch_list[_region_id];
+            if (batch_list.size() == 0) {
+                _fetcher_store->start_key_sort.emplace(_info.start_key(), _region_id);
+            }
+            batch_list.push_back(batch);
         }
     }
 
@@ -1153,6 +1170,7 @@ int FetcherStore::run_not_set_state(RuntimeState* state,
                     pb::OpType op_type, 
                     GlobalBackupType backup_type) {
     region_batch.clear();
+    region_batch_list.clear();
     index_records.clear();
     start_key_sort.clear();
     no_copy_cache_plan_set.clear();
