@@ -62,39 +62,40 @@ SerializeStatus ExprValue::serialize_to_mysql_text_packet(char* buf, size_t size
         }
         case pb::FLOAT: {
             size_t body_len = 0;
-            char tmp_buf[100] = {0};
-            if (float_precision_len == -1) {
-                body_len = snprintf(tmp_buf, sizeof(tmp_buf), "%.6g", _u.float_val);
-            } else {
-                std::string format= "%." + std::to_string(float_precision_len) + "f";
-                body_len = snprintf(tmp_buf, sizeof(tmp_buf), format.c_str(), _u.float_val);
+            std::ostringstream oss;
+            if (float_precision_len != -1) {
+                oss << std::fixed << std::setprecision(float_precision_len);
             }
-
+            oss << _u.float_val;
+            std::string tmp_str = oss.str();
+            body_len = tmp_str.length();
             len = body_len + 1;
             if (len > size) {
                 return STMPS_NEED_RESIZE;
             }
             // byte_array_append_length_coded_binary(body_len < 251LL)
             buf[0] = (uint8_t)(body_len & 0xff);
-            memcpy(buf + 1, tmp_buf, body_len);
+            memcpy(buf + 1, tmp_str.c_str(), body_len);
             return STMPS_SUCCESS;
         }
         case pb::DOUBLE: {
             size_t body_len = 0;
-            char tmp_buf[100] = {0};
-            if (float_precision_len == -1) {
-                body_len = snprintf(tmp_buf, sizeof(tmp_buf), "%.12g", _u.double_val);
+            std::ostringstream oss;
+            if (float_precision_len != -1) {
+                oss << std::fixed << std::setprecision(float_precision_len);
             } else {
-                std::string format= "%." + std::to_string(float_precision_len) + "lf";
-                body_len = snprintf(tmp_buf, sizeof(tmp_buf), format.c_str(), _u.double_val);
+                oss << std::setprecision(12);
             }
+            oss << _u.double_val;
+            std::string tmp_str = oss.str();
+            body_len = tmp_str.length();
             len = body_len + 1;
             if (len > size) {
                 return STMPS_NEED_RESIZE;
             }
             // byte_array_append_length_coded_binary(body_len < 251LL)
             buf[0] = (uint8_t)(body_len & 0xff);
-            memcpy(buf + 1, tmp_buf, body_len);
+            memcpy(buf + 1, tmp_str.c_str(), body_len);
             return STMPS_SUCCESS;
         }
         case pb::HLL: {
