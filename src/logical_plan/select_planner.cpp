@@ -159,13 +159,10 @@ bool SelectPlanner::is_full_export() {
     if (_select->group != nullptr) {
         return false;
     } 
-    if (!_agg_funcs.empty() || !_order_ascs.empty()) {
-        return false;
-    }
     if (_select->having != nullptr) {
         return false;
     } 
-    if (_select->order != nullptr) {
+    if (_select->order != nullptr || !_order_ascs.empty()) {
         return false;
     }
     //if (_select->limit != nullptr) {

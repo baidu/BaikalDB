@@ -2944,12 +2944,12 @@ int LogicalPlanner::create_scan_nodes() {
 }
 
 void LogicalPlanner::set_dml_txn_state(int64_t table_id) {
-    if (_ctx->is_explain) {
+    if (_ctx->is_explain || table_id == -1) {
         return;
     }
     auto client = _ctx->client_conn;
     //is_gloabl_ddl 打开时，该连接处理全局二级索引增量数据，不需要处理binlog。
-    if (_factory->has_open_binlog(table_id) && !client->is_index_ddl) {
+    if (!_ctx->no_binlog && _factory->has_open_binlog(table_id) && !client->is_index_ddl) {
         client->open_binlog = true;
         _ctx->open_binlog = true;
     }
@@ -3102,6 +3102,9 @@ int LogicalPlanner::fill_placeholders(
 }
 
 int LogicalPlanner::set_dml_local_index_binlog(const int64_t table_id) {
+    if (table_id == -1) {
+	return 0;
+    }
     if (_ctx->open_binlog && !_factory->has_global_index(table_id)) {
         // plan的第二个节点为dml节点
         if (_ctx->plan.nodes_size() < 2) {
