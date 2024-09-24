@@ -383,7 +383,7 @@ void StateMachine::_print_query_time(SmartSocket client) {
                     field_range_type, err_count, stat_info->sign, subquery_signs);
         }
 
-        if (op_type == pb::OP_SELECT) {
+        if (op_type == pb::OP_SELECT || op_type == pb::OP_UNION) {
             select_time_cost << stat_info->total_time;
             std::unique_lock<std::mutex> lock(_mutex);
             if (select_by_users.find(client->username) == select_by_users.end()) {

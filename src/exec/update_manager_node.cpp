@@ -259,6 +259,9 @@ void UpdateManagerNode::update_record(RuntimeState* state, SmartRecord record) {
             state->last_insert_id = last_insert_id_expr->get_value(row).get_numberic<int64_t>();
             state->client_conn()->last_insert_id = state->last_insert_id;
         }
+        if (last_insert_id_expr != nullptr) {
+            state->client_conn()->last_insert_id = last_insert_id_expr->get_value(row).get_numberic<int64_t>();
+        }
     }
 }
 }

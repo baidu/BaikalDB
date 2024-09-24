@@ -201,6 +201,9 @@ void IndexSelector::hit_row_field_range(ExprNode* expr,
                     if (get_field_hit_type_weight(field_range_map[field_id].type) > get_field_hit_type_weight(tmp_type)) {
                         return;
                     }
+                    if (tmp_type != field_range_map[field_id].type) {
+                        field_range_map[field_id] = FieldRange();
+                    }
                     for (auto pair : values) {
                         field_range_map[field_id].left.push_back(pair.second[0]);
                     }
@@ -223,6 +226,9 @@ void IndexSelector::hit_row_field_range(ExprNode* expr,
                     tmp_type = RANGE;
                     if (get_field_hit_type_weight(field_range_map[field_id].type) > get_field_hit_type_weight(tmp_type)) {
                         return;
+                    }
+                    if (tmp_type != field_range_map[field_id].type) {
+                        field_range_map[field_id] = FieldRange();
                     }
                     for (auto pair : values) {
                         field_range_map[field_id].right.push_back(pair.second[0]);
@@ -454,6 +460,11 @@ void IndexSelector::hit_field_range(ExprNode* expr,
             int32_t fn_op = static_cast<ScalarFnCall*>(expr)->fn().fn_op();
             switch (fn_op) {
                 case parser::FT_EQ:
+                    tmp_type = EQ;
+                    if (get_field_hit_type_weight(field_range_map[field_id].type) > get_field_hit_type_weight(tmp_type)) {
+                        return;
+                    } 
+                    field_range_map[field_id] = FieldRange();
                     field_range_map[field_id].eq_in_values = values;
                     field_range_map[field_id].conditions.insert(expr);
                     field_range_map[field_id].type = EQ;
@@ -463,6 +474,9 @@ void IndexSelector::hit_field_range(ExprNode* expr,
                     tmp_type = RANGE;
                     if (get_field_hit_type_weight(field_range_map[field_id].type) > get_field_hit_type_weight(tmp_type)) {
                         return;
+                    } 
+                    if (tmp_type != field_range_map[field_id].type) {
+                        field_range_map[field_id] = FieldRange();
                     }
                     if (field_range_map[field_id].left.size() > 0){
                         field_range_map[field_id].left.clear();
@@ -479,6 +493,9 @@ void IndexSelector::hit_field_range(ExprNode* expr,
                     tmp_type = RANGE;
                     if (get_field_hit_type_weight(field_range_map[field_id].type) > get_field_hit_type_weight(tmp_type)) {
                         return;
+                    } 
+                    if (tmp_type != field_range_map[field_id].type) {
+                        field_range_map[field_id] = FieldRange();
                     }
                     if(field_range_map[field_id].right.size() > 0){
                         field_range_map[field_id].right.clear();
@@ -504,6 +521,7 @@ void IndexSelector::hit_field_range(ExprNode* expr,
             if (get_field_hit_type_weight(field_range_map[field_id].type) > get_field_hit_type_weight(tmp_type)) {
                 return ;
             }
+            field_range_map[field_id] = FieldRange();
             field_range_map[field_id].eq_in_values = values;
             field_range_map[field_id].conditions.clear();
             field_range_map[field_id].conditions.insert(expr);
@@ -529,6 +547,7 @@ void IndexSelector::hit_field_range(ExprNode* expr,
             if (get_field_hit_type_weight(field_range_map[field_id].type) > get_field_hit_type_weight(tmp_type)) {
                 return;
             }
+            field_range_map[field_id] = FieldRange();
             range::FieldRange fulltext_and_range;
             field_range_map[field_id].like_values.push_back(values[0]);
             fulltext_and_range.like_values.push_back(values[0]);
@@ -769,8 +788,9 @@ int IndexSelector::select_partition(SmartTable& table_info, ScanNode* scan_node,
         }
 
         if (partition_type == pb::PT_HASH) {
-            if (field_iter != field_range_map.end() && !field_iter->second.eq_in_values.empty()) {
-                scan_node->set_partition_field_id(field_iter->first);
+            if (field_iter != field_range_map.end()
+                && (field_iter->second.type == EQ || field_iter->second.type == IN || field_iter->second.type == LIKE_EQ) 
+                && !field_iter->second.eq_in_values.empty()) {
                 ExprValueFlatSet eq_in_values_set;
                 eq_in_values_set.init(ajust_flat_size(field_iter->second.eq_in_values.size()));
                 for (auto& value : field_iter->second.eq_in_values) {

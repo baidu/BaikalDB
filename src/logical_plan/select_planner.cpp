@@ -108,7 +108,7 @@ int SelectPlanner::plan() {
     //print_debug_log();
     //_create_group_tuple_desc();
 
-    if (is_full_export()) {
+    if (!_ctx->is_full_export && is_full_export()) {
         _ctx->is_full_export = true;
     }
     get_slot_column_mapping();
@@ -150,6 +150,9 @@ bool SelectPlanner::is_full_export() {
     if (_ctx->explain_type != EXPLAIN_NULL) {
         return false;
     }
+    if (_ctx->debug_region_id != -1) {
+        return false;
+    }
     if (_ctx->has_derived_table || _ctx->has_information_schema) {
         return false;
     }
@@ -159,7 +162,7 @@ bool SelectPlanner::is_full_export() {
     if (_select->having != nullptr) {
         return false;
     } 
-    if (_select->order != nullptr) {
+    if (_select->order != nullptr || !_order_ascs.empty()) {
         return false;
     }
     //if (_select->limit != nullptr) {
