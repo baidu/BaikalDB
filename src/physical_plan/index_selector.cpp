@@ -171,8 +171,6 @@ void IndexSelector::hit_row_field_range(ExprNode* expr,
         field_ids.push_back(pair.second->field_id());
     }
     RangeType tmp_type;
-    int old_weight;
-    int cur_weight;
     switch (expr->node_type()) {
         case pb::FUNCTION_CALL: {
             int32_t fn_op = static_cast<ScalarFnCall*>(expr)->fn().fn_op();
