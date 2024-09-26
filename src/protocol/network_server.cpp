@@ -834,7 +834,7 @@ static void on_health_check_done(pb::StoreRes* response, brpc::Controller* cntl,
     pb::Status new_status = pb::NORMAL;
     if (cntl->Failed()) {
         if (cntl->ErrorCode() == brpc::ERPCTIMEDOUT || 
-            cntl->ErrorCode() == ETIMEDOUT) {
+            cntl->ErrorCode() == ETIMEDOUT || cntl->ErrorCode() == EHOSTDOWN) {
             new_status = pb::DEAD;
             DB_WARNING("addr:%s is dead(hang), need rpc cancel, errcode:%d, error:%s", 
                     addr.c_str(), cntl->ErrorCode(), cntl->ErrorText().c_str());
@@ -941,17 +941,34 @@ void NetworkServer::process_other_heart_beat_response(const pb::BaikalOtherHeart
 void NetworkServer::connection_timeout_check() {
     auto check_func = [this]() {
         std::set<std::string> need_cancel_addrs;
+        std::set<std::string> logical_rooms;
+        std::set<std::string> dead_logical_rooms;
+        std::map<std::string, int> logical_room_instance_cnt;
         SchemaFactory* factory = SchemaFactory::get_instance();
         std::unordered_map<std::string, InstanceDBStatus> info_map;
         factory->get_all_instance_status(&info_map);
         for (auto& pair : info_map) {
+            logical_room_instance_cnt[pair.second.logical_room] += 1;
             if (pair.second.status == pb::DEAD && pair.second.need_cancel) {
                 need_cancel_addrs.emplace(pair.first);
+                dead_logical_rooms.emplace(pair.second.logical_room);
             }
+            logical_rooms.emplace(pair.second.logical_room);
+        }
+        // 机房级故障判断
+        bool is_logical_room_faulty = false;
+        if (dead_logical_rooms.size() == 1 && logical_rooms.size() > 2) {
+            auto logical_room = *(dead_logical_rooms.begin());
+            if (need_cancel_addrs.size() <= logical_room_instance_cnt[logical_room]) {
+                is_logical_room_faulty = true;
+            }
+        }
+        if (is_logical_room_faulty) {
+            DB_WARNING("may be logical_room faulty, size: %lu/%lu", need_cancel_addrs.size(), info_map.size());
         }
         //dead实例不会太多，设置个阈值，太多了则不做处理
         size_t max_dead_cnt = std::min(info_map.size() / 10 + 1, (size_t)5);
-        if (need_cancel_addrs.size() > max_dead_cnt) {
+        if (need_cancel_addrs.size() > max_dead_cnt && !is_logical_room_faulty) {
             DB_WARNING("too many dead instance, size: %lu/%lu", need_cancel_addrs.size(), info_map.size());
             need_cancel_addrs.clear();
         }

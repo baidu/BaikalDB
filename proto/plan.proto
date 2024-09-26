@@ -280,6 +280,7 @@ message UpdateNode {
     repeated SlotDescriptor update_slots = 3;
     repeated Expr update_exprs = 4;
     //repeated int64 affect_index_ids = 5;
+    optional int64 row_ttl_duration = 6; //row ttl support, compatible whit prepared stmt
 };
 
 message PacketNode {

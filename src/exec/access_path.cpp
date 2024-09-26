@@ -92,7 +92,8 @@ bool AccessPath::check_sort_use_index(Property& sort_property) {
     std::vector<ExprNode*>& order_exprs = sort_property.slot_order_exprs;
     SlotRef* slot_ref = static_cast<SlotRef*>(order_exprs[0]);
     size_t idx = 0;
-    auto& fields = index_info_ptr->fields;
+    std::vector<FieldInfo>fields(index_info_ptr->fields.begin(), index_info_ptr->fields.end());
+    fields.insert(fields.end(),index_info_ptr->pk_fields.begin(), index_info_ptr->pk_fields.end());
     for (; idx < fields.size(); ++idx) {
         if (tuple_id == slot_ref->tuple_id() && fields[idx].id == slot_ref->field_id()) {
             break;
