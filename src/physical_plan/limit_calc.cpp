@@ -35,7 +35,7 @@ void LimitCalc::_analyze_limit(QueryContext* ctx, ExecNode* node, int64_t limit)
         case pb::TABLE_FILTER_NODE:
         case pb::WHERE_FILTER_NODE: {
             // 空filter可以下推
-            if (static_cast<FilterNode*>(node)->pruned_conjuncts().empty()) {
+            if (static_cast<FilterNode*>(node)->is_empty_filter()) {
                 break;
             } else {
                 return;
