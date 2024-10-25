@@ -173,6 +173,7 @@ int PreparePlanner::stmt_prepare(const std::string& stmt_name, const std::string
     prepare_ctx->client_conn = client;
     prepare_ctx->get_runtime_state()->set_client_conn(client);
     prepare_ctx->sql = stmt_sql;
+    prepare_ctx->is_full_export = false;
 
     std::unique_ptr<LogicalPlanner> planner;
     switch (prepare_ctx->stmt_type) {
@@ -248,7 +249,7 @@ int PreparePlanner::stmt_execute(const std::string& stmt_name, std::vector<pb::E
     _ctx->stat_info.table = prepare_ctx->stat_info.table;
     _ctx->stat_info.sample_sql << prepare_ctx->stat_info.sample_sql.str();
     _ctx->stat_info.sign = prepare_ctx->stat_info.sign;
-    _ctx->is_full_export = prepare_ctx->is_full_export;
+    _ctx->is_full_export = false;
     _ctx->debug_region_id = prepare_ctx->debug_region_id;
     _ctx->execute_global_flow = prepare_ctx->execute_global_flow;
     if (params.size() != prepare_ctx->placeholders.size()) {
@@ -268,7 +269,9 @@ int PreparePlanner::stmt_execute(const std::string& stmt_name, std::vector<pb::E
     // TODO dml的plan复用
     if (!prepare_ctx->is_select || prepare_ctx->sub_query_plans.size() > 0 || (prepare_ctx->root != nullptr && prepare_ctx->root->has_optimized())) {
         // enable_2pc=true or table has global index need generate txn_id
-        set_dml_txn_state(prepare_ctx->prepared_table_id);
+        if (!prepare_ctx->is_select && prepare_ctx->prepared_table_id != -1) {
+            set_dml_txn_state(prepare_ctx->prepared_table_id);
+        }
         _ctx->plan.CopyFrom(prepare_ctx->plan);
         int ret = set_dml_local_index_binlog(prepare_ctx->prepared_table_id);
         if (ret < 0) {

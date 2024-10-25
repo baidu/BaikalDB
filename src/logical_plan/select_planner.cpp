@@ -154,6 +154,9 @@ bool SelectPlanner::is_full_export() {
     if (_ctx->explain_type != EXPLAIN_NULL) {
         return false;
     }
+    if (_ctx->is_prepared) {
+        return false;
+    }
     if (_ctx->debug_region_id != -1) {
         return false;
     }
