@@ -2927,7 +2927,7 @@ int LogicalPlanner::create_scan_nodes() {
 }
 
 void LogicalPlanner::set_dml_txn_state(int64_t table_id) {
-    if (_ctx->is_explain || table_id == -1) {
+    if (_ctx->is_explain) {
         return;
     }
     auto client = _ctx->client_conn;
