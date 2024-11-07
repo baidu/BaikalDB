@@ -289,6 +289,17 @@ public:
             c->flatten_or_expr(or_exprs);
         }
     }
+
+    void flatten_and_expr(std::vector<ExprNode*>* and_exprs) {
+        if (node_type() != pb::AND_PREDICATE) {
+            and_exprs->push_back(this);
+            return;
+        }
+        for (auto c : _children) {
+            c->flatten_and_expr(and_exprs);
+        }
+    }
+
     virtual void transfer_pb(pb::ExprNode* pb_node);
     static void create_pb_expr(pb::Expr* expr, ExprNode* root);
     static int create_tree(const pb::Expr& expr, ExprNode** root);

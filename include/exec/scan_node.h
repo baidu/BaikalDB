@@ -15,6 +15,7 @@
 #pragma once
 
 #include "exec_node.h"
+#include "filter_node.h"
 #include "access_path.h"
 #include "table_record.h"
 #include <boost/variant.hpp>
@@ -150,6 +151,16 @@ public:
     void show_cost(std::vector<std::map<std::string, std::string>>& path_infos);
 
     int64_t select_index();
+    bool use_fulltext() {
+        return _use_fulltext_or_vector;
+    }
+    bool use_cost() {
+        if (SchemaFactory::get_instance()->get_statistics_ptr(_table_id) != nullptr
+            && SchemaFactory::get_instance()->is_switch_open(_table_id, TABLE_SWITCH_COST) && !_use_fulltext_or_vector) {
+            return true;
+        }
+        return false;
+    }
 private:
     int compare_two_path(SmartPath& outer_path, SmartPath& inner_path);
     void inner_loop_and_compare(std::map<int64_t, SmartPath>::iterator outer_loop_iter);
@@ -187,6 +198,15 @@ struct ScanIndexInfo {
     std::string raw_index;
     std::map<int64_t, pb::RegionInfo> region_infos;
     std::map<int64_t, std::string> region_primary;
+};
+
+struct MergeIndexInfo {
+    std::vector<ExprNode*> _conjuncts;
+    std::vector<ExprNode*> _pruned_conjuncts;
+    AccessPathMgr _main_path;
+    int64_t _select_idx = -1;
+    std::vector<ScanIndexInfo> _scan_indexs;
+    bool _has_index = false; // for join recorder
 };
 
 class ScanNode : public ExecNode {
@@ -300,6 +320,7 @@ public:
         _scan_indexs.clear();
         _pb_node.mutable_derive_node()->mutable_scan_node()->clear_indexes();
         _pb_node.mutable_derive_node()->mutable_scan_node()->clear_learner_index();
+        clear_merge_index_info();
     }
     bool need_copy(MemRow* row, std::vector<ExprNode*>& conjuncts) {
         for (auto conjunct : conjuncts) {
@@ -407,6 +428,47 @@ public:
         }
         return false;
     }
+    // for index merge
+    bool need_index_merge();
+    SmartPath select_path() {
+        return _main_path.path(_select_idx);
+    }
+    MergeIndexInfo& origin_index_info() {
+        return _origin_index_info;
+    }
+
+    void swap_index_info(MergeIndexInfo& info) {
+        info._main_path.init(_table_id);
+        std::swap(info._conjuncts, _filter_node->conjuncts());
+        _filter_node->modifiy_pruned_conjuncts_by_index(info._pruned_conjuncts);
+        std::swap(info._main_path, _main_path);
+        std::swap(info._select_idx, _select_idx);
+        std::swap(info._scan_indexs, _scan_indexs);
+        std::swap(info._has_index, _has_index);
+    }
+    std::vector<ExprNode*>& conjuncts_without_or() {
+        return _conjuncts_without_or;
+    }
+    std::vector<ExprNode*>& or_sub_conjuncts() {
+        return _or_sub_conjuncts;
+    }
+    void add_merge_index_info() {
+        MergeIndexInfo info;
+        swap_index_info(info);
+        _merge_index_infos.emplace_back(info);
+    }
+    void clear_merge_index_info() {
+        _conjuncts_without_or.clear();
+        _or_sub_conjuncts.clear();
+        _merge_index_infos.clear();
+    }
+    std::vector<MergeIndexInfo>& merge_index_infos() {
+        return _merge_index_infos;
+    }
+    bool has_merge_index() const {
+        return _merge_index_infos.size() > 0;
+    }
+
 protected:
     pb::Engine _engine = pb::ROCKSDB;
     int32_t _tuple_id = 0;
@@ -434,6 +496,22 @@ protected:
     bool _current_global_backup = false;
     GetMode _get_mode = GET_ONLY; // set to GET_LOCK, when "select ... for update"
     uint64_t _watt_stats_version = 0;
+
+    // for index merge
+//    std::vector<ExprNode*> _conjuncts;
+//    std::vector<ExprNode*> _pruned_conjuncts;
+    FilterNode* _filter_node = nullptr; // not own it
+
+    std::vector<ExprNode*> _conjuncts_without_or;
+    ExprNode*              _or_conjunct = nullptr;
+    std::vector<ExprNode*> _or_sub_conjuncts;
+
+    MergeIndexInfo _origin_index_info;
+    std::vector<MergeIndexInfo> _merge_index_infos;
+
+
+//    int64_t _origin_select_idx = -1;
+//    AccessPathMgr _origin_main_path;    //主集群索引选择
 };
 }
 

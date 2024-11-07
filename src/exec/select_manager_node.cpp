@@ -292,6 +292,9 @@ void SelectManagerNode::multi_fetcher_store_open(FetcherInfo* self_fetcher, Fetc
 
 int SelectManagerNode::fetcher_store_run(RuntimeState* state, ExecNode* exec_node) {
     RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(exec_node);
+    if (scan_node->has_merge_index()) {
+        return merge_fetcher_store_run(state, exec_node);
+    }
     FetcherStore* fetcher_store = nullptr;
     FetcherInfo main_fetcher;
     FetcherInfo backup_fetcher;
@@ -851,4 +854,113 @@ arrow::Status FetcherStoreVectorizedReader::ReadNext(std::shared_ptr<arrow::Reco
     }
     return arrow::Status::OK();
 }
+
+int SelectManagerNode::merge_fetcher_store_run(RuntimeState* state, ExecNode* exec_node) {
+    RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(exec_node);
+    int64_t main_table_id = scan_node->table_id();
+    int32_t tuple_id = scan_node->tuple_id();
+    auto pri_info = _factory->get_index_info_ptr(main_table_id);
+    if (pri_info == nullptr) {
+        DB_WARNING("pri index info not found table_id:%ld", main_table_id);
+        return -1;
+    }
+    butil::FlatSet<std::string> filter;
+    filter.init(12301);
+
+    SmartRecord record_template = _factory->new_record(main_table_id);
+    FilterNode* filter_node = static_cast<FilterNode*>(scan_node->get_parent());
+    int64_t affected_rows = 0;
+
+
+    auto remove_batch_same_row = [&](std::shared_ptr<RowBatch>& batch, std::shared_ptr<RowBatch> uniq_batch) -> int {
+        for (batch->reset(); !batch->is_traverse_over(); batch->next()) {
+            std::unique_ptr<MemRow>& mem_row = batch->get_row();
+            SmartRecord record = record_template->clone(false);
+            for (auto& pri_field : pri_info->fields) {
+                int32_t field_id = pri_field.id;
+                int32_t slot_id = state->get_slot_id(tuple_id, field_id);
+                if (slot_id == -1) {
+                    DB_WARNING("field_id:%d tuple_id:%d, slot_id:%d", field_id, tuple_id, slot_id);
+                    return -1;
+                }
+                record->set_value(record->get_field_by_tag(field_id), mem_row->get_value(tuple_id, slot_id));
+            }
+            MutTableKey  key;
+            if (record->encode_key(*pri_info.get(), key, pri_info->fields.size(), false, false) != 0) {
+                DB_FATAL("Fail to encode_key left, table:%ld", pri_info->id);
+                return -1;
+            }
+            if (filter.seek(key.data()) != nullptr) {
+                continue;
+            }
+            filter.insert(key.data());
+            uniq_batch->move_row(std::move(mem_row));
+            affected_rows++;
+        }
+        return 0;
+    };
+
+    for (auto& index_info : scan_node->merge_index_infos()) {
+        // filter_node->modifiy_pruned_conjuncts_by_index(index_info._pruned_conjuncts);
+        // scan_node中交换filter_node的_pruned_conjuncts
+        scan_node->swap_index_info(index_info);
+        if (filter_node->get_limit() != -1 && filter_node->pruned_conjuncts().empty()) {
+            scan_node->set_limit(filter_node->get_limit());
+        }
+        FetcherStore* fetcher_store = nullptr;
+        FetcherInfo main_fetcher;
+        ScanIndexInfo* main_scan_index = scan_node->main_scan_index();
+        int ret = 0;
+        if (main_scan_index == nullptr) {
+            return -1;
+        }
+        auto& scan_index_info = *main_scan_index;
+        auto index_ptr = _factory->get_index_info_ptr(scan_index_info.router_index_id);
+        if (index_ptr == nullptr) {
+           DB_WARNING("invalid index info: %ld", scan_index_info.router_index_id);
+           return -1;
+        }
+        _factory->get_region_by_key(main_table_id,
+                        *index_ptr, scan_index_info.router_index,
+                        scan_index_info.region_infos,
+                        &scan_index_info.region_primary,
+                        scan_node->get_partition());
+        scan_node->set_region_infos(scan_index_info.region_infos);
+
+        main_fetcher.scan_index = main_scan_index;
+        fetcher_store = &main_fetcher.fetcher_store;
+        ret = single_fetcher_store_open(&main_fetcher, state, exec_node);
+        if (ret < 0) {
+            state->error_code = fetcher_store->error_code;
+            state->error_msg.str("");
+            state->error_msg << fetcher_store->error_msg.str();
+            DB_WARNING("single_fetcher_store_open fail, txn_id: %lu, log_id:%lu, router index_id: %ld",
+                state->txn_id, state->log_id(), main_fetcher.scan_index->router_index_id);
+            return -1;
+        }
+
+        for (auto& pair : fetcher_store->start_key_sort) {
+            auto iter = fetcher_store->region_batch.find(pair.second);
+            if (iter == fetcher_store->region_batch.end()) {
+                continue;
+            }
+            auto& batch = iter->second.row_data;
+            if (batch != nullptr && batch->size() != 0) {
+                std::shared_ptr<RowBatch> uniq_batch = std::make_shared<RowBatch>();
+                auto ret = remove_batch_same_row(batch, uniq_batch);
+                if (ret) {
+                    return ret;
+                }
+                if (uniq_batch != nullptr && uniq_batch->size() != 0) {
+                    _sorter->add_batch(uniq_batch);
+                }
+            }
+            fetcher_store->region_batch.erase(iter);
+        }
+    }
+    // 无sort节点时不会排序，按顺序输出
+    _sorter->merge_sort();
+    return affected_rows;
+}
+
 }
