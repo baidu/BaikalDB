@@ -517,30 +517,16 @@ int SelectPlanner::create_limit_node() {
 
 int SelectPlanner::create_agg_node() {
     if (_select->select_opt != nullptr && _select->select_opt->distinct == true) {
-        // select distinct ()xxx, xxx from xx.xx (no group by)
-        if (!_agg_funcs.empty() || !_distinct_agg_funcs.empty() || !_group_exprs.empty()) {
+        // select distinct ()xxx, xxx from xx.xx 
+        if (_agg_funcs.empty() && _distinct_agg_funcs.empty() && _group_exprs.empty()) {
+            //如果没有agg和group by， 将select列加入到group by中
+            for (uint32_t idx = 0; idx < _select_exprs.size(); ++idx) {
+                _group_exprs.push_back(_select_exprs[idx]);
+            }
+        } else if(!_group_exprs.empty()) {
             DB_WARNING("distinct query doesnot support group by");
             return -1;
         }
-        pb::PlanNode* agg_node = _ctx->add_plan_node();
-        agg_node->set_node_type(pb::AGG_NODE);
-        agg_node->set_limit(-1);
-        agg_node->set_is_explain(_ctx->is_explain);
-        agg_node->set_num_children(1); //TODO 
-        pb::DerivePlanNode* derive = agg_node->mutable_derive_node();
-        pb::AggNode* agg = derive->mutable_agg_node();
-
-        for (uint32_t idx = 0; idx < _select_exprs.size(); ++idx) {
-            pb::Expr* expr = agg->add_group_exprs();
-            expr->CopyFrom(_select_exprs[idx]);
-//            if (_select_exprs[idx].nodes_size() != 1) {
-//                DB_WARNING("invalid distinct expr");
-//                return -1;
-//            }
-//            expr->add_nodes()->CopyFrom(_select_exprs[idx].nodes(0));
-        }
-        agg->set_agg_tuple_id(-1);
-        return 0;
     }
     if (_agg_funcs.empty() && _distinct_agg_funcs.empty() && _group_exprs.empty()) {
         return 0;
