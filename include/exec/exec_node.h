@@ -233,6 +233,9 @@ public:
     }
     void set_limit(int64_t limit) {
         _limit = limit;
+        if (_limit < 0) {
+            _limit = -1;
+        }
     }
     virtual void reset_limit(int64_t limit) {
         _limit = limit;

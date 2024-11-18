@@ -445,6 +445,7 @@ int Separate::separate_join(QueryContext* ctx, const std::vector<ExecNode*>& joi
         AggNode* agg_node = nullptr;
         SortNode* sort_node = nullptr;
         ExecNode* parent = join_node->get_parent();
+        FilterNode* filter_node = nullptr;
         while (parent->node_type() != pb::JOIN_NODE &&
                parent != ctx->root) {
             if (parent->node_type() == pb::LIMIT_NODE) {
@@ -455,6 +456,9 @@ int Separate::separate_join(QueryContext* ctx, const std::vector<ExecNode*>& joi
             }
             if (parent->node_type() == pb::SORT_NODE) {
                 sort_node = static_cast<SortNode*>(parent);
+            }
+            if (parent->node_type() == pb::WHERE_FILTER_NODE) {
+                filter_node = static_cast<FilterNode*>(parent);
             }
             parent = parent->get_parent();
         }
@@ -486,6 +490,11 @@ int Separate::separate_join(QueryContext* ctx, const std::vector<ExecNode*>& joi
                 break;
             }
             node = node->children(0);
+        }
+        if (filter_node != nullptr) {
+            if (!filter_node->is_empty_filter()) {
+                need_pushdown = false;
+            }
         }
         if (sort_node != nullptr) {
             for (auto expr : sort_node->slot_order_exprs()) {
@@ -811,6 +820,9 @@ int Separate::separate_update(QueryContext* ctx) {
     ret = manager_node->init_update_info(update_node);
     if (ret < 0) {
         return -1;
+    }
+    if (ctx->row_ttl_duration > 0) {
+        _row_ttl_duration = ctx->row_ttl_duration;
     }
     int64_t main_table_id = update_node->table_id();
     if (!need_separate_plan(ctx, main_table_id)) {

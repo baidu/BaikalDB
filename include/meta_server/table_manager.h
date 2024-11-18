@@ -984,11 +984,11 @@ public:
         auto src_type = src_field.mysql_type();
         auto target_type = target_field.mysql_type();
         if (src_type == target_type) {
-//            if (src_type == pb::DATETIME || src_type == pb::FLOAT || src_type == pb::DOUBLE) {
-//                if (src_field.float_precision_len() > target_field.float_precision_len()) {
-//                    return false;
-//                }
-//            }
+            if (src_type == pb::DATETIME) {
+                if (src_field.float_precision_len() > target_field.float_precision_len()) {
+                    return false;
+                }
+            }
             return true;
         }
         switch (src_type) {
@@ -1007,11 +1007,14 @@ public:
         }
         int s = primitive_to_proto_type(src_type);
         int t = primitive_to_proto_type(target_type);
-        if (s == t) return true;
-        if (s == FieldDescriptorProto::TYPE_SINT32 && t == FieldDescriptorProto::TYPE_SINT64) return true;
-        if (s == FieldDescriptorProto::TYPE_SINT64 && t == FieldDescriptorProto::TYPE_SINT32) return true;
-        if (s == FieldDescriptorProto::TYPE_UINT32 && t == FieldDescriptorProto::TYPE_UINT64) return true;
-        if (s == FieldDescriptorProto::TYPE_UINT64 && t == FieldDescriptorProto::TYPE_UINT32) return true;
+        if (s != t) return false;
+        if (primitive_type_bytes_len(src_type) <= primitive_type_bytes_len(target_type)) {
+            return true;
+        }
+        // if (s == FieldDescriptorProto::TYPE_SINT32 && t == FieldDescriptorProto::TYPE_SINT64) return true;
+        // if (s == FieldDescriptorProto::TYPE_SINT64 && t == FieldDescriptorProto::TYPE_SINT32) return true;
+        // if (s == FieldDescriptorProto::TYPE_UINT32 && t == FieldDescriptorProto::TYPE_UINT64) return true;
+        // if (s == FieldDescriptorProto::TYPE_UINT64 && t == FieldDescriptorProto::TYPE_UINT32) return true;
         return false;
     }
     int get_index_state(int64_t table_id, int64_t index_id, pb::IndexState& index_state) {
