@@ -2814,6 +2814,7 @@ int LogicalPlanner::create_sort_node() {
         sort->add_is_null_first(_order_ascs[idx]);
     }
     sort->set_tuple_id(_order_tuple_id);
+
     return 0;
 }
 int LogicalPlanner::create_join_and_scan_nodes(JoinMemTmp* join_root, ApplyMemTmp* apply_root) {
@@ -2926,7 +2927,7 @@ int LogicalPlanner::create_scan_nodes() {
 }
 
 void LogicalPlanner::set_dml_txn_state(int64_t table_id) {
-    if (_ctx->is_explain || table_id == -1) {
+    if (_ctx->is_explain) {
         return;
     }
     auto client = _ctx->client_conn;

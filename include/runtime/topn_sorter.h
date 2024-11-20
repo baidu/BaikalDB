@@ -19,34 +19,33 @@
 #include "common.h"
 #include "row_batch.h"
 #include "mem_row_compare.h"
+#include "sorter.h"
 
 namespace baikaldb {
 //对每个batch并行的做sort后，再用heap做归并
-class Sorter {
+
+struct TopNHeapItem {
+    std::unique_ptr<baikaldb::MemRow> row;
+    int64_t idx;
+};
+
+class TopNSorter : public Sorter {
 public:
-    Sorter(MemRowCompare* comp) : _comp(comp), _idx(0) {
+    TopNSorter(MemRowCompare* comp, int64_t limit) : Sorter(comp), _limit(limit) {
     }
-    virtual void add_batch(std::shared_ptr<RowBatch>& batch) {
-        batch->reset();
-        _min_heap.push_back(batch);
-    }
+    virtual void add_batch(std::shared_ptr<RowBatch>& batch);
     virtual void sort();
-    virtual void merge_sort();
+    virtual void merge_sort(){}
     virtual int get_next(RowBatch* batch, bool* eos);
-
-    size_t batch_size() {
-        return _min_heap.size();
-    }
 private:
-    void multi_sort();
-    void make_heap();
     virtual void shiftdown(size_t index);
+    virtual void shiftup(size_t index);
 
-protected:
-    MemRowCompare* _comp;
 private:
-    std::vector<std::shared_ptr<RowBatch>> _min_heap;
-    size_t _idx;
+    std::vector<TopNHeapItem> _mem_row_heap;
+    int64_t _limit = -1;
+    int64_t _current_count = 0;
+    int64_t _current_idx = 0;
 };
 }
 

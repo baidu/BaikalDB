@@ -1087,16 +1087,16 @@ ErrorType FetcherStore::process_binlog_start(RuntimeState* state, pb::OpType op_
                     need_send_rollback = false;
                     return;
                 }
-                write_binlog_param.txn_id = state->txn_id;
-                write_binlog_param.log_id = log_id;
-                write_binlog_param.primary_region_id = client_conn->primary_region_id;
-                write_binlog_param.global_conn_id = client_conn->get_global_conn_id();
-                write_binlog_param.username = client_conn->user_info->username;
-                write_binlog_param.ip = client_conn->ip;
-                write_binlog_param.client_conn = client_conn;
-                write_binlog_param.fetcher_store = this;
                 binlog_ctx->set_start_ts(timestamp);
             }
+            write_binlog_param.txn_id = state->txn_id;
+            write_binlog_param.log_id = log_id;
+            write_binlog_param.primary_region_id = client_conn->primary_region_id;
+            write_binlog_param.global_conn_id = client_conn->get_global_conn_id();
+            write_binlog_param.username = client_conn->user_info->username;
+            write_binlog_param.ip = client_conn->ip;
+            write_binlog_param.client_conn = client_conn;
+            write_binlog_param.fetcher_store = this;
             write_binlog_param.op_type = op_type;
             auto ret = binlog_ctx->write_binlog(&write_binlog_param);
             if (ret != E_OK) {

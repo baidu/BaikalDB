@@ -15,6 +15,7 @@
 #include "limit_calc.h"
 #include "join_node.h"
 #include "filter_node.h"
+#include "agg_node.h"
 
 namespace baikaldb {
 int LimitCalc::analyze(QueryContext* ctx) {
@@ -41,9 +42,16 @@ void LimitCalc::_analyze_limit(QueryContext* ctx, ExecNode* node, int64_t limit)
                 return;
             }
         }
+        // case: select distinct f from test limit 10;
+        // 没有agg_fn时, 在agg_node的open阶段可以使用limit。
+        case pb::MERGE_AGG_NODE:
+            if (static_cast<AggNode*>(node)->mutable_agg_fn_calls()->empty()) {
+                break;
+            } else {
+                return;
+            }
         case pb::HAVING_FILTER_NODE: 
         case pb::SORT_NODE:
-        case pb::MERGE_AGG_NODE:
         case pb::AGG_NODE:
             return;
         default:

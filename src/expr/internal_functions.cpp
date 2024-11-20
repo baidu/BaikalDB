@@ -15,6 +15,7 @@
 #include "internal_functions.h"
 #include <openssl/md5.h>
 #include <rapidjson/pointer.h>
+#include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
 #include "hll_common.h"
 #include "datetime.h"
@@ -327,6 +328,21 @@ ExprValue bit_length(const std::vector<ExprValue>& input) {
     ExprValue tmp(pb::UINT32);
     tmp._u.uint32_val = input[0].get_string().size() * 8;
     return tmp;
+}
+ExprValue bit_count(const std::vector<ExprValue>& input) {
+    if (input.size() != 1 || input[0].is_null()) {
+        return ExprValue::Null();
+    }
+    ExprValue tmp = input[0];
+    tmp.cast_to(pb::UINT64);
+    ExprValue res(pb::INT64);
+    while (tmp._u.uint64_val) {
+        if (tmp._u.uint64_val & 1) {
+            res._u.int64_val += 1;
+        }
+        tmp._u.uint64_val >>= 1;
+    }
+    return res;
 }
 
 ExprValue lower(const std::vector<ExprValue>& input) {
@@ -831,6 +847,158 @@ ExprValue json_extract(const std::vector<ExprValue>& input) {
         tmp.str_val = std::to_string(pValue->GetBool());
     }
     return tmp;
+}
+
+ExprValue json_extract1(const std::vector<ExprValue>& input) {
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+
+    for (auto s : input) {
+        if (s.is_null()) {
+            return ExprValue::Null();
+        }
+    }
+    std::string json_str = input[0].get_string();
+    std::string path = input[1].get_string();
+    if (path.length() > 0 && path[0] == '$') {
+        path.erase(path.begin());
+    } else {
+        return ExprValue::Null();
+    }
+    std::replace(path.begin(), path.end(), '.', '/');
+    std::replace(path.begin(), path.end(), '[', '/');
+    path.erase(std::remove(path.begin(), path.end(), ']'), path.end());
+
+    rapidjson::Document doc;
+    try {
+        doc.Parse<0>(json_str.c_str());
+        if (doc.HasParseError()) {
+            rapidjson::ParseErrorCode code = doc.GetParseError();
+            DB_WARNING("parse json_str error [code:%d][%s]", code, json_str.c_str());
+            return ExprValue::Null();
+        }
+
+    } catch (...) {
+        DB_WARNING("parse json_str error [%s]", json_str.c_str());
+        return ExprValue::Null();
+    }
+    rapidjson::Pointer pointer(path.c_str());
+    if (!pointer.IsValid()) {
+        DB_WARNING("invalid path: [%s]", path.c_str());
+        return ExprValue::Null();
+    }
+
+    const rapidjson::Value *pValue = rapidjson::GetValueByPointer(doc, pointer);
+    if (pValue == nullptr) {
+        DB_WARNING("the path: [%s] does not exist in doc [%s]", path.c_str(), json_str.c_str());
+        return ExprValue::Null();
+    }
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    // TODO type on fly
+    ExprValue tmp(pb::STRING);
+    /*
+    if (pValue->IsString()) {
+        tmp.str_val = pValue->GetString();
+    } else if (pValue->IsInt()) {
+        tmp.str_val = std::to_string(pValue->GetInt());
+    } else if (pValue->IsInt64()) {
+        tmp.str_val = std::to_string(pValue->GetInt64());
+    } else if (pValue->IsUint()) {
+        tmp.str_val = std::to_string(pValue->GetUint());
+    } else if (pValue->IsUint64()) {
+        tmp.str_val = std::to_string(pValue->GetUint64());
+    } else if (pValue->IsDouble()) {
+        tmp.str_val = std::to_string(pValue->GetDouble());
+    } else if (pValue->IsFloat()) {
+        tmp.str_val = std::to_string(pValue->GetFloat());
+    } else if (pValue->IsBool()) {
+        tmp.str_val = std::to_string(pValue->GetBool());
+    }
+    */
+    pValue->Accept(writer);
+    tmp.str_val = buffer.GetString();
+    return tmp;
+}
+
+ExprValue json_type(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+    ExprValue res(pb::STRING);
+    if (input[0].is_int()) {
+        res.str_val = "INTEGER";
+    } else if (input[0].is_double()) {
+        res.str_val = "DOUBLE";
+    } else if (input[0].is_bool()) {
+        res.str_val = "BOOLEAN";
+    } else if (input[0].is_null()) {
+        res.str_val = "NULL";
+    } else if (input[0].is_string()) {
+        rapidjson::Document root;
+        root.Parse<0>(input[0].str_val.c_str());
+        if (root.IsObject()) {
+            res.str_val = "OBJECT";
+        } else if (root.IsArray()) {
+            res.str_val = "ARRAY";
+        } else {
+            res.str_val = "STRING";
+        }
+    } else {
+        return ExprValue::Null();
+    }
+    return res;
+}
+
+ExprValue json_array(const std::vector<ExprValue>& input) {
+    if (input.size() < 1) {
+        return ExprValue::Null();
+    }
+    rapidjson::Document list;
+    list.SetArray();
+    for (size_t i = 0; i < input.size(); i ++) {
+        list.PushBack(rapidjson::StringRef(input[i].get_string().c_str()), list.GetAllocator());
+    }
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    list.Accept(writer);
+    ExprValue res(pb::STRING);
+    res.str_val = buffer.GetString();
+    return res;
+}
+
+ExprValue json_object(const std::vector<ExprValue>& input) {
+    if (input.size() < 1 || input.size() & 1) {
+        return ExprValue::Null();
+    }
+    rapidjson::Document obj;
+    obj.SetObject();
+    // TODO 相同的key会重复
+    for (size_t i = 0; i < input.size() ; i += 2) {
+        obj.AddMember(rapidjson::StringRef(input[i].get_string().c_str()), rapidjson::StringRef(input[i + 1].get_string().c_str()), obj.GetAllocator());
+    }
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    obj.Accept(writer);
+    ExprValue res(pb::STRING);
+    res.str_val = buffer.GetString();
+    return res;
+}
+
+ExprValue json_valid(const std::vector<ExprValue>& input) {
+    if (input.size() != 1) {
+        return ExprValue::Null();
+    }
+    if (input[0].type != pb::JSON && input[0].type != pb::STRING) {
+        return ExprValue::Null();
+    }
+    rapidjson::Document obj;
+    obj.Parse<0>(input[0].str_val.c_str());
+    if (obj.HasParseError()) {
+       return ExprValue::False(); 
+    }
+    return ExprValue::True();
 }
 
 ExprValue substring_index(const std::vector<ExprValue>& input) {
