@@ -1444,7 +1444,9 @@ int Transaction::put_primary_columns(const TableKey& primary_key, SmartRecord re
             return -1;
         }
         if (_is_separate) {
-            add_kvop_put(key.data(), value, _write_ttl_timestamp_us, false);
+            // add_kvop_put(key.data(), value, _write_ttl_timestamp_us, false);
+            // 列不加ttl
+            add_kvop_put(key.data(), value, -1, false);
         }
     }
     return 0;
