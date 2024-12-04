@@ -122,6 +122,13 @@ int AggNode::open(RuntimeState* state) {
     }
     _mem_row_desc = state->mem_row_desc();
 
+    bool use_limit = false;
+    if (_limit > 0 && _agg_fn_calls.size() == 0) {
+        // case: select distinct f from test limit 100;
+        // 没有聚合函数时，可以使用limit
+        use_limit = true;
+    }
+
     TimeCost cost;
     int64_t agg_time = 0;
     int64_t scan_time = 0;
@@ -154,6 +161,9 @@ int AggNode::open(RuntimeState* state) {
                 DB_WARNING_STATE(state, "memory limit exceeded");
                 return -1;
             }
+            if (use_limit && _hash_map.size() >= _limit) {
+                eos = true;
+            }
             // 对于用order by分组的特殊优化
             //if (_agg_tuple_id == -1 && _limit != -1 && (int64_t)_hash_map.size() >= _limit) {
             //    break;
@@ -168,7 +178,7 @@ int AggNode::open(RuntimeState* state) {
         ExecNode* packet = get_parent_node(pb::PACKET_NODE);
         // baikaldb才有packet_node;只在baikaldb上产生数据
         // TODB:join和子查询后续如果要完全推到store运行得注意
-        if (packet != nullptr) {
+        if (packet != nullptr || _is_merger) {
             std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
             uint8_t null_flag = 0;
             MutTableKey key;

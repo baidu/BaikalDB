@@ -832,6 +832,7 @@ static void on_health_check_done(pb::StoreRes* response, brpc::Controller* cntl,
     std::unique_ptr<pb::StoreRes> response_guard(response);
     std::unique_ptr<brpc::Controller> cntl_guard(cntl);
     pb::Status new_status = pb::NORMAL;
+    old_status = SchemaFactory::get_instance()->get_instance_status(addr).status;
     if (cntl->Failed()) {
         if (cntl->ErrorCode() == brpc::ERPCTIMEDOUT || 
             cntl->ErrorCode() == ETIMEDOUT) {

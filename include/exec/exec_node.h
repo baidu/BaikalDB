@@ -303,7 +303,22 @@ public:
     bool is_get_keypoint() {
         return _is_get_keypoint;
     }
+    bool set_has_optimized(bool has_optimized) {
+        _has_optimized = has_optimized;
+    }
+    bool has_optimized() {
+        if (_has_optimized) {
+            return true;
+        }
+        for (auto child : _children) {
+            if (child->has_optimized()) {
+                return true;
+            }
+        } 
+        return false;
+    }
 protected:
+    bool _has_optimized = false;
     int64_t _limit = -1;
     int64_t _num_rows_returned = 0;
     bool _is_explain = false;
