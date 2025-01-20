@@ -810,6 +810,10 @@ int JoinNode::nested_loop_join(RuntimeState* state) {
 }
 
 int JoinNode::open(RuntimeState* state) {
+    if (_children.size() < 2) {
+        DB_WARNING("join node children size is %d", _children.size());
+        return -1;
+    }
     TimeCost join_time_cost;
     _outer_node = _children[0];
     _inner_node = _children[1];

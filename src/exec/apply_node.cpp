@@ -225,6 +225,10 @@ int ApplyNode::check_unique_key(RuntimeState* state, const std::map<int32_t, std
 
 
 int ApplyNode::open(RuntimeState* state) {
+    if (_children.size() < 2) {
+        DB_WARNING("apply node children size is %d", _children.size());
+        return -1;
+    }
     _outer_node = _children[0];
     _inner_node = _children[1];
     _outer_tuple_ids = _left_tuple_ids;
