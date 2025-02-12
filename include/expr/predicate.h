@@ -39,6 +39,26 @@ public:
         }
         return ExprValue::True();
     }
+    virtual int transfer_to_arrow_expression() {
+        std::vector<arrow::compute::Expression> args;
+        args.reserve(_children.size());
+        for (int i = 0; i < _children.size(); ++i) {
+            if (_children[i]->transfer_to_arrow_expression() != 0) {
+                return -1;
+            }
+            args.emplace_back(_children[i]->arrow_expr());
+        } 
+        _arrow_expr = arrow::compute::and_(args);
+        return 0;
+    }
+    virtual bool can_use_arrow_vector() {
+        for (auto& c : _children) {
+            if (!c->can_use_arrow_vector()) {
+                return false;
+            }
+        }
+        return true;
+    };
 };
 
 class OrPredicate : public ScalarFnCall {
@@ -60,6 +80,26 @@ public:
         
         return ExprValue::False();
     }
+    virtual int transfer_to_arrow_expression() {
+        std::vector<arrow::compute::Expression> args;
+        args.reserve(_children.size());
+        for (int i = 0; i < _children.size(); ++i) {
+            if (_children[i]->transfer_to_arrow_expression() != 0) {
+                return -1;
+            }
+            args.emplace_back(_children[i]->arrow_expr());
+        } 
+        _arrow_expr = arrow::compute::or_(args);
+        return 0;
+    }
+    virtual bool can_use_arrow_vector() {
+        for (auto& c : _children) {
+            if (!c->can_use_arrow_vector()) {
+                return false;
+            }
+        }
+        return true;
+    };
 };
 
 class XorPredicate : public ScalarFnCall {
@@ -75,6 +115,26 @@ public:
         }
         return ExprValue::True(); 
     }
+    virtual int transfer_to_arrow_expression() {
+        std::vector<arrow::compute::Expression> args;
+        args.reserve(_children.size());
+        for (int i = 0; i < _children.size(); ++i) {
+            if (_children[i]->transfer_to_arrow_expression() != 0) {
+                return -1;
+            }
+            args.emplace_back(_children[i]->arrow_expr());
+        } 
+        _arrow_expr = arrow::compute::call("xor", args);
+        return 0;
+    }
+    virtual bool can_use_arrow_vector() {
+        for (auto& c : _children) {
+            if (!c->can_use_arrow_vector()) {
+                return false;
+            }
+        }
+        return true;
+    };
 };
 
 class IsNullPredicate : public ScalarFnCall {
@@ -86,6 +146,26 @@ public:
         }
         return ExprValue::False();
     }
+    virtual int transfer_to_arrow_expression() {
+        std::vector<arrow::compute::Expression> args;
+        args.reserve(_children.size());
+        for (int i = 0; i < _children.size(); ++i) {
+            if (_children[i]->transfer_to_arrow_expression() != 0) {
+                return -1;
+            }
+            args.emplace_back(_children[i]->arrow_expr());
+        } 
+        _arrow_expr = arrow::compute::call("is_null", args);
+        return 0;
+    }
+    virtual bool can_use_arrow_vector() {
+        for (auto& c : _children) {
+            if (!c->can_use_arrow_vector()) {
+                return false;
+            }
+        }
+        return true;
+    };
 };
 
 class IsTruePredicate : public ScalarFnCall {
@@ -97,6 +177,21 @@ public:
         }
         return ExprValue::False();
     }
+    virtual int transfer_to_arrow_expression() {
+        if (_children[0]->transfer_to_arrow_expression() != 0) {
+            return -1;
+        }
+        _arrow_expr = arrow::compute::call("cast", {_children[0]->arrow_expr()}, arrow::compute::CastOptions::Unsafe(arrow::boolean()));
+        return 0;
+    }
+    virtual bool can_use_arrow_vector() {
+        for (auto& c : _children) {
+            if (!c->can_use_arrow_vector()) {
+                return false;
+            }
+        }
+        return true;
+    };
 };
 
 class InPredicate : public ScalarFnCall {
@@ -104,6 +199,23 @@ public:
     InPredicate() {}
     virtual int open();
     virtual ExprValue get_value(MemRow* row);
+    virtual bool can_use_arrow_vector() {
+        if (_children[0]->is_row_expr()) {
+            for (int i = 0; i < _children[0]->children_size(); ++i) {
+                // 浮点数精度问题, 暂不支持
+                if (is_double(_children[0]->children(i)->col_type())) {
+                    return false;
+                }
+            }
+        }
+        for (auto& c : _children) {
+            if (!c->can_use_arrow_vector()) {
+                return false;
+            }
+        }
+        return true;
+    }
+    virtual int transfer_to_arrow_expression();
 
 private:
     int singel_open();
@@ -153,7 +265,8 @@ public:
     template<class Charset>
     boost::optional<bool> like(const std::string& target, const std::string& pattern);
     bool like_one(const std::string& target, const std::string& pattern, pb::Charset charset);
-
+    virtual int transfer_to_arrow_expression();
+    virtual bool can_use_arrow_vector();
 private:
     ExprValue get_value_by_re2(MemRow* row);
     ExprValue get_value_by_pattern(MemRow* row);
@@ -176,7 +289,8 @@ class RegexpPredicate : public ScalarFnCall {
 public:
     virtual int open();
     virtual ExprValue get_value(MemRow* row);
-
+    virtual int transfer_to_arrow_expression();
+    virtual bool can_use_arrow_vector();
 private:
     void reset_regex(MemRow* row);
     std::unique_ptr<re2::RE2> _regex_ptr;
@@ -201,6 +315,21 @@ public:
         }
         return false;
     }
+    virtual int transfer_to_arrow_expression() {
+        if (_children[0]->transfer_to_arrow_expression() != 0) {
+            return -1;
+        }
+        _arrow_expr = arrow::compute::not_(_children[0]->arrow_expr());
+        return 0;
+    }
+    virtual bool can_use_arrow_vector() {
+        for (auto& c : _children) {
+            if (!c->can_use_arrow_vector()) {
+                return false;
+            }
+        }
+        return true;
+    }; 
 };
 
 template<class Charset>

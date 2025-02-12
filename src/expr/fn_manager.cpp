@@ -154,6 +154,7 @@ void FunctionManager::register_operators() {
     register_object_ret("rpad", rpad, pb::STRING);
     register_object_ret("instr", instr, pb::INT32);
     register_object_ret("json_extract", json_extract, pb::STRING);
+    register_object_ret("split_part", split_part, pb::STRING);
     register_object_ret("export_set", export_set, pb::STRING);
     register_object_ret("to_base64", to_base64, pb::STRING);
     register_object_ret("from_base64", from_base64, pb::STRING);
@@ -226,6 +227,8 @@ void FunctionManager::register_operators() {
     register_object_ret("datediff", datediff, pb::INT32);
     register_object_ret("date_add", date_add, pb::DATETIME);
     register_object_ret("date_sub", date_sub, pb::DATETIME);
+    register_object_ret("adddate", date_add, pb::DATETIME);
+    register_object_ret("subdate", date_sub, pb::DATETIME);
     register_object_ret("extract", extract, pb::UINT32);
     register_object_ret("tso_to_timestamp", tso_to_timestamp, pb::DATETIME);
     register_object_ret("timestamp_to_tso", timestamp_to_tso, pb::INT64);

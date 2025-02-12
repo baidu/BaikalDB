@@ -24,12 +24,13 @@ DECLARE_int32(single_store_concurrency);
 DECLARE_int64(baikaldb_alive_time_s);
 DEFINE_int32(time_length_to_delete_message, 1, "hours length to delete mem_row_descriptor of sql : default one hour");
 DEFINE_bool(limit_unappropriate_sql, false, "limit concurrency as one when select sql is unappropriate");
+
+thread_local MemRowDescriptorMap RuntimeState::sql_sign_to_mem_row_descriptor;
+
 int RuntimeState::init(const pb::StoreReq& req,
         const pb::Plan& plan, 
         const RepeatedPtrField<pb::TupleDescriptor>& tuples,
         TransactionPool* pool, StateOption option) {
-    //thread_local map:线程局部变量map,保存签名,  tuple_sign => pair<TimeCost, std::shared_ptr<SmartDescriptor>>, 避免重复BuildFile
-    static thread_local MemRowDescriptorMap sql_sign_to_mem_row_descriptor;
     for (auto& tuple : tuples) {
         if (tuple.tuple_id() >= (int)_tuple_descs.size()) {
             _tuple_descs.resize(tuple.tuple_id() + 1);
@@ -37,26 +38,17 @@ int RuntimeState::init(const pb::StoreReq& req,
         _tuple_descs[tuple.tuple_id()] = tuple;
     }
     sign = req.sql_sign();
-    uint64_t tuple_sign = tuple_descs_to_sign();
+    _tuple_sign = tuple_descs_to_sign(_tuple_descs);
 
     if (req.sql_exec_timeout() > 0) {
         _sql_exec_timeout = req.sql_exec_timeout();
     }
 
     //取出缓存的动态编译结果(按照签名)
-    if (_tuple_descs.size() > 0 && sign != 0 && tuple_sign != 0) {
-        if (sql_sign_to_mem_row_descriptor.count(tuple_sign) == 1) {
-            _mem_row_desc = sql_sign_to_mem_row_descriptor[tuple_sign].second;
-            sql_sign_to_mem_row_descriptor[tuple_sign].first.reset();//更新tuple_sign对应的使用时间
-        } else {
-            _mem_row_desc = std::make_shared<MemRowDescriptor>();
-            int ret = _mem_row_desc->init(_tuple_descs);
-            if (ret < 0) {
-                DB_WARNING("_mem_row_desc init fail");
-                return -1;
-            }
-            TimeCost start_time;
-            sql_sign_to_mem_row_descriptor[tuple_sign] = {start_time, _mem_row_desc};
+    if (_tuple_descs.size() > 0 && sign != 0 && _tuple_sign != 0) {
+        if (set_mem_row_decriptor() != 0) {
+            DB_WARNING("Fail to set_mem_row_decriptor");
+            return -1;
         }
     } else {
         _mem_row_desc = std::make_shared<MemRowDescriptor>();
@@ -66,7 +58,7 @@ int RuntimeState::init(const pb::StoreReq& req,
             return -1;
         }
     }
-    clear_mem_row_descriptor(sql_sign_to_mem_row_descriptor);//定期清理过期sql的mem_row_descriptor
+    clear_mem_row_descriptor();//定期清理过期sql的mem_row_descriptor
 
     _region_id = req.region_id();
     _region_version = req.region_version();
@@ -113,46 +105,56 @@ int RuntimeState::init(const pb::StoreReq& req,
 }
 
 int RuntimeState::init(QueryContext* ctx, DataBuffer* send_buf) {
-    //thread_local map:线程局部变量map,保存签名,  tuple_sign => pair<TimeCost, std::shared_ptr<SmartDescriptor>>, 避免重复BuildFile
-    static thread_local MemRowDescriptorMap sql_sign_to_mem_row_descriptor;
     _num_increase_rows = 0; 
     _num_affected_rows = 0; 
     _num_returned_rows = 0; 
     _num_scan_rows     = 0; 
     _num_filter_rows   = 0; 
+    region_count       = 0;
     set_client_conn(ctx->client_conn);
     if (_client_conn == nullptr) {
         return -1;
     }
+
     txn_id = _client_conn->txn_id;
     _log_id = ctx->stat_info.log_id;
-    sign    = ctx->stat_info.sign;
+    sign = ctx->stat_info.sign;
     _use_backup = ctx->use_backup;
     _need_learner_backup = ctx->need_learner_backup;
     _single_store_concurrency = ctx->single_store_concurrency;
     need_use_read_index = ctx->need_use_read_index();
+    need_read_rolling = ctx->sign_rolling.count(sign) > 0;
+    need_convert_charset = ctx->need_convert_charset;
+    connection_charset = ctx->charset;
+    table_charset = ctx->table_charset;
+    _is_from_subquery = ctx->is_from_subquery;
+    _is_union_subquery = ctx->is_union_subquery;
+    _ctx = ctx;
+    is_explain = ctx->is_explain;
+    explain_type = ctx->explain_type;
+
+    // vectorize 
+    execute_type = pb::EXEC_ROW;
+    vectorlized_parallel_execution = true; 
+    acero_declarations.clear();
+    sign_exec_type = SignExecType::SIGN_EXEC_NOT_SET;
+    arrow_input_schemas.clear(); 
+    is_simple_select = true;
+
     // prepare 复用runtime
     if (_is_inited) {
         return 0;
     }
+
     _send_buf = send_buf;
     _tuple_descs = ctx->tuple_descs();
-    uint64_t tuple_sign = tuple_descs_to_sign();
+    _tuple_sign = tuple_descs_to_sign(_tuple_descs);
 
     //取出缓存的动态编译结果(按照签名)
-    if (_tuple_descs.size() > 0 && sign != 0 && tuple_sign != 0) {
-        if (sql_sign_to_mem_row_descriptor.count(tuple_sign) == 1) {
-            _mem_row_desc = sql_sign_to_mem_row_descriptor[tuple_sign].second;
-            sql_sign_to_mem_row_descriptor[tuple_sign].first.reset();//更新tuple_sign对应的使用时间   
-        } else {
-            _mem_row_desc = std::make_shared<MemRowDescriptor>();
-            int ret = _mem_row_desc->init(_tuple_descs);
-            if (ret < 0) {
-                DB_WARNING("_mem_row_desc init fail");
-                return -1;
-            }
-            TimeCost start_time;
-            sql_sign_to_mem_row_descriptor[tuple_sign] = {start_time, _mem_row_desc};
+    if (_tuple_descs.size() > 0 && sign != 0 && _tuple_sign != 0) {
+        if (set_mem_row_decriptor() != 0) {
+            DB_WARNING("Fail to set_mem_row_decriptor");
+            return -1;
         }
     } else {
         _mem_row_desc = std::make_shared<MemRowDescriptor>();
@@ -162,7 +164,7 @@ int RuntimeState::init(QueryContext* ctx, DataBuffer* send_buf) {
             return -1;
         }
     }
-    clear_mem_row_descriptor(sql_sign_to_mem_row_descriptor);//定期清理过期sql的mem_row_descriptor
+    clear_mem_row_descriptor();//定期清理过期sql的mem_row_descriptor
 
     if (ctx->open_binlog) {
         _open_binlog = true;
@@ -249,7 +251,24 @@ int RuntimeState::memory_limit_release_all() {
     return 0;
 }
 
-void RuntimeState::clear_mem_row_descriptor(MemRowDescriptorMap& sql_sign_to_mem_row_descriptor) {
+int RuntimeState::set_mem_row_decriptor() {
+   if (sql_sign_to_mem_row_descriptor.count(_tuple_sign) == 1) {
+        _mem_row_desc = sql_sign_to_mem_row_descriptor[_tuple_sign].second;
+        sql_sign_to_mem_row_descriptor[_tuple_sign].first.reset(); // 更新tuple_sign对应的使用时间
+    } else {
+        _mem_row_desc = std::make_shared<MemRowDescriptor>();
+        int ret = _mem_row_desc->init(_tuple_descs);
+        if (ret < 0) {
+            DB_WARNING("_mem_row_desc init fail");
+            return -1;
+        }
+        TimeCost start_time;
+        sql_sign_to_mem_row_descriptor[_tuple_sign] = {start_time, _mem_row_desc};
+    }
+    return 0;
+}
+
+void RuntimeState::clear_mem_row_descriptor() {
     static thread_local TimeCost timecost; 
     int64_t time_pass = timecost.get_time();
     int64_t time_length_us = FLAGS_time_length_to_delete_message * 60 * 60 * 1000 * 1000LL; //transform hours to us 
@@ -270,13 +289,13 @@ void RuntimeState::clear_mem_row_descriptor(MemRowDescriptorMap& sql_sign_to_mem
     }
 }
 
-uint64_t RuntimeState::tuple_descs_to_sign() {
-    if (_tuple_descs.size() == 0) {
+uint64_t RuntimeState::tuple_descs_to_sign(const std::vector<pb::TupleDescriptor>& tuple_descs) {
+    if (tuple_descs.size() == 0) {
         return 0;
     }
     std::string str;
     str.reserve(100);
-    for (auto& tuple : _tuple_descs) {
+    for (auto& tuple : tuple_descs) {
         std::string tmp;
         tuple.SerializeToString(&tmp);
         str += tmp;
@@ -285,6 +304,16 @@ uint64_t RuntimeState::tuple_descs_to_sign() {
     butil::MurmurHash3_x64_128(str.c_str(), str.size(), 0x1234, out);
     return out[0];
 }
+
+int RuntimeState::reset_tuple_descs_and_mem_row_descriptor(const std::vector<pb::TupleDescriptor>& tuple_descs) {
+    uint64_t new_tuple_sign = tuple_descs_to_sign(tuple_descs);
+    if (new_tuple_sign == _tuple_sign) {
+        return 0;
+    }
+    _tuple_descs = tuple_descs;
+    _tuple_sign = new_tuple_sign;
+    return set_mem_row_decriptor();
 }
 
+}
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

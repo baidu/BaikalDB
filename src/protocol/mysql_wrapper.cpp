@@ -349,7 +349,7 @@ bool MysqlWrapper::make_field_packet(DataBuffer* array, const ResultField* field
     }
 
     // packet id
-    bytes[0] = packet_id & 0xFF;;
+    bytes[0] = packet_id & 0xFF;
     if (!array->byte_array_append_len(bytes, 1)) {
         DB_FATAL("byte_array_append_len failed.");
         return false;

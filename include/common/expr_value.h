@@ -400,6 +400,54 @@ struct ExprValue {
         }
     }
 
+    template <class T>
+    int set_numeric(T val) {
+        float_precision_len = 0;
+        switch (type) {
+            case pb::BOOL:   
+                _u.bool_val = val;
+                break;
+            case pb::INT8:   
+                _u.int8_val = val;
+                break;
+            case pb::INT16:  
+                _u.int16_val = val;
+                break;
+            case pb::INT32:
+            case pb::TIME:
+                _u.int32_val = val;
+                break;
+            case pb::INT64:
+                _u.int64_val = val;
+                break;
+            case pb::UINT8:
+                _u.uint8_val = val;
+                break;
+            case pb::UINT16:
+                _u.uint16_val = val;
+                break;
+            case pb::UINT32:
+            case pb::TIMESTAMP:
+            case pb::DATE:
+                _u.uint32_val = val;
+                break;
+            case pb::UINT64:
+            case pb::DATETIME:
+                _u.uint64_val = val;
+                break;
+            case pb::FLOAT:
+                _u.float_val = val;
+                break;
+            case pb::DOUBLE:
+                _u.double_val = val;
+                break;
+            default:
+                DB_WARNING("not numeirc type");
+                return -1;
+        }
+        return 0;
+    }
+
     int64_t size() const {
         switch (type) {
             case pb::BOOL:
@@ -609,21 +657,24 @@ struct ExprValue {
             case pb::UINT64:
                 return std::to_string(_u.uint64_val);
             case pb::FLOAT: {
-                std::ostringstream oss;
-                if (float_precision_len != -1) {
-                    oss << std::fixed << std::setprecision(float_precision_len);
+                char tmp_buf[24] = {0};
+                if (float_precision_len == -1) {
+                    snprintf(tmp_buf, sizeof(tmp_buf), "%.6g", _u.float_val);
+                } else {
+                    std::string format= "%." + std::to_string(float_precision_len) + "f";
+                    snprintf(tmp_buf, sizeof(tmp_buf), format.c_str(), _u.float_val);
                 }
-                oss << _u.float_val;
-                return oss.str();
+                return tmp_buf;
             }
             case pb::DOUBLE: {
-                std::ostringstream oss;
-                if (float_precision_len != -1) {
-                    oss << std::fixed << std::setprecision(float_precision_len) << _u.double_val;
+                char tmp_buf[24] = {0};
+                if (float_precision_len == -1) {
+                    snprintf(tmp_buf, sizeof(tmp_buf), "%.12g", _u.double_val);
                 } else {
-                    oss << std::setprecision(15) << _u.double_val;
+                    std::string format= "%." + std::to_string(float_precision_len) + "f";
+                    snprintf(tmp_buf, sizeof(tmp_buf), format.c_str(), _u.double_val);
                 }
-                return oss.str();
+                return tmp_buf;
             }
             case pb::STRING:
             case pb::HEX:
@@ -638,6 +689,79 @@ struct ExprValue {
                 return timestamp_to_str(_u.uint32_val);
             case pb::DATE:
                 return date_to_str(_u.uint32_val);
+            case pb::BITMAP: {
+                std::string final_str;
+                if (_u.bitmap != nullptr) {
+                    _u.bitmap->runOptimize();
+                    uint32_t expectedsize = _u.bitmap->getSizeInBytes();
+                    final_str.resize(expectedsize);
+                    char* buff = (char*)final_str.data();
+                    _u.bitmap->write(buff);
+                }
+                return final_str;
+            }
+            default:
+                return "";
+        }
+    }
+    
+    // 仅给row_expr in算子使用, 和get_string()类似, 区别在于时间类型, 仅将int转string, 不返回如2023-11-03 15:33:10 formatted string
+    std::string get_int_string() const {
+        if (type == pb::MAXVALUE_TYPE) {
+            return "MAXVALUE";
+        }
+        switch (type) {
+            case pb::BOOL:
+                return std::to_string(_u.bool_val);
+            case pb::INT8:
+                return std::to_string(_u.int8_val);
+            case pb::INT16:
+                return std::to_string(_u.int16_val);
+            case pb::INT32:
+                return std::to_string(_u.int32_val);
+            case pb::INT64:
+                return std::to_string(_u.int64_val);
+            case pb::UINT8:
+                return std::to_string(_u.uint8_val);
+            case pb::UINT16:
+                return std::to_string(_u.uint16_val);
+            case pb::UINT32:
+                return std::to_string(_u.uint32_val);
+            case pb::UINT64:
+                return std::to_string(_u.uint64_val);
+            case pb::FLOAT: {
+                char tmp_buf[24] = {0};
+                if (float_precision_len == -1) {
+                    snprintf(tmp_buf, sizeof(tmp_buf), "%.6g", _u.float_val);
+                } else {
+                    std::string format= "%." + std::to_string(float_precision_len) + "f";
+                    snprintf(tmp_buf, sizeof(tmp_buf), format.c_str(), _u.float_val);
+                }
+                return tmp_buf;
+            }
+            case pb::DOUBLE: {
+                char tmp_buf[24] = {0};
+                if (float_precision_len == -1) {
+                    snprintf(tmp_buf, sizeof(tmp_buf), "%.12g", _u.double_val);
+                } else {
+                    std::string format= "%." + std::to_string(float_precision_len) + "f";
+                    snprintf(tmp_buf, sizeof(tmp_buf), format.c_str(), _u.double_val);
+                }
+                return tmp_buf;
+            }
+            case pb::STRING:
+            case pb::HEX:
+            case pb::HLL:
+            case pb::TDIGEST:
+                return str_val;
+            case pb::DATETIME:
+                return std::to_string(_u.uint64_val);
+            case pb::TIME:
+                return std::to_string(_u.int32_val);
+            case pb::TIMESTAMP:
+                return std::to_string(_u.uint32_val);
+            case pb::DATE:
+                return std::to_string(_u.uint32_val);
             case pb::BITMAP: {
                 std::string final_str;
                 if (_u.bitmap != nullptr) {
@@ -697,6 +821,15 @@ struct ExprValue {
         }
     }
 
+    /**
+     * @brief 比较ExprValue对象
+     *
+     * 比较当前ExprValue对象和另一个ExprValue对象的大小关系。
+     *
+     * @param other 另一个ExprValue对象
+     *
+     * @return 返回比较结果，1表示当前对象大于other，0表示两者相等，-1表示当前对象小于other
+     */
     int64_t compare(const ExprValue& other) const {
         if (type == pb::MAXVALUE_TYPE || other.type == pb::MAXVALUE_TYPE) {
             // MAXVALUE_TYPE只用于Range分区最大值
@@ -749,6 +882,15 @@ struct ExprValue {
         }
     }
 
+    /**
+     * @brief 比较不同类型
+     *
+     * 比较与给定表达式值的其他类型，根据类型进行适当的类型转换，然后返回比较结果。
+     *
+     * @param other 表达式值对象引用
+     *
+     * @return 返回比较结果，1表示当前对象大于other，0表示两者相等，-1表示当前对象小于other
+     */
     int64_t compare_diff_type(ExprValue& other) {
         if (type == other.type) {
             return compare(other);
@@ -786,12 +928,28 @@ struct ExprValue {
         return compare(other);
     }
 
+    int convert_charset(const pb::Charset& from_charset, const pb::Charset& to_charset) {
+        if (!is_real_string()) {
+            return 0;
+        }
+        std::string new_str_val;
+        if (baikaldb::convert_charset(from_charset, str_val, to_charset, new_str_val) != 0) {
+            return -1;
+        }
+        str_val.swap(new_str_val);
+        return 0;
+    }
+
     bool is_null() const { 
         return type == pb::NULL_TYPE || type == pb::INVALID_TYPE;
     }
 
     bool is_bool() const {
         return type == pb::BOOL;
+    }
+
+    bool is_real_string() const {
+        return type == pb::STRING;
     }
 
     bool is_string() const {

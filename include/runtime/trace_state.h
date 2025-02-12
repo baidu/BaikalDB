@@ -19,7 +19,8 @@
 #include "mem_row_descriptor.h"
 #include "data_buffer.h"
 #include "proto/store.interface.pb.h"
-
+#include "arrow/acero/options.h"
+#include "arrow/acero/exec_plan.h"
 using google::protobuf::RepeatedPtrField;
 
 namespace baikaldb {
@@ -149,6 +150,95 @@ public:
         return _trace_node;
     }
 
+    static std::string print_declaration(const arrow::acero::Declaration& dec, std::shared_ptr<arrow::Schema> source_schema = nullptr, bool* info = nullptr) {
+        const std::string& factory_name = dec.factory_name;
+        std::string desc = "{" + factory_name + ": ";
+        if (dec.options == nullptr) {
+            desc += "NULL option}";
+        } else {
+            if (factory_name == "record_batch_source") {
+                if (source_schema != nullptr) {
+                    desc += "source schema: " + source_schema->ToString() + "}";
+                } else {
+                    desc += "NULL schema}";
+                }
+                if (info != nullptr) {
+                    desc += " [delay fetcher store: " + std::to_string(*info) + "]";
+                }
+            } else if (factory_name == "order_by") {
+                auto option = static_cast<arrow::acero::OrderByNodeOptions*>(dec.options.get());
+                desc += option->ordering.ToString() + "}";
+            } else if (factory_name == "filter") {
+                auto option = static_cast<arrow::acero::FilterNodeOptions*>(dec.options.get());
+                desc += option->filter_expression.ToString() + "}";
+            } else if (factory_name == "fetch") {
+                auto option = static_cast<arrow::acero::FetchNodeOptions*>(dec.options.get());
+                desc += "offset: " + std::to_string(option->offset) + ", count: " + std::to_string(option->count) + "}";
+            } else if (factory_name == "aggregate") {
+                auto option = static_cast<arrow::acero::AggregateNodeOptions*>(dec.options.get());
+                std::string agg_func;
+                std::string group_by_keys;
+                for (auto& k : option->keys) {
+                    group_by_keys += k.ToString() + " ";
+                }
+                for (auto& agg : option->aggregates) {
+                    agg_func += "[" + agg.function + "(";
+                    for (auto f : agg.target) {
+                        agg_func += f.ToString() + ",";
+                    }
+                    agg_func.pop_back();
+                    agg_func += ") -> " + agg.name + "] ";
+                }
+                desc += agg_func + " group by [" + group_by_keys + "]}";
+            } else if (factory_name == "project") {
+                auto option = static_cast<arrow::acero::ProjectNodeOptions*>(dec.options.get());
+                desc += " [";
+                for (auto& f : option->expressions) {
+                    desc += f.ToString() + ",";
+                }
+                desc.pop_back();
+                desc += "] -> [ ";
+                for (auto& f : option->names) {
+                    desc += f + ",";
+                }
+                desc.pop_back();
+                desc += "] }";
+            } else if (factory_name == "hashjoin") {
+                auto option = static_cast<arrow::acero::HashJoinNodeOptions*>(dec.options.get());
+                desc += "join type: " + arrow::acero::ToString(option->join_type) + ", on left keys: ";
+                for (auto field : option->left_keys) {
+                    desc += field.ToString() + ",";
+                }
+                desc.pop_back();
+                desc += "; on right keys: ";
+                for (auto field : option->right_keys) {
+                    desc += field.ToString() + ",";
+                }
+                desc.pop_back();
+                desc += "; filter: " + option->filter.ToString() + "; }";
+                if (info != nullptr) {
+                    desc += " [use_index_join: " + std::to_string(*info) + "]";
+                }
+            } else {
+                desc += "NOT SUPPORT TYPE}";
+            }
+        }
+        return desc;
+    }
+
+    void add_arrow_plan(const arrow::acero::Declaration& dec, std::shared_ptr<arrow::Schema> source_schema = nullptr, bool* info = nullptr) {
+        if (_trace_node != nullptr) {
+            _local_node->add_arrow_plan(print_declaration(dec, source_schema, info));
+        }
+    }
+
+    void add_arrow_filter(const arrow::compute::Expression* filter, int64_t limit) {
+        if (_trace_node != nullptr) {
+            std::string filter_str = (filter == nullptr  ? "null" : filter->ToString());
+            std::string desc = "{local filter: " + filter_str + ", " + "limit: " + std::to_string(limit) + "}";
+            _local_node->add_arrow_plan(desc);
+        }
+    }
 private:
     void local_trace_cost_constructor() {
         if (_trace_cost_vec != nullptr) {
@@ -202,7 +292,10 @@ class TraceDescVoidify {
 TraceLocalNode TRACE_LOCAL_NODE_NAME (__FUNCTION__, trace, vec, type, callback)
 #define LOCAL_TRACE(condition) !(condition) ? void(0) : TraceDescVoidify() & TRACE_LOCAL_NODE_NAME.append_description()
 #define LOCAL_TRACE_DESC LOCAL_TRACE(TRACE_LOCAL_NODE_NAME.get_trace())
-
+#define LOCAL_TRACE_ARROW_FILTER(filter, limit) TRACE_LOCAL_NODE_NAME.add_arrow_filter(filter, limit)
+#define LOCAL_TRACE_ARROW_PLAN(plan) TRACE_LOCAL_NODE_NAME.add_arrow_plan(plan)
+#define LOCAL_TRACE_ARROW_PLAN_WITH_INFO(plan, info) TRACE_LOCAL_NODE_NAME.add_arrow_plan(plan, nullptr, info)
+#define LOCAL_TRACE_ARROW_PLAN_WITH_SCHEMA(plan, schema, info) TRACE_LOCAL_NODE_NAME.add_arrow_plan(plan, schema, info)
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

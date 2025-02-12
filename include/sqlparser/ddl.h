@@ -96,6 +96,7 @@ enum ColumnOptionType : unsigned char {
     COLUMN_OPT_UNIQ_KEY,
     COLUMN_OPT_FULLTEXT,
     COLUMN_OPT_VECTOR,
+    COLUMN_OPT_ROLLUP,
     COLUMN_OPT_ON_UPDATE,
     COLUMN_OPT_COMMENT,
     COLUMN_OPT_COLLATE,
@@ -110,7 +111,8 @@ enum ConstraintType : unsigned char {
     CONSTRAINT_UNIQ,
     CONSTRAINT_FOREIGN_KEY,
     CONSTRAINT_FULLTEXT,
-    CONSTRAINT_VECTOR
+    CONSTRAINT_VECTOR,
+    CONSTRAINT_ROLLUP
 };
 
 enum IndexDistibuteType : unsigned char {
@@ -151,7 +153,8 @@ enum PartitionOptionType : unsigned char {
 enum DatabaseOptionType : unsigned char {
     DATABASE_OPT_NONE = 0,
     DATABASE_OPT_CHARSET,
-    DATABASE_OPT_COLLATE
+    DATABASE_OPT_COLLATE,
+    DATABASE_OPT_COMMENT
 };
 
 // https://dev.mysql.com/doc/refman/8.0/en/alter-table.html
@@ -318,12 +321,32 @@ struct CreateTableStmt : public DdlNode {
     }
 };
 
+struct CreateViewStmt : public DdlNode {
+    bool  or_replace = false;
+    TableName* view_name = nullptr;
+    Vector<ColumnName*>  column_names;
+    DmlNode* view_select_stmt = nullptr;
+
+    CreateViewStmt() {
+        node_type = NT_CREATE_VIEW;
+    }
+};
+
 struct DropTableStmt : public DdlNode {
     bool if_exist = false;
     Vector<TableName*> table_names;
 
     DropTableStmt() {
         node_type = NT_DROP_TABLE;
+    }
+};
+
+struct DropViewStmt : public DdlNode {
+    bool if_exist = false;
+    TableName* view_name;
+
+    DropViewStmt() {
+        node_type = NT_DROP_VIEW;
     }
 };
 
@@ -405,5 +428,16 @@ struct AlterTableStmt : public DdlNode {
         node_type = NT_ALTER_TABLE;
     }
 };
+
+struct AlterViewStmt : public DdlNode {
+    TableName* view_name = nullptr;
+    DmlNode* view_select_stmt = nullptr;
+    Vector<ColumnName*>  column_names;
+
+    AlterViewStmt() {
+        node_type = NT_ALTER_VIEW;
+    }
+};
+
 }
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

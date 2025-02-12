@@ -78,10 +78,10 @@ bool FullExportNode::get_batch(RowBatch* batch) {
         _fetcher_store.start_key_sort.erase(iter);
         if (iter2 != _fetcher_store.region_batch.end()) {
             // region merge了，拿下一个
-            if (iter2->second == nullptr) {
+            if (iter2->second.row_data == nullptr) {
                 return true;
             }
-            batch->swap(*iter2->second);
+            batch->swap(*iter2->second.row_data);
             _fetcher_store.region_batch.erase(iter2);
             return true;
         } else {
@@ -106,9 +106,10 @@ int FullExportNode::get_next_region_infos() {
     }
     scan_index_info.router_index->mutable_ranges(0)->set_left_key(_last_router_key);
     scan_index_info.router_index->mutable_ranges(0)->set_left_full(true);
-    scan_index_info.router_index->mutable_ranges(0)->set_partition_id(_current_partition);
     scan_index_info.router_index->mutable_ranges(0)->set_left_field_cnt(index_ptr->fields.size());
     scan_index_info.router_index->mutable_ranges(0)->set_left_open(false);
+    scan_index_info.router_index->mutable_ranges(0)->mutable_partition_ids()->Clear();
+    scan_index_info.router_index->mutable_ranges(0)->add_partition_ids(_current_partition);
     int ret = schema_factory->get_region_by_key(main_table_id, 
             *index_ptr, scan_index_info.router_index,
             scan_index_info.region_infos,
@@ -171,10 +172,11 @@ int FullExportNode::calc_last_key(RuntimeState* state, MemRow* mem_row) {
         pos_index.add_ranges();
     }
     pos_index.mutable_ranges(0)->set_left_key(key.data());
-    pos_index.mutable_ranges(0)->set_partition_id(_current_partition);
     pos_index.mutable_ranges(0)->set_left_full(key.get_full());
     pos_index.mutable_ranges(0)->set_left_field_cnt(pri_info->fields.size());
     pos_index.mutable_ranges(0)->set_left_open(true);
+    pos_index.mutable_ranges(0)->mutable_partition_ids()->Clear();
+    pos_index.mutable_ranges(0)->add_partition_ids(_current_partition);
     pos_index.SerializeToString(&scan_index_info.raw_index);
     return 0;
 }
@@ -286,15 +288,15 @@ int FullExportNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
             auto iter2 = _fetcher_store.region_batch.find(last_region_id);
             if (iter2 != _fetcher_store.region_batch.end()) {
                 // region merge了
-                if (iter2->second == nullptr) {
+                if (iter2->second.row_data == nullptr) {
                     iter = _fetcher_store.start_key_sort.erase(iter);
                     _fetcher_store.region_batch.erase(last_region_id);
                     continue;
-                } else if (iter2->second->size() >= _limit) {
+                } else if (iter2->second.row_data->size() >= _limit) {
                     //当前region还有数据，下轮循环从last_key开始
                     match = true;
                     match_region_ids.emplace_back(last_region_id);
-                    int ret = calc_last_key(state, iter2->second->back().get());
+                    int ret = calc_last_key(state, iter2->second.row_data->back().get());
                     if (ret < 0) { 
                         return -1;
                     }

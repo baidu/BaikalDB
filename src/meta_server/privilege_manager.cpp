@@ -19,11 +19,13 @@
 #else
 #include <brpc/channel.h>
 #endif
+#include "database_manager.h"
 #include "meta_state_machine.h"
 #include "schema_manager.h"
 #include "meta_server.h"
 #include "meta_util.h"
 #include "meta_rocksdb.h"
+#include "table_manager.h"
 
 namespace baikaldb {
 //合法性检查，真正的处理在state_machine中
@@ -38,7 +40,8 @@ void PrivilegeManager::process_user_privilege(google::protobuf::RpcController* c
     if (cntl->has_log_id()) { 
         log_id = cntl->log_id();
     }
-    if (!request->has_user_privilege()) {
+    if (!request->has_user_privilege() && 
+            request->op_type() != pb::OP_DROP_INVALID_PRIVILEGE) {
         ERROR_SET_RESPONSE(response, 
                            pb::INPUT_PARAM_ERROR, 
                            "no user_privilege", 
@@ -65,7 +68,11 @@ void PrivilegeManager::process_user_privilege(google::protobuf::RpcController* c
     case pb::OP_DROP_PRIVILEGE: {
         _meta_state_machine->process(controller, request, response,  done_guard.release()); 
         return;
-    }    
+    }
+    case pb::OP_DROP_INVALID_PRIVILEGE: {
+        _meta_state_machine->process(controller, request, response,  done_guard.release());
+        return;
+    }
     default: {
         ERROR_SET_RESPONSE(response, 
                            pb::INPUT_PARAM_ERROR, 
@@ -97,6 +104,7 @@ void PrivilegeManager::create_user(const pb::MetaManagerRequest& request, braft:
         return;
     }
     user_privilege.set_version(1);
+
     // 构造key 和 value
     std::string value;
     if (!user_privilege.SerializeToString(&value)) {
@@ -114,6 +122,7 @@ void PrivilegeManager::create_user(const pb::MetaManagerRequest& request, braft:
     //更新内存
     BAIDU_SCOPED_LOCK(_user_mutex);
     _user_privilege[username] = user_privilege;
+    insert_db_tbl_user_map(user_privilege);
     IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
     DB_NOTICE("create user success, request:%s", request.ShortDebugString().c_str());
 }
@@ -137,8 +146,10 @@ void PrivilegeManager::drop_user(const pb::MetaManagerRequest& request, braft::C
         IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "delete from db fail");
         return;
     }
+    pb::UserPrivilege delete_privilege = _user_privilege[username];
     BAIDU_SCOPED_LOCK(_user_mutex);
     _user_privilege.erase(username);
+    delete_db_tbl_user_map(delete_privilege);
     IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
     DB_NOTICE("drop user success, request:%s", request.ShortDebugString().c_str());
 }
@@ -199,22 +210,27 @@ void PrivilegeManager::add_privilege(const pb::MetaManagerRequest& request, braf
     }
     int ret = SchemaManager::get_instance()->check_and_get_for_privilege(user_privilege);          
     if (ret < 0) {
-        DB_WARNING("request not illegal, request:%s",request.ShortDebugString().c_str());
+        DB_WARNING("request not illegal, request:%s", request.ShortDebugString().c_str());
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "request invalid");
         return; 
     }
+    pb::UserPrivilege insert_privilege;
+    insert_privilege.set_username(user_privilege.username());
     pb::UserPrivilege tmp_mem_privilege = _user_privilege[username];
     for (auto& privilege_database : user_privilege.privilege_database()) {
-        insert_database_privilege(privilege_database, tmp_mem_privilege);
+        insert_database_privilege(privilege_database, tmp_mem_privilege, insert_privilege);
     }
     for (auto& privilege_table :  user_privilege.privilege_table()) {
-        insert_table_privilege(privilege_table, tmp_mem_privilege);
+        insert_table_privilege(privilege_table, tmp_mem_privilege, insert_privilege);
     }
     for (auto& bns : user_privilege.bns()) {
         insert_bns(bns, tmp_mem_privilege);
     }
     for (auto& ip : user_privilege.ip()) {
         insert_ip(ip, tmp_mem_privilege);
+    }
+    for (auto& switch_table : user_privilege.switch_tables()) {
+        insert_switch_table(switch_table, tmp_mem_privilege);
     }
     if (user_privilege.has_need_auth_addr()) {
         tmp_mem_privilege.set_need_auth_addr(user_privilege.need_auth_addr());
@@ -240,6 +256,13 @@ void PrivilegeManager::add_privilege(const pb::MetaManagerRequest& request, braf
     if (user_privilege.has_acl()) { // grank
         tmp_mem_privilege.set_acl(tmp_mem_privilege.acl() | user_privilege.acl());
     }
+    if (user_privilege.has_is_super()) {
+        tmp_mem_privilege.set_is_super(user_privilege.is_super());
+    }
+    if (user_privilege.has_is_request_additional()) {
+        tmp_mem_privilege.set_is_request_additional(user_privilege.is_request_additional());
+    }
+
     tmp_mem_privilege.set_version(tmp_mem_privilege.version() + 1);
     // 构造key 和 value
     std::string value;
@@ -257,6 +280,7 @@ void PrivilegeManager::add_privilege(const pb::MetaManagerRequest& request, braf
     }
     BAIDU_SCOPED_LOCK(_user_mutex);
     _user_privilege[username] = tmp_mem_privilege;
+    insert_db_tbl_user_map(insert_privilege);
     IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
     DB_NOTICE("add privilege success, request:%s", request.ShortDebugString().c_str());
 }
@@ -275,18 +299,23 @@ void PrivilegeManager::drop_privilege(const pb::MetaManagerRequest& request, bra
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "request invalid");
         return; 
     }
+    pb::UserPrivilege delete_privilege;
+    delete_privilege.set_username(user_privilege.username());
     pb::UserPrivilege tmp_mem_privilege = _user_privilege[username];
     for (auto& privilege_database : user_privilege.privilege_database()) {
-        delete_database_privilege(privilege_database, tmp_mem_privilege);
+        delete_database_privilege(privilege_database, tmp_mem_privilege, delete_privilege);
     }
     for (auto& privilege_table : user_privilege.privilege_table()) {
-        delete_table_privilege(privilege_table, tmp_mem_privilege);
+        delete_table_privilege(privilege_table, tmp_mem_privilege, delete_privilege);
     }
     for (auto& bns : user_privilege.bns()) {
         delete_bns(bns, tmp_mem_privilege);
     }
     for (auto& ip : user_privilege.ip()) {
         delete_ip(ip, tmp_mem_privilege);
+    }
+    for (auto& switch_table : user_privilege.switch_tables()) {
+        delete_switch_table(switch_table, tmp_mem_privilege);
     }
     if (user_privilege.has_need_auth_addr()) {
         tmp_mem_privilege.set_need_auth_addr(user_privilege.need_auth_addr());
@@ -315,6 +344,7 @@ void PrivilegeManager::drop_privilege(const pb::MetaManagerRequest& request, bra
     }
     BAIDU_SCOPED_LOCK(_user_mutex);
     _user_privilege[username] = tmp_mem_privilege;
+    delete_db_tbl_user_map(delete_privilege);
     IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
     DB_NOTICE("drop privilege success, request:%s", request.ShortDebugString().c_str());
 }
@@ -330,6 +360,8 @@ void PrivilegeManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest
 
 int PrivilegeManager::load_snapshot() {
     _user_privilege.clear();
+    _db_user_map.clear();
+    _tbl_user_map.clear();
     std::string privilege_prefix = MetaServer::PRIVILEGE_IDENTIFY;
     rocksdb::ReadOptions read_options;
     read_options.prefix_same_as_start = true;
@@ -349,12 +381,14 @@ int PrivilegeManager::load_snapshot() {
         DB_WARNING("user_privilege:%s", user_privilege.ShortDebugString().c_str());
         BAIDU_SCOPED_LOCK(_user_mutex);
         _user_privilege[username] = user_privilege;
+        insert_db_tbl_user_map(user_privilege);
     }
     return 0;
 }
 
 void PrivilegeManager::insert_database_privilege(const pb::PrivilegeDatabase& privilege_database,
-                                                  pb::UserPrivilege& mem_privilege) {
+                                                 pb::UserPrivilege& mem_privilege,
+                                                 pb::UserPrivilege& insert_privilege) {
     bool whether_exist = false;
     pb::PrivilegeDatabase* mem_database_ptr = nullptr;
     for (auto& mem_database : *mem_privilege.mutable_privilege_database()) {
@@ -379,13 +413,15 @@ void PrivilegeManager::insert_database_privilege(const pb::PrivilegeDatabase& pr
     if (!whether_exist) {
         pb::PrivilegeDatabase* ptr_database = mem_privilege.add_privilege_database();
         *ptr_database = privilege_database;
+        *(insert_privilege.add_privilege_database()) = privilege_database;
     } else if (privilege_database.has_acl()){ // for grank
         mem_database_ptr->set_acl(mem_database_ptr->acl() | privilege_database.acl());
     }
 }
 
 void PrivilegeManager::insert_table_privilege(const pb::PrivilegeTable& privilege_table,
-                                               pb::UserPrivilege& mem_privilege) {
+                                              pb::UserPrivilege& mem_privilege,
+                                              pb::UserPrivilege& insert_privilege) {
     bool whether_exist = false;
     int64_t database_id = privilege_table.database_id();
     int64_t table_id = privilege_table.table_id();
@@ -414,6 +450,7 @@ void PrivilegeManager::insert_table_privilege(const pb::PrivilegeTable& privileg
     if (!whether_exist) {
          pb::PrivilegeTable* ptr_table = mem_privilege.add_privilege_table();
          *ptr_table = privilege_table;
+         *(insert_privilege.add_privilege_table()) = privilege_table;
     } else if (privilege_table.has_acl()){ // for grank
         mem_privilege_table_ptr->set_acl(mem_privilege_table_ptr->acl() | privilege_table.acl());
     }
@@ -445,24 +482,40 @@ void PrivilegeManager::insert_ip(const std::string& ip,
     }
 }
 
-void PrivilegeManager::delete_database_privilege(const pb::PrivilegeDatabase& privilege_database,
-                                                  pb::UserPrivilege& mem_privilege) {
+void PrivilegeManager::insert_switch_table(const int64_t& switch_table,
+                                 pb::UserPrivilege& mem_privilege) {
+    bool whether_exist = false;
+    for (auto& mem_switch_table : mem_privilege.switch_tables()) {
+        if (mem_switch_table == switch_table) {
+            whether_exist = true;
+        }
+    }
+    if (!whether_exist) {
+        mem_privilege.add_switch_tables(switch_table);
+    }
+}
+
+void PrivilegeManager::delete_database_privilege(const pb::PrivilegeDatabase& privilege_database, 
+                                                 pb::UserPrivilege& mem_privilege, 
+                                                 pb::UserPrivilege& delete_privilege) {
     pb::UserPrivilege copy_mem_privilege = mem_privilege;
     mem_privilege.clear_privilege_database();
     for (auto& copy_database : copy_mem_privilege.privilege_database()) {
         if (copy_database.database_id() == privilege_database.database_id()) {
-            //收回写权限
+            // 收回写权限
             if (privilege_database.has_database_rw() && 
                     privilege_database.database_rw() < copy_database.database_rw()) {
                 auto add_database = mem_privilege.add_privilege_database();
                 *add_database = privilege_database;
+            } else {
+                *(delete_privilege.add_privilege_database()) = privilege_database;
             }
             // 收回revoke的权限
             if (privilege_database.has_acl()) {
                 auto add_database = mem_privilege.add_privilege_database();
                 *add_database = copy_database;
                 add_database->set_acl(add_database->acl() & ~privilege_database.acl());
-            }
+            } 
         } else {
             auto add_database = mem_privilege.add_privilege_database();
             *add_database = copy_database;
@@ -471,18 +524,21 @@ void PrivilegeManager::delete_database_privilege(const pb::PrivilegeDatabase& pr
 }
 
 void PrivilegeManager::delete_table_privilege(const pb::PrivilegeTable& privilege_table,
-                                               pb::UserPrivilege& mem_privilege) {
+                                              pb::UserPrivilege& mem_privilege,
+                                              pb::UserPrivilege& delete_privilege) {
     int64_t database_id = privilege_table.database_id();
     int64_t table_id = privilege_table.table_id();
     pb::UserPrivilege copy_mem_privilege = mem_privilege;
     mem_privilege.clear_privilege_table();
     for (auto& copy_table : copy_mem_privilege.privilege_table()) {
         if (database_id == copy_table.database_id() && table_id == copy_table.table_id()) {
-            //写权限收回
+            // 写权限收回
             if (privilege_table.has_table_rw() && 
                     privilege_table.table_rw() < copy_table.table_rw()) {
                  auto add_table = mem_privilege.add_privilege_table();
                  *add_table = privilege_table;
+            } else {
+                *(delete_privilege.add_privilege_table()) = privilege_table;
             }
             // 收回revoke的权限
             if (privilege_table.has_acl()) {
@@ -517,6 +573,92 @@ void PrivilegeManager::delete_ip(const std::string& ip,
             mem_privilege.add_ip(copy_ip);
         }
     }
+}
+
+void PrivilegeManager::delete_switch_table(const int64_t& switch_table,
+                                  pb::UserPrivilege& mem_privilege) {
+    pb::UserPrivilege copy_mem_privilege = mem_privilege;
+    mem_privilege.clear_switch_tables();
+    for (auto copy_switch_table : copy_mem_privilege.switch_tables()) {
+        if (copy_switch_table != switch_table) {
+            mem_privilege.add_switch_tables(copy_switch_table);
+        }
+    }
+}
+
+void PrivilegeManager::drop_invalid_privilege(const pb::MetaManagerRequest& request, braft::Closure* done) {
+    std::unordered_map<std::string, pb::UserPrivilege> user_privilege = _user_privilege;
+    for (auto& kv : user_privilege) {
+        bool has_invalid_privilege = false;
+        auto& username = kv.first;
+        auto& privilege = kv.second;
+
+        pb::UserPrivilege delete_privilege;
+        delete_privilege.set_username(username);
+
+        // drop invalid privilege_database
+        int slow = 0;
+        int fast = 0;
+        for (; fast < privilege.privilege_database().size(); ++fast) {
+            pb::DataBaseInfo db_info;
+            if (DatabaseManager::get_instance()->get_database_info(privilege.privilege_database(fast).database_id(), db_info) == 0) {
+                privilege.mutable_privilege_database()->SwapElements(slow, fast);
+                ++slow;
+            }
+        }
+        int remove_num = privilege.privilege_database().size() - slow;
+        if (remove_num > 0) {
+            has_invalid_privilege = true;
+        }
+        for (int i = 0; i < remove_num; ++i) {
+            delete_privilege.add_privilege_database()->CopyFrom(
+                        privilege.privilege_database(privilege.privilege_database().size() - 1));
+            privilege.mutable_privilege_database()->RemoveLast();
+        }
+
+        // drop invalid privilege_table
+        slow = 0;
+        fast = 0;
+        for (; fast < privilege.privilege_table().size(); ++fast) {
+            pb::SchemaInfo tbl_info;
+            if (TableManager::get_instance()->get_table_info(privilege.privilege_table(fast).table_id(), tbl_info) == 0) {
+                privilege.mutable_privilege_table()->SwapElements(slow, fast);
+                ++slow;
+            }
+        }
+        remove_num = privilege.privilege_table().size() - slow;
+        if (remove_num > 0) {
+            has_invalid_privilege = true;
+        }
+        for (int i = 0; i < remove_num; ++i) {
+            delete_privilege.add_privilege_table()->CopyFrom(
+                        privilege.privilege_table(privilege.privilege_table().size() - 1));
+            privilege.mutable_privilege_table()->RemoveLast();
+        }
+
+        if (has_invalid_privilege) {
+            privilege.set_version(privilege.version() + 1);
+            std::string value;
+            if (!privilege.SerializeToString(&value)) {
+                DB_WARNING("request serializeToArray fail, request:%s",request.ShortDebugString().c_str());
+                IF_DONE_SET_RESPONSE(done, pb::PARSE_TO_PB_FAIL, "serializeToArray fail");
+                return;
+            }
+            int ret = MetaRocksdb::get_instance()->put_meta_info(construct_privilege_key(username), value);
+            if (ret < 0) {
+                DB_WARNING("add username:%s privilege to rocksdb fail", username.c_str());
+                IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
+                return;
+            }
+            {
+                BAIDU_SCOPED_LOCK(_user_mutex);
+                _user_privilege[username] = privilege;
+                delete_db_tbl_user_map(delete_privilege);
+            }
+        }
+    }
+    IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+    DB_NOTICE("drop invalid privilege success, request: %s", request.ShortDebugString().c_str());
 }
 
 }// namespace

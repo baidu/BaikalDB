@@ -72,7 +72,7 @@ int MemRow::decode_key(int32_t tuple_id, IndexInfo& index,
     uint8_t null_flag = 0;
     const Descriptor* descriptor = tuple->GetDescriptor();
     const Reflection* reflection = tuple->GetReflection();
-    if (index.type == pb::I_KEY || index.type == pb::I_UNIQ) {
+    if (index.type == pb::I_KEY || index.type == pb::I_UNIQ || index.type == pb::I_ROLLUP) {
         null_flag = key.extract_u8(pos);
         pos += sizeof(uint8_t);
     }

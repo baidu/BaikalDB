@@ -40,6 +40,12 @@ int UpdatePlanner::plan() {
             return -1;
         }
     } 
+
+    // 获取编码转换信息
+    if (get_convert_charset_info() != 0) {
+        return -1;
+    }
+
     if (0 != parse_kv_list()) {
         return -1;
     }
@@ -184,6 +190,12 @@ int UpdatePlanner::parse_kv_list() {
     for (auto& field : pk->fields) {
         pk_field_ids.emplace(field.id);
     }
+    std::unordered_set<int32_t> need_rollup_field_ids;
+    if (_factory->has_rollup_index(table_id)) {
+        for (auto& field: table_info.fields_need_sum) {
+            need_rollup_field_ids.insert(field.id);
+        }
+    }
     std::set<int32_t> update_field_ids;
     for (int idx = 0; idx < set_list.size(); ++idx) {
         if (set_list[idx] == nullptr) {
@@ -203,6 +215,10 @@ int UpdatePlanner::parse_kv_list() {
             DB_WARNING("invalid field name in");
             return -1;
         }
+        if (_factory->has_rollup_index(table_id) && need_rollup_field_ids.count(field_info->id) == 0) {
+            DB_WARNING("table: %ld has rollup index, field: %s is not aggregate column", table_id, full_name.c_str());
+            return -1;
+        }
         auto slot = get_scan_ref_slot(alias_name, field_info->table_id, field_info->id, field_info->type);
         _update_slots.push_back(slot);
         update_field_ids.insert(field_info->id);
@@ -213,6 +229,13 @@ int UpdatePlanner::parse_kv_list() {
         // 更新主键，走全局索引流程
         if (pk_field_ids.count(field_info->id) > 0) {
             _ctx->execute_global_flow = true;
+        }
+        if (_ctx->execute_global_flow) {
+            const int64_t meta_id = ::baikaldb::get_meta_id(table_info.id);
+            if (meta_id != 0) {
+                DB_WARNING("dblink not support update partition_key or primary_key, table_id: %ld", table_info.id);
+                return -1;
+            }
         }
 
         pb::Expr value_expr;

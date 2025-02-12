@@ -259,10 +259,14 @@ inline bool all_int(std::vector<pb::PrimitiveType> types) {
 inline bool is_string(pb::PrimitiveType type) {
     switch (type) {
         case pb::STRING:
+        case pb::HEX:
+        case pb::BITMAP:
+        case pb::HLL:
+        case pb::TDIGEST:
             return true;
         default:
             return false;
-    }
+    }   
 }
 
 inline bool has_string(std::vector<pb::PrimitiveType> types) {
@@ -356,7 +360,6 @@ inline uint8_t to_mysql_type(pb::PrimitiveType type) {
         case pb::TIMESTAMP:
             return MYSQL_TYPE_TIMESTAMP;
         case pb::HLL:
-            return MYSQL_TYPE_LONGLONG;
         case pb::BITMAP:
         case pb::TDIGEST:
             return MYSQL_TYPE_STRING;

@@ -21,6 +21,7 @@
 #include <butil/containers/flat_map.h>
 #endif
 #include "slot_ref.h"
+#include "select_manager_node.h"
 
 namespace baikaldb {
 struct ExprValueVec {
@@ -103,8 +104,16 @@ public:
         }
         return true;
     }
-
-    void do_plan_router(RuntimeState* state, std::vector<ExecNode*>& scan_nodes, bool& index_has_null);
+    bool is_use_index_join() {
+        return _use_index_join;
+    }
+    void adjudge_join_type();
+    void construct_in_condition_placeholder(ExecNode* child, 
+                    std::vector<ExprNode*>& equal_slot, 
+                    std::unordered_map<ExecNode*, std::vector<ExprNode*>>& condition_filter);
+    void get_join_on_condition_filter(std::unordered_map<ExecNode*, std::vector<ExprNode*>>& condition_filter);
+    int do_plan_router(RuntimeState* state, std::vector<ExecNode*>& scan_nodes, bool& index_has_null);
+    int runtime_filter(RuntimeState* state, ExecNode* node, std::vector<ExprNode*>* in_exprs_back);
     
     pb::JoinType join_type() {
         return _join_type;
@@ -117,7 +126,7 @@ public:
 
     bool is_satisfy_filter(MemRow* row);
     int strip_out_equal_slots();
-    bool expr_is_equal_condition(ExprNode* expr);
+    bool expr_is_equal_condition_and_build_slot(ExprNode* expr);
     bool is_slot_ref_equal_condition(ExprNode* left, ExprNode* right);
     int construct_in_condition(std::vector<ExprNode*>& slot_refs,
                                   const ExprValueSet& in_values,
@@ -134,6 +143,10 @@ public:
                           MutTableKey& key);
     void construct_equal_values(const std::vector<MemRow*>& tuple_data,
                           const std::vector<ExprNode*>& slot_ref_exprs);
+    void construct_equal_values_for_vectorized(std::shared_ptr<arrow::Table> outer_table,
+                          const std::vector<ExprNode*>& slot_refs);
+    void construct_equal_values_for_vectorized(const std::vector<RegionReturnData>& outer_data,
+                          const std::vector<ExprNode*>& slot_refs);
     int construct_result_batch(RowBatch* batch, 
                                MemRow* outer_mem_row, 
                                MemRow* inner_mem_row,
@@ -186,6 +199,11 @@ protected:
     size_t  _loops = 0;
     RowBatch _inner_row_batch;
     std::map<int32_t, std::set<int32_t>> _inner_equal_field_ids; // 用于检查内查询的等值条件是否具有唯一性
+    
+    // vectorized
+    bool    _use_index_join = true;
+    std::shared_ptr<arrow::Table> _outer_intermediate_join_result_table;
+    std::shared_ptr<arrow::Table> _inner_intermediate_join_result_table;
 };
 }
 

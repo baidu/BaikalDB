@@ -22,26 +22,28 @@
 #include "password.h"
 #include "table_record.h"
 #include "information_schema.h"
+#include "proto_process.hpp"
 
 using google::protobuf::FileDescriptor;
 namespace baikaldb {
 DEFINE_bool(need_health_check, true, "need_health_check");
+DECLARE_string(meta_server_bns);
 BthreadLocal<bool> SchemaFactory::use_backup;
-int SchemaFactory::init() {
+int SchemaFactory::init(bool is_db, bool is_backup) {
     if (_is_inited) {
         return 0;
     }
-
     _split_index_map.read_background()->init(12301);
     _split_index_map.read()->init(12301);
-
     int ret = bthread::execution_queue_start(&_region_queue_id, nullptr, 
             update_regions_double_buffer, (void*)this);
     if (ret != 0) {
         DB_FATAL("execution_queue_start error, %d", ret);
         return -1;
     }
-
+    if (is_db && !is_backup) {
+        update_meta_map(FLAGS_meta_server_bns);
+    }
     _is_inited = true;
     return 0;
 }
@@ -51,6 +53,13 @@ void SchemaFactory::update_table(const pb::SchemaInfo& table) {
         std::bind(&SchemaFactory::update_table_internal, this, std::placeholders::_1, std::placeholders::_2);
     delete_table_region_map(table);
     _double_buffer_table.Modify(update_func, table);
+}
+
+void SchemaFactory::delete_table(const int64_t table_id) {
+    std::function<int(SchemaMapping& schema_mapping)> delete_func =
+        std::bind(&SchemaFactory::delete_table_internal, this, std::placeholders::_1, table_id);
+    delete_table_region_map(table_id);
+    _double_buffer_table.Modify(delete_func);
 }
 
 void SchemaFactory::update_tables_double_buffer_sync(const SchemaVec& tables) {
@@ -132,56 +141,85 @@ int SchemaFactory::update_instance_internal(IdcMapping& idc_mapping, const std::
     return 1;
 }
 
-void SchemaFactory::update_idc(const pb::IdcInfo& idc_info) {
+void SchemaFactory::update_idc(const pb::IdcInfo& idc_info, const int64_t meta_id) {
     std::function<int(IdcMapping&, const pb::IdcInfo&)> call_func = 
-        std::bind(&SchemaFactory::update_idc_internal, this, std::placeholders::_1, std::placeholders::_2);
+        std::bind(&SchemaFactory::update_idc_internal, this, std::placeholders::_1, std::placeholders::_2, meta_id);
     _double_buffer_idc.Modify(
         call_func,
         idc_info
     );
 }
 
-int SchemaFactory::update_idc_internal(IdcMapping& idc_mapping, const pb::IdcInfo& idc_info) {
+int SchemaFactory::update_idc_internal(IdcMapping& idc_mapping, const pb::IdcInfo& idc_info, const int64_t meta_id) {
     //double buffer根据该函数返回值确定是否更新idc_mapping。0：不更新，非0：更新
     SELF_TRACE("update_idc idc_info[%s]", idc_info.ShortDebugString().c_str());
-    std::unordered_map<std::string, InstanceDBStatus> tmp_map;
-    tmp_map.swap(idc_mapping.instance_info_mapping);
-    idc_mapping.physical_logical_mapping.clear();
+    
+    std::unordered_map<std::string, std::string> physical_logical_mapping;
     for (auto& logical_physical : idc_info.logical_physical_map()) {
         std::string logical_room = logical_physical.logical_room();
         for (auto& physical_room : logical_physical.physical_rooms()) {
-            idc_mapping.physical_logical_mapping[physical_room] = logical_room;
+            physical_logical_mapping[physical_room] = logical_room;
         }
+    }
+    // 只有主meta需要physical_logical_mapping
+    if (meta_id == 0) {
+        idc_mapping.physical_logical_mapping.swap(physical_logical_mapping);
+    }
+    // 删除meta中不存在的store
+    for (auto iter = idc_mapping.instance_info_mapping.begin(); 
+                iter != idc_mapping.instance_info_mapping.end();) {
+        const std::string& address = iter->first;
+        bool is_exist = false;
+        for (const auto& kv : idc_mapping.meta_store_mapping) {
+            const std::unordered_set<std::string>& store_set = kv.second;
+            if (store_set.find(address) != store_set.end()) {
+                is_exist = true;
+                break;
+            }
+        }
+        if (!is_exist) {
+            iter = idc_mapping.instance_info_mapping.erase(iter);
+        } else {
+            ++iter;
+        }
+    }
+    // 处理对应meta的数据
+    std::unordered_map<std::string, InstanceDBStatus> tmp_map;
+    if (idc_mapping.meta_store_mapping.find(meta_id) != idc_mapping.meta_store_mapping.end()) {
+        for (const auto& address : idc_mapping.meta_store_mapping[meta_id]) {
+            if (idc_mapping.instance_info_mapping.find(address) != idc_mapping.instance_info_mapping.end()) {
+                tmp_map[address] = idc_mapping.instance_info_mapping[address];
+                idc_mapping.instance_info_mapping.erase(address);
+            }
+        }
+        idc_mapping.meta_store_mapping[meta_id].clear();
     }
     for (auto& instance : idc_info.instance_infos()) {
         std::string address = instance.address();
         std::string physical_room = instance.physical_room();
-        auto iter = idc_mapping.physical_logical_mapping.find(physical_room);
-        if (iter == idc_mapping.physical_logical_mapping.end()) {
+        auto iter = physical_logical_mapping.find(physical_room);
+        if (iter == physical_logical_mapping.end()) {
             continue;
         }
         tmp_map[address].logical_room = iter->second;
         tmp_map[address].resource_tag = instance.resource_tag();
         idc_mapping.instance_info_mapping[address] = tmp_map[address];
+        idc_mapping.meta_store_mapping[meta_id].emplace(address);
     }
     return 1;
 }
 
-//TODO
-void SchemaFactory::delete_table(const pb::SchemaInfo& table, SchemaMapping& background) {
-    if (!table.has_table_id()) {
-        DB_FATAL("missing fields in SchemaInfo");
-        return;
-    }
+int SchemaFactory::delete_table_internal(SchemaMapping& background, const int64_t table_id) {
     auto& table_info_mapping = background.table_info_mapping;
     auto& table_name_id_mapping = background.table_name_id_mapping;
     auto& index_info_mapping = background.index_info_mapping;
     auto& index_name_id_mapping = background.index_name_id_mapping;
     auto& global_index_id_mapping = background.global_index_id_mapping;
-    int64_t table_id = table.table_id();
+    auto& index_table_info_mapping = background.index_table_info_mapping;
+
     if (table_info_mapping.count(table_id) == 0) {
         DB_FATAL("no table found with tableid: %ld", table_id);
-        return;
+        return -1;
     }
     auto tbl_info_ptr = table_info_mapping[table_id];
     auto& tbl_info = *tbl_info_ptr;
@@ -207,6 +245,7 @@ void SchemaFactory::delete_table(const pb::SchemaInfo& table, SchemaMapping& bac
             DB_WARNING("full_idx_name deleted: %ld", index_name_id_mapping.size());
         }
         index_info_mapping.erase(index_id);
+        index_table_info_mapping.erase(index_id);
     }
 
     delete tbl_info.file_proto;
@@ -219,14 +258,42 @@ void SchemaFactory::delete_table(const pb::SchemaInfo& table, SchemaMapping& bac
             });
 
     table_info_mapping.erase(table_id);
-    return;
+    return 1;
+}
+
+void SchemaFactory::delete_table(const pb::SchemaInfo& table, SchemaMapping& background) {
+    if (!table.has_table_id()) {
+        DB_FATAL("missing fields in SchemaInfo");
+        return;
+    }
+    delete_table_internal(background, table.table_id());
 }
 
 void SchemaFactory::update_schema_conf(const std::string& table_name, 
                                        const pb::SchemaConf &schema_conf, 
                                        pb::SchemaConf& mem_conf) {
-    
     update_schema_conf_common(table_name, schema_conf, &mem_conf);
+}
+
+void SchemaFactory::update_meta_map(const std::string& meta_name) {
+    std::function<int(MetaMap& meta_map, const std::string& meta_name)> update_func =
+        std::bind(&SchemaFactory::update_meta_map_internal, this, std::placeholders::_1, std::placeholders::_2);
+    _doubly_buffer_meta_map.Modify(update_func, meta_name);
+}
+
+int SchemaFactory::update_meta_map_internal(MetaMap& meta_map, const std::string& meta_name) {
+    // double buffer根据该函数返回值确定是否更新meta_map。0：不更新，非0：更新
+    if (meta_map.meta_name_id_map.find(meta_name) != meta_map.meta_name_id_map.end()) {
+        return 0;
+    }
+    if (meta_map.max_meta_id >= MAX_META_ID) {
+        DB_FATAL("meta id overflow");
+        return -1;
+    }
+    const int64_t meta_id = meta_map.max_meta_id++;
+    meta_map.meta_name_id_map[meta_name] = meta_id;
+    meta_map.meta_id_name_map[meta_id] = meta_name;
+    return 1;
 }
 
 // not thread-safe
@@ -236,6 +303,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
     auto& db_info_mapping = background.db_info_mapping;
     auto& db_name_id_mapping = background.db_name_id_mapping;
     auto& global_index_id_mapping = background.global_index_id_mapping;
+    auto& index_table_info_mapping = background.index_table_info_mapping;
 
     //DB_WARNING("table:%s", table.ShortDebugString().c_str());
     if (!_is_inited) {
@@ -269,7 +337,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
 
     // create table if not exists
     std::string table_name("table_" + std::to_string(table_id));
-    //std::string old_tbl_name;
+    // std::string old_tbl_name;
     std::unordered_set<int64_t> last_indics;
 
     SmartTable tbl_info_ptr = std::make_shared<TableInfo>();
@@ -288,7 +356,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
             //tbl_info.version, table.version(), table_id);
             return 0;
         }
-        //old_tbl_name = tbl_info.name;
+        // old_tbl_name = tbl_info.name;
         // file_proto build完的内容不能删除
         tbl_info.file_proto->Clear();
         tbl_info.fields.clear();
@@ -297,12 +365,16 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         tbl_info.reverse_fields.clear();
         tbl_info.arrow_reverse_fields.clear();
         tbl_info.has_global_not_none = false;
+        tbl_info.has_rollup_index = false;
         tbl_info.has_index_write_only_or_write_local = false;
         tbl_info.sign_blacklist.clear();
         tbl_info.sign_forcelearner.clear();
+        tbl_info.sign_rolling.clear();
         tbl_info.sign_forceindex.clear();
         tbl_info.fields_need_sum.clear();
+        tbl_info.sign_exec_type.clear();
         tbl_info.has_version = false;
+        tbl_info.snapshot_blacklist.clear();
     }
     TableInfo& tbl_info = *tbl_info_ptr;
     tbl_info.file_proto->mutable_options()->set_cc_enable_arenas(true);
@@ -322,6 +394,12 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
     } else {
         tbl_info.region_split_lines = table.region_size() / tbl_info.byte_size_per_record;
     }
+    tbl_info.is_view = false;
+    tbl_info.view_select_stmt = "";
+    if (table.has_view_select_stmt() && table.view_select_stmt().size() > 0) {
+        tbl_info.is_view = true;
+        tbl_info.view_select_stmt = table.view_select_stmt();
+    } 
     //DB_WARNING("schema_conf:%s", table.schema_conf().ShortDebugString().c_str());
     if (table.has_schema_conf()) {
         update_schema_conf(_tbl_name, table.schema_conf(), tbl_info.schema_conf);
@@ -363,6 +441,16 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
                 DB_DEBUG("sign_num: %lu, sign_str: %s", sign_num, sign_str.c_str());
             }
         }
+        if (tbl_info.schema_conf.has_sign_rolling() && tbl_info.schema_conf.sign_rolling() != "") {
+            DB_DEBUG("sign_forcelearner: %s", tbl_info.schema_conf.sign_forcelearner().c_str());
+            std::vector<std::string> vec;
+            boost::split(vec, tbl_info.schema_conf.sign_rolling(), boost::is_any_of(","));
+            for (auto& sign_str : vec) {
+                uint64_t sign_num = strtoull(sign_str.c_str(), nullptr, 10);
+                tbl_info.sign_rolling.emplace(sign_num);
+                DB_DEBUG("sign_num: %lu, sign_str: %s", sign_num, sign_str.c_str());
+            }
+        }
         if (tbl_info.schema_conf.has_sign_forceindex() && tbl_info.schema_conf.sign_forceindex() != "") {
             DB_DEBUG("sign_forceindex: %s", tbl_info.schema_conf.sign_forceindex().c_str());
             std::vector<std::string> vec;
@@ -370,6 +458,25 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
             for (auto& sign_str : vec) {
                 tbl_info.sign_forceindex.emplace(sign_str);
                 DB_DEBUG("sign_str: %s", sign_str.c_str());
+            }
+        }
+        if (tbl_info.schema_conf.has_sign_exec_type() && tbl_info.schema_conf.sign_exec_type() != "") {
+            DB_DEBUG("sign_exectype: %s", tbl_info.schema_conf.sign_exec_type().c_str());
+            std::vector<std::string> vec;
+            boost::split(vec, tbl_info.schema_conf.sign_exec_type(), boost::is_any_of(","));
+            for (auto& sign_str : vec) {
+                tbl_info.sign_exec_type.emplace(sign_str);
+                DB_DEBUG("sign_str: %s", sign_str.c_str());
+            }
+        }
+        if (tbl_info.schema_conf.has_snapshot_blacklist() && tbl_info.schema_conf.snapshot_blacklist() != "") {
+            DB_DEBUG("snapshot_exectype: %s", tbl_info.schema_conf.snapshot_blacklist().c_str());
+            std::vector<std::string> vec;
+            boost::split(vec, tbl_info.schema_conf.snapshot_blacklist(), boost::is_any_of(","));
+            for (auto& snapshot_str : vec) {
+                uint64_t snapshot_num = strtoull(snapshot_str.c_str(), nullptr, 10);
+                tbl_info.snapshot_blacklist.emplace(snapshot_num);
+                DB_DEBUG("snapshot_num: %lu, snapshot_str: %s", snapshot_num, snapshot_str.c_str());
             }
         }
         if (tbl_info.schema_conf.auto_inc_rand_max() > 0) {
@@ -611,6 +718,21 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
             return -1;
         }
     }
+
+    if (table.engine() == pb::DBLINK) {
+        tbl_info.dblink_info = table.dblink_info();
+        const std::string& meta_name = tbl_info.dblink_info.meta_name();
+        int64_t meta_id = -1;
+        if (get_meta_id(meta_name, meta_id) != 0) {
+            update_meta_map(meta_name);
+            if (get_meta_id(meta_name, meta_id) != 0) {
+                DB_FATAL("Fail to get_meta_id, meta_name:%s", meta_name.c_str());
+                return -1;
+            }
+        }
+        tbl_info.dblink_info.set_meta_id(meta_id);
+    }
+
     if (pb_need_update) {
         const FileDescriptor* db_desc = tmp_pool->BuildFile(*tbl_info.file_proto);
         if (db_desc == nullptr) {
@@ -646,11 +768,12 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         database_id);
 
     std::string _db_table(try_to_lower(_namespace + "." + _db_name + "." + _tbl_name));
-    //old_tbl_name = _namespace + "." + old_tbl_name;
-    //if (!old_tbl_name.empty() && old_tbl_name != _db_table) {
-        //table_name_id_mapping.erase(old_tbl_name);
-        //_db_table = _namespace + "." + _db_name + "." + table.new_table_name();
-    //}
+    // baikalDM切表时，业务读写使用原表名不能失败
+    // old_tbl_name = _namespace + "." + old_tbl_name;
+    // if (!old_tbl_name.empty() && old_tbl_name != _db_table) {
+    //     table_name_id_mapping.erase(old_tbl_name);
+    //     _db_table = _namespace + "." + _db_name + "." + table.new_table_name();
+    // }
     table_name_id_mapping[_db_table] = table_id;
     //get all pk fields descriptor
     size_t index_cnt = table.indexs_size();
@@ -682,8 +805,11 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         }
         if (cur.index_type() == pb::I_FULLTEXT) {
             tbl_info.has_fulltext = true;
+        } else if (cur.index_type() == pb::I_ROLLUP) {
+            tbl_info.has_rollup_index = true;
+        } else if (cur.index_type() == pb::I_VECTOR) {
+            tbl_info.has_vector_index = true;
         }
-        
         if (!cur.is_global() && (cur.state() == pb::IS_WRITE_ONLY || cur.state() == pb::IS_WRITE_LOCAL)) {
             tbl_info.has_index_write_only_or_write_local = true;
         }
@@ -726,7 +852,12 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
             }
         }
     }
-
+    // index_id => table_id
+    for (size_t idx = 0; idx < index_cnt; ++idx) {
+        const pb::IndexInfo& cur = table.indexs(idx);
+        int64_t index_id = cur.index_id();
+        index_table_info_mapping[index_id] = table_id;
+    }
     db_info_mapping[database_id] = db_info;
     table_info_mapping[table_id] = tbl_info_ptr;
     return 1;
@@ -772,6 +903,7 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
     idx_info.type = index.index_type();
     idx_info.state = index.state();
     idx_info.max_field_id = table_info.max_field_id;
+    idx_info.publish_timestamp = index.publish_timestamp();
     if (idx_info.state == pb::IS_WRITE_ONLY) {
         auto time = butil::gettimeofday_us();
         DB_DEBUG("update write_only timestamp %ld", time);
@@ -809,8 +941,16 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
     if (index.has_nprobe()) {
         idx_info.nprobe = index.nprobe();
     }
+    if (index.has_efsearch()) {
+        idx_info.efsearch = index.efsearch();
+    }
+    if (index.has_efconstruction()) {
+        idx_info.efconstruction = index.efconstruction();
+    }
     int field_cnt = index.field_ids_size();
-
+    if (index.index_type() == pb::I_ROLLUP) {
+        idx_info.rollup_type = index.rollup_type();
+    }
     //用于构建 std::vector<std::pair<int,int> > pk_pos;
     std::unordered_map<int32_t, int32_t> id_map;
 
@@ -1271,6 +1411,16 @@ void SchemaFactory::update_user(const pb::UserPrivilege& user) {
             if (user.has_request_range_partition_type()) {
                 iter->second->request_range_partition_type = user.request_range_partition_type();
             }
+            if (user.has_is_super()) {
+                iter->second->is_super = user.is_super();
+            }
+            if (user.has_is_request_additional()) {
+                iter->second->is_request_additional = user.is_request_additional();
+            }
+            iter->second->switch_tables.clear();
+            for (const auto& switch_table : user.switch_tables()) {
+                iter->second->switch_tables.emplace(switch_table);
+            }
         }
     }
     user_info->username = username;
@@ -1287,6 +1437,16 @@ void SchemaFactory::update_user(const pb::UserPrivilege& user) {
     }
     if (user.has_request_range_partition_type()) {
         user_info->request_range_partition_type = user.request_range_partition_type();
+    }
+    if (user.has_is_super()) {
+        user_info->is_super = user.is_super();
+    }
+    if (user.has_is_request_additional()) {
+        user_info->is_request_additional = user.is_request_additional();
+    }
+    user_info->switch_tables.clear();
+    for (const auto& switch_table : user.switch_tables()) {
+        user_info->switch_tables.emplace(switch_table);
     }
     scramble(user_info->scramble_password,
         ("\x26\x4f\x37\x58"
@@ -1367,6 +1527,7 @@ void SchemaFactory::update_user(const pb::UserPrivilege& user) {
 void SchemaFactory::update_show_db(const DataBaseVec& db_infos) {
     BAIDU_SCOPED_LOCK(_update_show_db_mutex);
     _show_db_info.clear();
+    _show_db_id_name_map.clear();
     for (auto db_info : db_infos) {
         DB_WARNING("update_show_db: %s.%s", db_info.namespace_name().c_str(), db_info.database().c_str());
         if (db_info.namespace_name() == "INTERNAL" && db_info.database() == "baikaldb") {
@@ -1378,8 +1539,38 @@ void SchemaFactory::update_show_db(const DataBaseVec& db_infos) {
         info.version = db_info.version();
         info.name = db_info.database();
         info.namespace_ = db_info.namespace_name();
+        // for information_schema
+        if (db_info.has_engine()) {
+            info.has_engine = true;
+            info.engine = db_info.engine();
+        }
+        if (db_info.has_charset()) {
+            info.has_charset = true;
+            info.charset = db_info.charset();
+        }
+        info.resource_tag = db_info.resource_tag();
+        info.main_logical_room = db_info.main_logical_room();
+        info.replica_num = db_info.replica_num();
+        info.byte_size_per_record = db_info.byte_size_per_record();
+        info.region_split_lines = db_info.region_split_lines();
+        info.partition_info_str = db_info.partition_info_str();
+        for (const auto& learner_resource_tag : db_info.learner_resource_tags()) {
+            info.learner_resource_tags.emplace_back(learner_resource_tag);
+        }
+        for (const auto& binlog_info : db_info.binlog_infos()) {
+            info.binlog_infos.emplace_back(binlog_info);
+        }
+        for (const auto& dist : db_info.dists()) {
+            DistInfo dist_info;
+            dist_info.resource_tag = dist.resource_tag();
+            dist_info.logical_room = dist.logical_room();
+            dist_info.physical_room = dist.physical_room();
+            dist_info.count = dist.count();
+            info.dists.emplace_back(dist_info);
+        }
         _show_db_info[info.id] = info;
         _show_db_name_id_mapping[try_to_lower(info.namespace_ + "." + info.name)] = info.id;
+        _show_db_id_name_map[info.namespace_ + "." + info.name] = info.id;
     }
     //特殊处理information_schema
     DatabaseInfo info;
@@ -1387,8 +1578,10 @@ void SchemaFactory::update_show_db(const DataBaseVec& db_infos) {
     info.version = 1;
     info.name = "information_schema";
     info.namespace_ = "INTERNAL";
+    info.engine = pb::INFORMATION_SCHEMA;
     _show_db_info[info.id] = info;
     _show_db_name_id_mapping[try_to_lower(info.namespace_ + "." + info.name)] = info.id;
+    _show_db_id_name_map[info.namespace_ + "." + info.name] = info.id;
 }
 
 void SchemaFactory::update_statistics(const StatisticsVec& statistics) {
@@ -1540,10 +1733,13 @@ void SchemaFactory::table_with_statistics_info(std::vector<std::string>& databas
         DB_WARNING("read double_buffer_table error.");
         return; 
     }
-
     auto& table_statistics_mapping = table_ptr->table_statistics_mapping;
     auto& table_info_mapping = table_ptr->table_info_mapping;
     for (auto& st : table_statistics_mapping) {
+        const int64_t meta_id = ::baikaldb::get_meta_id(st.first);
+        if (meta_id != 0) {
+            continue;
+        }
         auto table = table_info_mapping.find(st.first);
         if (table != table_info_mapping.end()) {
             database_table.push_back(table->second->namespace_ + "." + table->second->name);
@@ -1577,6 +1773,24 @@ SmartRecord SchemaFactory::new_record(int64_t tableid) {
         return nullptr;
     }
     return new_record(*table_info_mapping.at(tableid));
+}
+
+// for information_schema
+int SchemaFactory::get_db_id(const std::string& full_database_name, int64_t& db_id) {
+    BAIDU_SCOPED_LOCK(_update_show_db_mutex);
+    if (_show_db_id_name_map.count(full_database_name) == 0) {
+        return -1;
+    }
+    db_id = _show_db_id_name_map[full_database_name];
+    return 0;
+}
+
+DatabaseInfo SchemaFactory::get_db_info(int64_t database_id) {
+    BAIDU_SCOPED_LOCK(_update_show_db_mutex);
+    if (_show_db_info.count(database_id) == 0) {
+        return DatabaseInfo();
+    }
+    return _show_db_info[database_id];
 }
 
 DatabaseInfo SchemaFactory::get_database_info(int64_t databaseid) {
@@ -1647,10 +1861,27 @@ SmartTable SchemaFactory::get_table_info_ptr_by_name(const std::string& table_na
     return iter->second;
 }
 
+SmartTable SchemaFactory::get_table_info_ptr_by_index(int64_t indexid) {
+    DoubleBufferedTable::ScopedPtr table_ptr;
+    if (_double_buffer_table.Read(&table_ptr) != 0) {
+        DB_WARNING("read double_buffer_table error.");
+        return nullptr; 
+    }
+    auto table_id_iter = table_ptr->index_table_info_mapping.find(indexid);
+    if (table_id_iter == table_ptr->index_table_info_mapping.end()) {
+        return nullptr;
+    }
+    auto table_iter = table_ptr->table_info_mapping.find(table_id_iter->second);
+    if (table_iter == table_ptr->table_info_mapping.end()) {
+        return nullptr;
+    }
+    return table_iter->second;
+}
+
 IndexInfo SchemaFactory::get_index_info(int64_t indexid) {
     auto ptr = get_index_info_ptr(indexid);
     if (ptr != nullptr) {
-    return *ptr;
+        return *ptr;
     } else {
         return IndexInfo();
     }
@@ -1667,6 +1898,23 @@ SmartIndex SchemaFactory::get_index_info_ptr(int64_t indexid) {
         return nullptr;
     }
     return iter->second;
+}
+
+std::vector<int64_t> SchemaFactory::get_all_index_info(int64_t tableid) {
+    DoubleBufferedTable::ScopedPtr table_ptr;
+    if (_double_buffer_table.Read(&table_ptr) != 0) {
+        DB_WARNING("read double_buffer_table error.");
+        return std::vector<int64_t>();
+    }
+    auto table_iter = table_ptr->table_info_mapping.find(tableid);
+    if (table_iter == table_ptr->table_info_mapping.end()) {
+        return std::vector<int64_t>();
+    }
+    if (table_iter->second == nullptr) {
+        DB_FATAL("table_iter->second is nullptr");
+        return std::vector<int64_t>();
+    }
+    return table_iter->second->indices;
 }
 
 std::string SchemaFactory::get_index_name(int64_t index_id) {
@@ -1729,15 +1977,45 @@ std::shared_ptr<SqlStatistics> SchemaFactory::create_sql_stat(int64_t sign) {
     return sql_info_update;
 }
 
-std::vector<std::string> SchemaFactory::get_db_list(const std::set<int64_t>& db) {
+std::vector<std::string> SchemaFactory::get_db_list(const std::shared_ptr<UserInfo>& user_info) {
     std::vector<std::string> vec;
+    if (user_info == nullptr) {
+        return vec;
+    }
     BAIDU_SCOPED_LOCK(_update_show_db_mutex);
-    for (auto id : db) {
-        if (_show_db_info.count(id) == 1) {
-            vec.push_back(_show_db_info[id].name);
+    if (user_info->is_super) {
+        for (const auto& kv : _show_db_info) {
+            if (kv.second.namespace_ == user_info->namespace_ ||
+                    kv.second.id == InformationSchema::get_instance()->db_id()) {
+                vec.push_back(kv.second.name);
+            }
+        }
+    } else {
+        for (auto id : user_info->all_database) {
+            if (_show_db_info.count(id) == 1) {
+                vec.push_back(_show_db_info[id].name);
+            }
         }
     }
     return vec;
+}
+
+std::set<int64_t> SchemaFactory::get_db_id_list(const std::shared_ptr<UserInfo>& user_info) {
+    std::set<int64_t> db_id_set;
+    if (user_info == nullptr) {
+        return db_id_set;
+    }
+    if (!user_info->is_super) {
+        return user_info->all_database;
+    }
+    BAIDU_SCOPED_LOCK(_update_show_db_mutex);
+    for (const auto& kv : _show_db_info) {
+        if (kv.second.namespace_ == user_info->namespace_
+                || kv.second.id == InformationSchema::get_instance()->db_id()) {
+            db_id_set.emplace(kv.second.id);
+        }
+    }
+    return db_id_set;
 }
 
 std::vector<std::string> SchemaFactory::get_table_list(
@@ -1756,7 +2034,8 @@ std::vector<std::string> SchemaFactory::get_table_list(
     for (auto& table_pair : table_ptr->table_info_mapping) {
         auto& table_info = *(table_pair.second);
         if (table_info.db_id == db_id) {
-            if (user->database.count(db_id) == 1 ||
+            if (user->is_super ||
+                user->database.count(db_id) == 1 ||
                 user->table.count(table_info.id) == 1 ||
                 user->table_name.count(table_info.short_name) == 1) {
                 vec.push_back(table_info.short_name);
@@ -1781,12 +2060,17 @@ std::vector<SmartTable> SchemaFactory::get_table_list(std::string namespace_, Us
     }
     vec.reserve(table_ptr->table_info_mapping.size());
     for (auto& table_pair : table_ptr->table_info_mapping) {
+        const int64_t meta_id = ::baikaldb::get_meta_id(table_pair.first);
+        if (meta_id != 0) {
+            continue;
+        }
         auto& table_info = table_pair.second;
         if (user == nullptr) {
             vec.emplace_back(table_info);
             continue;
         }
-        if(user->database.count(table_info->db_id) == 1 ||
+        if(user->is_super ||
+                user->database.count(table_info->db_id) == 1 ||
                 user->table.count(table_info->id) == 1) {
             vec.emplace_back(table_info);
         } else if (user->acl_user != 0 ||
@@ -1806,6 +2090,10 @@ void SchemaFactory::get_all_table_by_db(const std::string& namespace_, const std
         return;
     }
     for (const auto& table_pair : table_ptr->table_info_mapping) {
+        const int64_t meta_id = ::baikaldb::get_meta_id(table_pair.first);
+        if (meta_id != 0) {
+            continue;
+        }
         if (table_pair.second->namespace_ == namespace_) {
             if (table_pair.second->name == (db_name + "." + table_pair.second->short_name)) {
                 table_ptrs.emplace_back(table_pair.second);
@@ -1822,6 +2110,10 @@ void SchemaFactory::get_all_table_version(std::unordered_map<int64_t, int64_t>& 
         return;
     }
     for (auto& table_pair : table_ptr->table_info_mapping) {
+        const int64_t meta_id = ::baikaldb::get_meta_id(table_pair.first);
+        if (meta_id != 0) {
+            continue;
+        }
         table_id_version_map[table_pair.first] = table_pair.second->version;
     }
 }
@@ -1834,6 +2126,10 @@ void SchemaFactory::get_all_table_split_lines(std::unordered_map<int64_t, int64_
         return;
     }
     for (auto& table_pair : table_ptr->table_info_mapping) {
+        const int64_t meta_id = ::baikaldb::get_meta_id(table_pair.first);
+        if (meta_id != 0) {
+            continue;
+        }
         if (table_pair.second->region_split_lines >= max_split_line) {
             table_id_split_lines_map[table_pair.first] = table_pair.second->region_split_lines;
         }
@@ -1963,6 +2259,10 @@ void SchemaFactory::get_cost_switch_open(std::vector<std::string>& database_tabl
     auto& table_info_mapping = table_ptr->table_info_mapping;
 
     for (auto& table : table_info_mapping) {
+        const int64_t meta_id = ::baikaldb::get_meta_id(table.first);
+        if (meta_id != 0) {
+            continue;
+        }
         auto& pb_conf = table.second->schema_conf;
         const google::protobuf::Reflection* reflection = pb_conf.GetReflection();
         const google::protobuf::Descriptor* descriptor = pb_conf.GetDescriptor();
@@ -1994,6 +2294,10 @@ void SchemaFactory::get_schema_conf_open(const std::string& conf_name, std::vect
     auto& table_info_mapping = table_ptr->table_info_mapping;
 
     for (auto& table : table_info_mapping) {
+        const int64_t meta_id = ::baikaldb::get_meta_id(table.first);
+        if (meta_id != 0) {
+            continue;
+        }
         auto& pb_conf = table.second->schema_conf;
         const google::protobuf::Reflection* reflection = pb_conf.GetReflection();
         const google::protobuf::Descriptor* descriptor = pb_conf.GetDescriptor();
@@ -2002,7 +2306,6 @@ void SchemaFactory::get_schema_conf_open(const std::string& conf_name, std::vect
         if (field == nullptr) {
             continue;
         }
-
         bool has_field = reflection->HasField(pb_conf, field);
         if (!has_field) {
             continue;
@@ -2060,7 +2363,7 @@ bool SchemaFactory::is_olap_table(int64_t table_id, int64_t partition_id, bool* 
     return true;
 }
 
-//database_table : namespace.db.table.binlog_db.binlog_table.learner_tags
+//database_table : namespace\001db\001table\001binlog_db\001binlog_table\001learner_tags\001dblink_info
 void SchemaFactory::get_table_by_filter(std::vector<std::string>& database_table,
         const std::function<bool(const SmartTable&)>& select_table) {
         DoubleBufferedTable::ScopedPtr table_ptr;
@@ -2071,9 +2374,22 @@ void SchemaFactory::get_table_by_filter(std::vector<std::string>& database_table
     auto& table_info_mapping = table_ptr->table_info_mapping;
 
     for (auto& table : table_info_mapping) {
+        const int64_t meta_id = ::baikaldb::get_meta_id(table.first);
+        if (meta_id != 0) {
+            continue;
+        }
         if (select_table(table.second)) {
-            std::string value = table.second->namespace_ + "." + table.second->name;
+            std::vector<std::string> split_vec;
+            boost::split(split_vec, table.second->name,
+                       boost::is_any_of("."), boost::token_compress_on);
+            if (split_vec.size() != 2) {
+                DB_WARNING("database table name:%s", table.second->name.c_str());
+                continue;
+            }
+            const std::string& delim = "\001";
+            std::string value = table.second->namespace_ + delim + split_vec[0] + delim + split_vec[1];
             std::string learner_tags;
+            std::string dblink_info = "NULL";
             for (const std::string& tag : table.second->learner_resource_tags) {
                 learner_tags += tag + ",";
             }
@@ -2082,24 +2398,38 @@ void SchemaFactory::get_table_by_filter(std::vector<std::string>& database_table
             } else {
                 learner_tags.pop_back();
             }
+            if (table.second->engine == pb::DBLINK) {
+                dblink_info = table.second->dblink_info.meta_name() + "/" +
+                                    table.second->dblink_info.namespace_name() + "." +
+                                    table.second->dblink_info.database_name() + "." +
+                                    table.second->dblink_info.table_name();
+            }
             auto iter = table.second->binlog_ids.begin();
             while (iter != table.second->binlog_ids.end()) {
                 auto tb_iter = table_info_mapping.find(iter->first);
                 std::string v = value; 
                 if (tb_iter != table_info_mapping.end()) {
-                    v += "." + tb_iter->second->name;
+                    std::vector<std::string> split_vec;
+                    boost::split(split_vec, tb_iter->second->name,
+                            boost::is_any_of("."), boost::token_compress_on);
+                    if (split_vec.size() != 2) {
+                        DB_WARNING("database table name:%s", tb_iter->second->name.c_str());
+                        continue;
+                    }
+                    v += delim + split_vec[0] + delim + split_vec[1];
                     auto link_iter = table.second->link_field_map.find(iter->first);
                     if (link_iter != table.second->link_field_map.end()) {
                         v += "(link_field:" + link_iter->second.short_name + ")";
                     }
                 } else {
-                    v += ".NULL.NULL";
+                    v += delim + "NULL" + delim + "NULL";
                 }
                 ++iter;
-                database_table.emplace_back(v + "." + learner_tags);
+                database_table.emplace_back(v + delim + learner_tags + delim + dblink_info);
             }
             if (table.second->binlog_ids.empty()) {
-                database_table.emplace_back(value + ".NULL.NULL." + learner_tags);
+                database_table.emplace_back(value + delim + "NULL" + delim + "NULL" + delim + 
+                                            learner_tags + delim + dblink_info);
             }
         }
     }
@@ -2314,14 +2644,18 @@ int SchemaFactory::get_index_id(int64_t table_id,
     return 0;
 }
 int SchemaFactory::get_all_region_by_table_id(int64_t table_id, 
-        std::map<std::string, pb::RegionInfo>* region_infos,
+        std::vector<pb::RegionInfo>* region_infos,
         const std::vector<int64_t>& partitions) {
+    if (region_infos == nullptr) {
+        DB_WARNING("region_infos is nullptr");
+        return -1;
+    }
+    region_infos->clear();
     DoubleBufferedTableRegionInfo::ScopedPtr table_region_mapping_ptr;
     if (_table_region_mapping.Read(&table_region_mapping_ptr) != 0) {
         DB_WARNING("DoubleBufferedTableRegion read scoped ptr error."); 
         return -1; 
     }
-
     auto it = table_region_mapping_ptr->find(table_id);
     if (it == table_region_mapping_ptr->end()) {
         DB_WARNING("index id[%ld] not in table_region_mapping", table_id);
@@ -2342,7 +2676,9 @@ int SchemaFactory::get_all_region_by_table_id(int64_t table_id,
         }
         for (auto& pair : iter->second) {
             int64_t region_id = pair.second;
-            frontground->get_region_info(region_id, (*region_infos)[pair.first]);
+            pb::RegionInfo region_info;
+            frontground->get_region_info(region_id, region_info);
+            region_infos->emplace_back(std::move(region_info));
         }
     }
     return 0;
@@ -2371,6 +2707,7 @@ int SchemaFactory::get_all_partition_regions(int64_t table_id,
 
     return 0;
 }
+
 // 检测table下region范围是否连续没有空洞
 int SchemaFactory::check_region_ranges_consecutive(int64_t table_id) {
     DoubleBufferedTableRegionInfo::ScopedPtr table_region_mapping_ptr;
@@ -2516,8 +2853,14 @@ int SchemaFactory::get_region_by_key(int64_t main_table_id,
             start_sentinel.append_u16(0xFFFF);
         }
 
+        std::unordered_set<int64_t> partition_ids;
+        for (const auto& partition_id : range.partition_ids()) {
+            if (partition_id != -1) {
+                partition_ids.emplace(partition_id);
+            }
+        }
         for (auto partition : partitions) {
-            if (!is_binlog && range.has_partition_id() && range.partition_id() != partition) {
+            if (!is_binlog && !partition_ids.empty() && partition_ids.find(partition) == partition_ids.end()) {
                 continue;
             }
             auto key_region_iter = key_region_mapping.find(partition);
@@ -2916,11 +3259,36 @@ void SchemaFactory::delete_table_region_map(const pb::SchemaInfo& table) {
         }
     }
 }
-int64_t HashPartition::calc_partition(const std::shared_ptr<UserInfo>& user_info, SmartRecord record) {
-    return calc_partition(user_info, record->get_value(record->get_field_by_idx(_field_info->pb_idx)));
+
+void SchemaFactory::delete_table_region_map(const int64_t table_id) {
+    SmartTable table_info = get_table_info_ptr(table_id);
+    if (table_info == nullptr) {
+        DB_WARNING("table_id %ld not found.", table_id);
+        return;
+    }
+    for (const auto& index_id : table_info->indices) {
+        SmartIndex index_info = get_index_info_ptr(index_id);
+        if (index_info == nullptr) {
+            DB_WARNING("index_id %ld not found.", index_id);
+            continue;
+        }
+        if (index_info->is_global || index_info->type == pb::I_PRIMARY) {
+            DB_DEBUG("erase global index_id %ld", index_id);
+            _table_region_mapping.Modify(double_buffer_table_region_erase, index_id);
+        }
+    }
 }
 
-int64_t HashPartition::calc_partition(const std::shared_ptr<UserInfo>& user_info, const ExprValue& value) {
+int64_t HashPartition::calc_partition(
+        const std::shared_ptr<UserInfo>& user_info, SmartRecord record, 
+        bool is_read, int64_t* p_another_partition_id) {
+    return calc_partition(user_info, record->get_value(record->get_field_by_idx(_field_info->pb_idx)), 
+                          is_read, p_another_partition_id);
+}
+
+int64_t HashPartition::calc_partition(
+        const std::shared_ptr<UserInfo>& user_info, const ExprValue& value, 
+        bool is_read, int64_t* p_another_partition_id) {
     if (_hash_expr == nullptr) {
         if (value.is_numberic()) {
             return value.get_numberic<int64_t>() % _partition_num;
@@ -2979,6 +3347,7 @@ int RangePartition::init(const pb::PartitionInfo& partition_info, SmartTable& ta
     _table_id = table_ptr->id;
     _partition_num = partition_num;
     _ranges.clear();
+    _additional_ranges.clear();
     _partition_info.CopyFrom(partition_info);
     _partition_field_id = partition_info.partition_field();
     if (_partition_num == 0) {
@@ -3046,8 +3415,19 @@ int RangePartition::init(const pb::PartitionInfo& partition_info, SmartTable& ta
         range.right_value = p_right_node->get_value(nullptr);
         range.is_cold = range_partition_info.is_cold();
         range.partition_type = range_partition_info.type(); // 如果未填充type，会使用默认值RPT_DEFAULT
-
-        _ranges.emplace_back(std::move(range));
+        range.is_isolation = false;
+        if (partition_info.has_dynamic_partition_attr() && partition_info.dynamic_partition_attr().has_isolation()) {                    
+            ExprValue isolation_expr_value(
+                    partition_info.field_info().mysql_type(), partition_info.dynamic_partition_attr().isolation());
+            if (range.right_value.compare(isolation_expr_value) <= 0) {
+                range.is_isolation = true;
+            }
+        }
+        if (range.partition_type == pb::RPT_ADDITIONAL) {
+            _additional_ranges.emplace_back(std::move(range));
+        } else {
+            _ranges.emplace_back(std::move(range));
+        }
         std::string partition_name = range_partition_info.partition_name();
         std::transform(partition_name.begin(), partition_name.end(), partition_name.begin(), ::tolower);
         _partition_name_map[partition_name] = range_partition_info.partition_id();
@@ -3055,8 +3435,11 @@ int RangePartition::init(const pb::PartitionInfo& partition_info, SmartTable& ta
     return 0;
 };
 
-int64_t RangePartition::calc_partition(const std::shared_ptr<UserInfo>& user_info, SmartRecord record) {
-    return calc_partition(user_info, record->get_value(record->get_field_by_idx(_field_info->pb_idx)));
+int64_t RangePartition::calc_partition(
+        const std::shared_ptr<UserInfo>& user_info, SmartRecord record, 
+        bool is_read, int64_t* p_another_partition_id) {
+    return calc_partition(user_info, record->get_value(record->get_field_by_idx(_field_info->pb_idx)), 
+                          is_read, p_another_partition_id);
 }
 
 int SchemaFactory::get_binlog_region_by_partition_id(int64_t binlog_id, int64_t partition_id, pb::RegionInfo& region_info,

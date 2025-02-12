@@ -66,26 +66,34 @@ void RegionManager::update_region(const pb::MetaManagerRequest& request,
         int64_t region_id = region_info.region_id();
         int64_t table_id = region_info.table_id();
         int64_t partition_id = region_info.partition_id();
-        auto ret = TableManager::get_instance()->whether_exist_table_id(table_id); 
+        int ret = TableManager::get_instance()->whether_exist_table_partition(table_id, partition_id);
         if (ret < 0) {
-            DB_WARNING("table name:%s not exist, region_info:%s", 
+            DB_WARNING("table name: %s / partition_id: %ld not exist, region_info:%s", 
                        region_info.table_name().c_str(),
+                       partition_id,
                        region_info.ShortDebugString().c_str());
             IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table not exist");
             return;
         }
         bool new_add = true;
-        SmartRegionInfo region_ptr = _region_info_map.get(region_id);
-        if (region_ptr != nullptr) {
-            auto& mutable_region_info = const_cast<pb::RegionInfo&>(region_info); 
-            mutable_region_info.set_conf_version(region_ptr->conf_version() + 1);
-            new_add = false;
-            if (mutable_region_info.version() < region_ptr->version()) {
+        SmartRegionInfo master_region_ptr = _region_info_map.get(region_id);
+        if (master_region_ptr != nullptr) {
+            if (region_info.version() < master_region_ptr->version()) {
                 DB_WARNING("region_id: %ld, request version %ld < master version %ld", 
-                    region_id, mutable_region_info.version(), region_ptr->version());
+                    region_id, region_info.version(), master_region_ptr->version());
                 IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "diff version");
                 return;
             }
+            if (region_info.version() == master_region_ptr->version() 
+                    && region_info.conf_version() <= master_region_ptr->conf_version()) {
+                if (peer_is_equal(region_info, *master_region_ptr)) {
+                    DB_WARNING("region_id: %ld, request conf_version  %ld <= master conf_version %ld", 
+                            region_id, region_info.conf_version(), master_region_ptr->conf_version());
+                    IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "equal conf version");
+                }
+            }
+            region_info.set_conf_version(master_region_ptr->conf_version() + 1);
+            new_add = false;
         }
         std::string region_value;
         if (!region_info.SerializeToString(&region_value)) {
@@ -765,27 +773,6 @@ bool RegionManager::check_binlog_regions_can_migrate(const std::string& instance
     return true;
 }
 
-void RegionManager::check_update_region(const pb::BaikalHeartBeatRequest* request,
-            pb::BaikalHeartBeatResponse* response) {
-    for (auto& schema_heart_beat : request->schema_infos()) { 
-        for (auto& region_info : schema_heart_beat.regions()) {
-            int64_t region_id = region_info.region_id();
-            SmartRegionInfo region_ptr = _region_info_map.get(region_id);
-            if (region_ptr == nullptr) {
-                continue;
-            }
-            //这种场景出现在分裂的时候，baikal会先从store获取新的region信息，不需要更新
-            if (region_info.version() > region_ptr->version()) {
-                continue;
-            }
-            if (region_info.version() < region_ptr->version()
-                    || region_ptr->conf_version() > region_info.conf_version()) {
-                *(response->add_region_change_info()) = *region_ptr;
-            }
-        } 
-    }
-}
-
 void RegionManager::add_region_info(const std::vector<int64_t>& new_add_region_ids,
                                     pb::BaikalHeartBeatResponse* response) {
     for (auto& region_id : new_add_region_ids) {
@@ -818,6 +805,12 @@ void RegionManager::leader_main_logical_room_check(const pb::StoreHeartBeatReque
         } else {
             replica_num = table_replica[table_id];
         }
+        auto master_region_info = get_region_info(region_id);
+        if (master_region_info == nullptr) {
+            DB_WARNING("master region info is nullptr when load balance %ld.", region_id);
+            continue;
+        }
+        const pb::RegionInfo& region_info = leader_region.simple() ? *master_region_info : leader_region.region();
         // 获取表主机房设置
         if (table_main_idc.find(table_id) == table_main_idc.end()) {
             IdcInfo idc;
@@ -852,7 +845,7 @@ void RegionManager::leader_main_logical_room_check(const pb::StoreHeartBeatReque
         // 选择主机房进行transfer
         std::vector<std::string> candicate_instances;
         candicate_instances.reserve(3);
-        for (auto& peer : leader_region.region().peers()) {
+        for (auto& peer : region_info.peers()) {
             if (peer == instance) {
                 continue;
             }
@@ -989,6 +982,7 @@ void RegionManager::leader_load_balance_on_pk_prefix(const std::string& instance
             DB_WARNING("master region info is nullptr when load balance %ld.", region_id);
             continue;
         }
+        const pb::RegionInfo& region_info = leader_region.simple() ? *master_region_info : leader_region.region();
         int64_t replica_num = table_replica[table_id];
         if (replica_num <= 0) {
             DB_WARNING("table_id: %ld region_id: %ld", table_id, region_id);
@@ -998,14 +992,14 @@ void RegionManager::leader_load_balance_on_pk_prefix(const std::string& instance
         if (leader_region.status() != pb::IDLE) {
             continue;
         }
-        if (leader_region.region().peers_size() < replica_num) {
+        if (region_info.peers_size() < replica_num) {
             continue;
         }
         IdcInfo& main_idc = table_main_idc[table_id];
         int64_t leader_count_for_transfer_peer = INT_FAST64_MAX;
         std::string pk_prefix_key = trans_region_pk_prefix_map[table_id][region_id];
         std::string transfer_to_peer;
-        for (auto& peer : leader_region.region().peers()) {
+        for (auto& peer : region_info.peers()) {
             if (peer == instance) {
                 continue;
             }
@@ -1218,6 +1212,7 @@ void RegionManager::leader_load_balance(bool whether_can_decide,
             DB_WARNING("master region info is nullptr when load balance %ld.", region_id);
             continue;
         }
+        const pb::RegionInfo& region_info = leader_region.simple() ? *master_region_info : leader_region.region();
         if (trans_leader_region_ids.count(region_id) > 0) {
             continue;
         }
@@ -1233,7 +1228,7 @@ void RegionManager::leader_load_balance(bool whether_can_decide,
         if (leader_region.status() != pb::IDLE) {
             continue;
         }
-        if (leader_region.region().peers_size() < replica_num) {
+        if (region_info.peers_size() < replica_num) {
             continue;
         }
         std::string pk_prefix_key;
@@ -1244,7 +1239,7 @@ void RegionManager::leader_load_balance(bool whether_can_decide,
         IdcInfo& main_idc = table_main_idc[table_id];
         int64_t leader_count_for_transfer_peer = INT_FAST64_MAX;
         std::string transfer_to_peer;
-        for (auto& peer : leader_region.region().peers()) {
+        for (auto& peer : region_info.peers()) {
             if (peer == instance) {
                 continue;
             }
@@ -1680,22 +1675,22 @@ void RegionManager::update_leader_status(const pb::StoreHeartBeatRequest* reques
         region_state.timestamp = timestamp;
         region_state.status = pb::NORMAL;
         _region_state_map.set(region_id, region_state);
-        if (leader_region.peers_status_size() > 0) {
-            auto& region_info = leader_region.region();
-            if (region_info.has_start_key() && region_info.has_end_key()
-                && !region_info.start_key().empty() && !region_info.end_key().empty()) {
-                if (region_info.start_key() == region_info.end_key()) {
-                    _region_peer_state_map.erase(region_id);
-                    continue;
-                }
+        auto& region_info = leader_region.region();
+        if (region_info.has_start_key() && region_info.has_end_key()
+            && !region_info.start_key().empty() && !region_info.end_key().empty()) {
+            if (region_info.start_key() == region_info.end_key()) {
+                _region_peer_state_map.erase(region_id);
+                continue;
             }
+        }
+        if (leader_region.peers_status_size() > 0) {
             _region_peer_state_map.init_if_not_exist_else_update(region_id, true, [&leader_region, timestamp](RegionPeerState& peer_state) {
                 peer_state.legal_peers_state.clear();
                 for (auto& peer_status : leader_region.peers_status()) {
                     peer_state.legal_peers_state.emplace_back(peer_status);
                     peer_state.legal_peers_state.back().set_timestamp(timestamp);
                     peer_state.legal_peers_state.back().set_table_id(leader_region.region().table_id());
-                    for(auto illegal_peer_iter = peer_state.ilegal_peers_state.begin();
+                    for (auto illegal_peer_iter = peer_state.ilegal_peers_state.begin();
                              illegal_peer_iter != peer_state.ilegal_peers_state.end();
                              ++illegal_peer_iter) {
                         if (illegal_peer_iter->peer_id() == peer_status.peer_id()) {
@@ -1703,6 +1698,13 @@ void RegionManager::update_leader_status(const pb::StoreHeartBeatRequest* reques
                             break;
                         }
                     }
+                }
+            });
+        } else {
+            // 全正常，走这个分支，减少心跳开销
+            _region_peer_state_map.init_if_not_exist_else_update(region_id, true, [&leader_region, timestamp](RegionPeerState& peer_state) {
+                for (auto& legal : peer_state.legal_peers_state) {
+                    legal.set_timestamp(timestamp);
                 }
             });
         }
@@ -1754,15 +1756,21 @@ void RegionManager::put_incremental_regioninfo(const int64_t apply_index, std::v
 }
 
 bool RegionManager::check_and_update_incremental(
-        const pb::BaikalHeartBeatRequest* request, pb::BaikalHeartBeatResponse* response, 
-        int64_t applied_index, const std::unordered_set<int64_t>& heartbeat_table_ids) {
+        const pb::BaikalHeartBeatRequest* request, pb::BaikalHeartBeatResponse* response, int64_t applied_index, 
+        const std::unordered_map<int64_t, std::unordered_set<int64_t>>& heartbeat_table_partition_map) {
     int64_t last_updated_index = request->last_updated_index();
     bool need_heartbeat_table = request->has_need_heartbeat_table() && request->need_heartbeat_table();
-    auto update_func = [response, need_heartbeat_table, &heartbeat_table_ids](const std::vector<pb::RegionInfo>& region_infos) {
-        for (auto info : region_infos) {
+    int cnt = 0;
+    auto update_func = [response, need_heartbeat_table, &heartbeat_table_partition_map, &cnt](const std::vector<pb::RegionInfo>& region_infos) {
+        for (const auto& info : region_infos) {
             if (need_heartbeat_table) {
                 const int64_t table_id = info.table_id();
-                if (heartbeat_table_ids.find(table_id) == heartbeat_table_ids.end()) {
+                const int64_t partition_id = info.partition_id();
+                if (heartbeat_table_partition_map.find(table_id) == heartbeat_table_partition_map.end()) {
+                    continue;
+                }
+                const auto& partition_ids = heartbeat_table_partition_map.at(table_id);
+                if (!partition_ids.empty() && partition_ids.find(partition_id) == partition_ids.end()) {
                     continue;
                 }
             }
@@ -1770,7 +1778,11 @@ bool RegionManager::check_and_update_incremental(
         }
     };
 
+    TimeCost cost;
     bool need_upd = _incremental_region_info.check_and_update_incremental(update_func, last_updated_index, applied_index);
+    if (cost.get_time() > 50000) {
+        DB_NOTICE("region_update:%ld, cnt:%d", cost.get_time(), cnt);
+    }
     if (need_upd) {
         return true;
     }
@@ -1869,6 +1881,21 @@ void RegionManager::leader_heartbeat_for_region(const pb::StoreHeartBeatRequest*
         auto master_region_info = get_region_info(region_id);
         //新增region, 在meta_server中不存在，加入临时map等待分裂region整体更新
         if (master_region_info == nullptr) {
+            const int64_t table_id = leader_region_info.table_id();
+            const int64_t partition_id = leader_region_info.partition_id();
+            if (leader_region.simple()) {
+                DB_WARNING("region_id: %ld, table_id: %ld, partition_id: %ld "
+                        "report simple when master_region_info is null", 
+                            region_id, table_id, partition_id);
+                response->set_need_report(true);
+                continue;
+            }
+            int ret = TableManager::get_instance()->whether_exist_table_partition(table_id, partition_id);
+            if (ret < 0) {
+                DB_WARNING("region_id: %ld, table_id: %ld, partition_id: %ld not exist", 
+                            region_id, table_id, partition_id);
+                continue;
+            }
             if (leader_region_info.start_key().empty() && 
                leader_region_info.end_key().empty()) {
                 //该region为第一个region直接添加
@@ -1896,17 +1923,11 @@ void RegionManager::leader_heartbeat_for_region(const pb::StoreHeartBeatRequest*
             }
             continue;
         }
-        size_t hash_heart = 0;
-        size_t hash_master = 0;
         bool peer_changed = false;
-        for (auto& state : leader_region_info.peers()) {
-            hash_heart += std::hash<std::string>{}(state);
+        if (!leader_region.simple()) {
+            peer_changed = !peer_is_equal(leader_region_info, *master_region_info);
         }
-        for (auto& state : master_region_info->peers()) {
-            hash_master += std::hash<std::string>{}(state);
-        }
-        peer_changed = (hash_heart != hash_master);
-        check_whether_update_region(region_id, peer_changed, leader_region, master_region_info);
+        check_whether_update_region(region_id, peer_changed, instance, leader_region, master_region_info, response);
         if (!peer_changed) {
             check_peer_count(region_id,
                              leader_region,
@@ -2074,8 +2095,10 @@ void RegionManager::leader_heartbeat_for_region(const pb::StoreHeartBeatRequest*
 }
 void RegionManager::check_whether_update_region(int64_t region_id,
                                                 bool has_peer_changed,
+                                                const std::string& leader,
                                                 const pb::LeaderHeartBeat& leader_region,
-                                                const SmartRegionInfo& master_region_info) {
+                                                const SmartRegionInfo& master_region_info,
+                                                pb::StoreHeartBeatResponse* response) {
     const pb::RegionInfo& leader_region_info = leader_region.region();
     if (leader_region_info.log_index() < master_region_info->log_index()) {
         DB_WARNING("leader: %s log_index:%ld in heart is less than in master:%ld, region_id: %ld",
@@ -2086,7 +2109,7 @@ void RegionManager::check_whether_update_region(int64_t region_id,
         return;
     }
     //如果version没有变，但是start_key 或者end_key变化了，说明有问题，报警追查, 同时不更新
-    if (leader_region_info.version() == master_region_info->version()
+    if (leader_region_info.version() <= master_region_info->version() && !leader_region.simple()
             && (leader_region_info.start_key() != master_region_info->start_key()
                 || leader_region_info.end_key() != master_region_info->end_key())) {
         DB_FATAL("version not change, but start_key or end_key change,"
@@ -2098,10 +2121,16 @@ void RegionManager::check_whether_update_region(int64_t region_id,
     bool version_changed = false;
     bool peer_changed = false;
     //version发生变化，说明分裂或合并
-    if (leader_region_info.version() > master_region_info->version()
-            || leader_region_info.start_key() != master_region_info->start_key()
-            || leader_region_info.end_key() != master_region_info->end_key()) {
+    if (leader_region_info.version() > master_region_info->version()) {
         version_changed = true;
+        if (leader_region.simple()) {
+            DB_WARNING("version change, but report simple,"
+                    " old_region_info: %s, new_region_info: %s",
+                    master_region_info->ShortDebugString().c_str(),
+                    leader_region_info.ShortDebugString().c_str());
+            response->set_need_report(true);
+            return;
+        }
     }
 
     //peer发生变化
@@ -2131,8 +2160,8 @@ void RegionManager::check_whether_update_region(int64_t region_id,
         SchemaManager::get_instance()->process_schema_info(NULL, &request, NULL, NULL);
     } else {
         //只更新内存
-        if (leader_region.status() == pb::IDLE &&  leader_region_info.leader() != master_region_info->leader()) {
-            set_region_leader(region_id, leader_region_info.leader());
+        if (leader_region.status() == pb::IDLE && leader != master_region_info->leader()) {
+            set_region_leader(region_id, leader);
         }
         if (leader_region.status() == pb::IDLE && 
                 (leader_region_info.log_index() != master_region_info->log_index()
@@ -2260,7 +2289,12 @@ void RegionManager::check_peer_count(int64_t region_id,
     if (leader_region.status() != pb::IDLE) {
         return;
     }
-    const pb::RegionInfo& leader_region_info = leader_region.region(); 
+    auto master_region_info = get_region_info(region_id);
+    if (master_region_info == nullptr) {
+        DB_FATAL("master region info is nullptr when check_peer_count %ld.", region_id);
+        return;
+    }
+    const pb::RegionInfo& leader_region_info = leader_region.simple() ? *master_region_info : leader_region.region();
     int64_t table_id = leader_region_info.table_id();
     if (table_replica_nums.find(table_id) == table_replica_nums.end()
          || table_replica_dists_maps.find(table_id) == table_replica_dists_maps.end()) {
@@ -2691,6 +2725,15 @@ int RegionManager::load_region_snapshot(const std::string& value) {
        && !region_pb.start_key().empty()) {
         //空region不再读取
         DB_WARNING("region is merged: %s", region_pb.ShortDebugString().c_str());
+        return 0;
+    }
+    const int64_t region_id = region_pb.region_id();
+    const int64_t table_id = region_pb.table_id();
+    const int64_t partition_id = region_pb.partition_id();
+    int ret = TableManager::get_instance()->whether_exist_table_partition(table_id, partition_id);
+    if (ret < 0) {
+        DB_WARNING("region_id: %ld, table_id: %ld, partition_id: %ld not exist, skip", 
+                    region_id, table_id, partition_id);
         return 0;
     }
     set_region_info(region_pb);

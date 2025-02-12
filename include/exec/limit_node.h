@@ -48,6 +48,16 @@ public:
     int64_t get_limit() {
         return _limit;
     }
+    // limit直接slice处理, 不需要单独的acero node
+    virtual bool can_use_arrow_vector() {
+        for (auto& c : _children) {
+            if (!c->can_use_arrow_vector()) {
+                return false;
+            }
+        }
+        return true;
+    }
+    virtual int build_arrow_declaration(RuntimeState* state);
 private:
     int64_t _offset;
     int64_t _num_rows_skipped;

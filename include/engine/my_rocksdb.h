@@ -165,7 +165,6 @@ public:
     void DisableIndexing() { _txn->DisableIndexing(); }
 
     bool use_cold_db() const { return _use_cold_db; }
-
 private:
     rocksdb::Transaction* _txn = nullptr;
     bool _use_cold_db = false;

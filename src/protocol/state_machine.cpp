@@ -28,7 +28,6 @@ DEFINE_int32(query_quota_per_user, 3000, "default user query quota by 1 second")
 DEFINE_string(log_plat_name, "test", "plat name for print log, distinguish monitor");
 DEFINE_int64(baikal_max_allowed_packet, 268435456LL, "The largest possible packet : 256M");
 DEFINE_int32(query_cache_timeout_s, 10, "query cache timeout(s)");
-DEFINE_string(default_charset_name, "utf8", "default charset name: utf8");
 DEFINE_int32(default_charset_number, 33, "default charset number: 33");
 DECLARE_int64(print_time_us);
 DECLARE_string(meta_server_bns);
@@ -196,7 +195,12 @@ void StateMachine::run_machine(SmartSocket client,
         if (!res || STATE_ERROR == client->state || STATE_ERROR_REUSE == client->state) {
             DB_WARNING_CLIENT(client, "handle query failed. sql=[%s] state:%d",
                     client->query_ctx->sql.c_str(), client->state);
-            _wrapper->make_err_packet(client, ER_ERROR_COMMON, "handle query failed");
+            if (client->query_ctx->stat_info.error_code == ER_NO_SUCH_TABLE) {
+                _wrapper->make_err_packet(client, ER_NO_SUCH_TABLE, 
+                                          client->query_ctx->stat_info.error_msg.str().c_str());
+            } else {
+                _wrapper->make_err_packet(client, ER_ERROR_COMMON, "handle query failed");
+            }
             client->state = (client->state == STATE_ERROR) ? STATE_ERROR : STATE_ERROR_REUSE;
             _print_query_time(client);
             run_machine(client, epoll_info, shutdown);
@@ -463,11 +467,20 @@ void StateMachine::_print_query_time(SmartSocket client) {
                 }
             }
             sql.resize(slow_idx);
+            std::string exec_type = "row";
+            if (ctx->get_runtime_state()->execute_type == pb::EXEC_ARROW_ACERO) {
+                if (ctx->get_runtime_state()->vectorlized_parallel_execution) {
+                    exec_type = "parallel";
+                } else {
+                    exec_type = "vec";
+                }
+            }
+            std::string charset_name = pb::Charset_Name(client->charset);
+            std::transform(charset_name.begin(), charset_name.end(), charset_name.begin(), ::tolower);
             DB_NOTICE_LONG("common_query: family=[%s] table=[%s] op_type=[%d] cmd=[0x%x] plat=[%s] ip=[%s:%d] fd=[%d] "
-                    "cost=[%ld] field_time=[%ld %ld %ld %ld %ld %ld %ld %ld %ld] "
-                    "row=[%ld] scan_row=[%ld] read_size=[%ld] bufsize=[%zu] "
+                    "cost=[%ld] field_time=[%ld %ld %ld %ld %ld %ld %ld %ld %ld] row=[%ld] scan_row=[%ld] read_size=[%ld] bufsize=[%zu] "
                     "key=[%d] changeid=[%lu] logid=[%lu] traceid=[%s] family_ip=[%s] cache=[%d,%d] stmt_name=[%s] "
-                    "user=[%s] charset=[%s] errno=[%d] txn=[%lu:%d] 1pc=[%d] sign=[%lu] region_count=[%d] sqllen=[%lu] "
+                    "user=[%s] charset=[%s] errno=[%d] txn=[%lu:%d] 1pc=[%d] sign=[%lu] region_count=[%d] exec=[%s] sqllen=[%lu] "
                     "sql=[%s] id=[%ld] bkup=[%d] server_addr=[%s:%d]",
                     stat_info->family.c_str(),
                     stat_info->table.c_str(),
@@ -500,13 +513,14 @@ void StateMachine::_print_query_time(SmartSocket client) {
                     stat_info->hit_query_cache,
                     ctx->prepare_stmt_name.c_str(),
                     client->username.c_str(),
-                    client->charset_name.c_str(),
+                    charset_name.c_str(),
                     stat_info->error_code,
                     stat_info->old_txn_id,
                     stat_info->old_seq_id,
                     ctx->get_runtime_state()->optimize_1pc(),
                     stat_info->sign,
                     stat_info->region_count,
+                    exec_type.c_str(),
                     sql.length(),
                     sql.c_str(),
                     client->last_insert_id,
@@ -571,16 +585,20 @@ int StateMachine::_auth_read(SmartSocket sock) {
         return RET_ERROR;
     }
     if (charset_num == 28) {
-        sock->charset_name = "gbk";
+        sock->charset = pb::GBK;
         sock->charset_num = 28;
     } else if (charset_num == 33) {
-        sock->charset_name = "utf8";
+        sock->charset = pb::UTF8;
         sock->charset_num = 33;
     } else {
-        DB_TRACE_CLIENT(sock, "unknown charset num: %u, charset will be set as %s.",
-            FLAGS_default_charset_number, FLAGS_default_charset_name.c_str());
-        sock->charset_name = FLAGS_default_charset_name;
+        DB_TRACE_CLIENT(sock, "unknown; default charset num: %u",
+            FLAGS_default_charset_number);
         sock->charset_num = FLAGS_default_charset_number;
+        if (sock->charset_num == 33) {
+            sock->charset = pb::UTF8;
+        } else {
+            sock->charset = pb::GBK;
+        }
     }
     off += 23;
 
@@ -1053,10 +1071,10 @@ bool StateMachine::_query_process(SmartSocket client) {
             option.set_case_sensitive(false);
             re2::RE2 reg(".*gbk.*", option);
             if (RE2::FullMatch(client->query_ctx->sql, reg)) {
-                client->charset_name = "gbk";
+                client->charset = pb::GBK;
                 client->charset_num = 28;
             } else {
-                client->charset_name = "utf8";
+                client->charset = pb::UTF8;
                 client->charset_num = 33;
             }
             if (reg.error_code() != 0) {
@@ -1218,6 +1236,18 @@ int StateMachine::_get_json_attributes(std::shared_ptr<QueryContext> ctx) {
                     ctx->get_runtime_state()->range_count_limit = range_count_limit;
                 }
             }
+            json_iter = root.FindMember("exec");
+            if (json_iter != root.MemberEnd() && json_iter->value.IsString()) {
+                auto type = json_iter->value.GetString();
+                if (strcmp(type,"row") == 0) {
+                    ctx->sql_exec_type_defined = SignExecType::SIGN_EXEC_ROW;
+                } else if (strcmp(type,"vec") == 0) {
+                    ctx->sql_exec_type_defined = SignExecType::SIGN_EXEC_ARROW_ACERO;
+                } else if (strcmp(type,"no_index_join") == 0) {
+                    ctx->sql_exec_type_defined = SignExecType::SIGN_EXEC_ARROW_FORCE_NO_INDEX_JOIN;
+                }
+                DB_WARNING("exec: %s", type);
+            }
             json_iter = root.FindMember("single_store_concurrency");
             if (json_iter != root.MemberEnd()) {
                 ctx->single_store_concurrency = json_iter->value.GetInt();
@@ -1227,6 +1257,10 @@ int StateMachine::_get_json_attributes(std::shared_ptr<QueryContext> ctx) {
             if (json_iter != root.MemberEnd()) {
                 ctx->row_ttl_duration = json_iter->value.GetInt64();
                 DB_DEBUG("row_ttl_duration: %ld", ctx->row_ttl_duration);
+            }
+            json_iter = root.FindMember("watt_stats_version");
+            if (json_iter != root.MemberEnd()) {
+                ctx->watt_stats_version = json_iter->value.GetUint64();
             }
             json_iter = root.FindMember("X-B3-TraceId");
             if (json_iter != root.MemberEnd() && json_iter->value.IsString()) {
@@ -1262,7 +1296,7 @@ bool StateMachine::_handle_client_query_use_database(SmartSocket client) {
     std::string sql = client->query_ctx->sql;
     // Find databases.
     SchemaFactory* factory = SchemaFactory::get_instance();
-    std::vector<std::string> dbs =  factory->get_db_list(client->user_info->all_database);
+    std::vector<std::string> dbs =  factory->get_db_list(client->user_info);
     int type = client->query_ctx->type;
     std::string db;
     if (type == SQL_USE_NUM) {
@@ -1703,7 +1737,7 @@ bool StateMachine::_handle_client_query_common_query(SmartSocket client) {
     }
     client->query_ctx->client_conn = client.get();
     client->query_ctx->stat_info.sql_length = client->query_ctx->sql.size();
-    client->query_ctx->charset = client->charset_name;
+    client->query_ctx->charset = client->charset;
 
     // sql planner.
     TimeCost cost;

@@ -59,7 +59,8 @@ public:
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state);
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
-
+    virtual bool can_use_arrow_vector();
+    virtual int build_arrow_declaration(RuntimeState* state);
     virtual void find_place_holder(std::unordered_multimap<int, ExprNode*>& placeholders) {
         ExecNode::find_place_holder(placeholders);
         for (auto& expr : _conjuncts) {
@@ -106,7 +107,7 @@ public:
             e->reset(state);
         }
     }
-
+    int arrow_steal_conjuncts(std::vector<arrow::compute::Expression>& conjuncts, int64_t& limit);
 private:
     bool need_copy(MemRow* row);
 private:

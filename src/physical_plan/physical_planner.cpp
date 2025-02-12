@@ -18,10 +18,16 @@ namespace baikaldb {
 DEFINE_int32(cmsketch_depth, 5, "cmsketch_depth");
 DEFINE_int32(cmsketch_width, 2048, "cmsketch_width");
 DEFINE_int32(sample_rows, 1000000, "sample rows 100w");
+DECLARE_bool(use_arrow_vector);
 int PhysicalPlanner::analyze(QueryContext* ctx) {
     int ret = 0;
-    for (auto sub_query_ctx : ctx->sub_query_plans) {
-        ret = analyze(sub_query_ctx.get());
+    // 谓词下推需要先于子查询analyze执行，可能生成新的table_filter
+    ret = PredicatePushDown().analyze(ctx);
+    if (ret < 0) {
+        return ret;
+    }
+    for (auto& kv : ctx->sub_query_plans) {
+        ret = analyze(kv.get());
         if (ret < 0) {
             return ret;
         }
@@ -36,7 +42,6 @@ int PhysicalPlanner::analyze(QueryContext* ctx) {
     if (ret < 0) {
         return ret;
     }
-    
     // for INSERT/REPLACE statements
     // insert user variables to records for prepared stmt
     ret = insert_values_to_record(ctx);
@@ -45,11 +50,6 @@ int PhysicalPlanner::analyze(QueryContext* ctx) {
     }
     // 生成自增id
     ret = AutoInc().analyze(ctx);
-    if (ret < 0) {
-        return ret;
-    }
-    // 谓词下推,可能生成新的table_filter
-    ret = PredicatePushDown().analyze(ctx);
     if (ret < 0) {
         return ret;
     }
@@ -142,8 +142,40 @@ int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
         ctx->trace_node.set_node_type(ctx->root->node_type());
         ctx->root->set_trace(&ctx->trace_node);
         ctx->root->create_trace();
+        for (auto& subquery : ctx->sub_query_plans) {
+            subquery->root->set_trace(&ctx->trace_node);
+            subquery->root->create_trace();
+        }
     }
-    
+    // 按照sign指定
+    if (!ctx->table_can_use_arrow_vectorize) {
+        state.sign_exec_type = SignExecType::SIGN_EXEC_ROW;
+    } else {
+        if (ctx->sign_exec_type.count(state.sign) > 0) {
+            state.sign_exec_type = ctx->sign_exec_type[state.sign];
+        } else if (ctx->sign_exec_type.count(0) > 0) {
+            // sign0表示全表配置
+            state.sign_exec_type = ctx->sign_exec_type[0];
+        }
+    }
+    // sql注释指定
+    if (ctx->sql_exec_type_defined != SignExecType::SIGN_EXEC_NOT_SET) {
+        state.sign_exec_type = ctx->sql_exec_type_defined;
+    }
+    if ((FLAGS_use_arrow_vector && state.sign_exec_type != SignExecType::SIGN_EXEC_ROW)
+            && (ctx->explain_type == EXPLAIN_NULL || ctx->explain_type == SHOW_TRACE)) {
+        if (ctx->root->can_use_arrow_vector()) {
+            state.execute_type = pb::EXEC_ARROW_ACERO;
+            ExecNode* join = ctx->root->get_node(pb::JOIN_NODE);
+            ExecNode* agg = ctx->root->get_node(pb::AGG_NODE);
+            ExecNode* sort = ctx->root->get_node(pb::SORT_NODE);
+            state.is_simple_select = (join == nullptr);
+            state.vectorlized_parallel_execution = (join != nullptr || agg != nullptr || sort != nullptr);
+        } else {
+            state.execute_type = pb::EXEC_ROW;
+        }
+    }
+    DB_DEBUG("sign_exec_type: %d, execute_type:%d, is_simple_select: %d", state.sign_exec_type, (int)state.execute_type, state.is_simple_select);
     ret = ctx->root->open(&state);
     if (ctx->root->get_trace() != nullptr) {
         DB_WARNING("execute:%s", ctx->root->get_trace()->ShortDebugString().c_str());

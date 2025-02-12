@@ -17,6 +17,7 @@
 #include <vector>
 #include <memory>
 #include "expr_node.h"
+#include "arrow/compute/api_vector.h"
 
 namespace baikaldb {
 class MemRowCompare {
@@ -44,6 +45,24 @@ public:
         };
     }
 
+    int build_arrow_sort_option(arrow::compute::SortOptions& option) {
+        if (_slot_order_exprs.size() == 0) {
+            return 0;
+        }
+        std::vector<arrow::compute::SortKey> sort_keys;
+        option.sort_keys.reserve(_slot_order_exprs.size());
+        for (int i = 0; i < _slot_order_exprs.size(); ++i) {
+            int ret = _slot_order_exprs[i]->transfer_to_arrow_expression();
+            if (ret != 0 || _slot_order_exprs[i]->arrow_expr().field_ref() == nullptr) {
+                DB_FATAL("get sort field ref fail, maybe is not slot ref");
+                return -1;
+            }
+            auto field_ref = _slot_order_exprs[i]->arrow_expr().field_ref();
+            option.sort_keys.emplace_back(*field_ref, _is_asc[i] ? arrow::compute::SortOrder::Ascending : arrow::compute::SortOrder::Descending);
+        }
+        option.null_placement = _is_asc[0] ?  arrow::compute::NullPlacement::AtStart : arrow::compute::NullPlacement::AtEnd;
+        return 0;
+    }
 private:
     std::vector<ExprNode*>& _slot_order_exprs;
     std::vector<bool>& _is_asc;

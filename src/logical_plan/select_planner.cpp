@@ -37,6 +37,9 @@ int SelectPlanner::plan() {
         _ctx->get_runtime_state()->set_single_sql_autocommit(false);
     }
     _select = (parser::SelectStmt*)_ctx->stmt;
+    if (0 != check_multi_distinct()) {
+        return -1;
+    }
     if (_select->table_refs == nullptr) {
         if (0 != parse_select_fields()) {
             return -1;        
@@ -63,10 +66,19 @@ int SelectPlanner::plan() {
         _ctx->select_for_update = true;
     }
 
+    if (0 != parse_with()) {
+        return -1;
+    }
     // parse from
     if (0 != parse_db_tables(_select->table_refs, &_join_root)) {
         return -1;
     }
+
+    // 获取编码转换信息
+    if (get_convert_charset_info() != 0) {
+        return -1;
+    }
+
     // parse select
     if (0 != parse_select_fields()) {
         return -1;
@@ -146,6 +158,10 @@ int SelectPlanner::plan() {
 }
 
 bool SelectPlanner::is_full_export() {
+    if (_ctx->is_union_subquery) {
+        // Union子语句不支持全量导出
+        return false;
+    }
     //代价信息统计时不走full export流程
     if (_ctx->explain_type != EXPLAIN_NULL) {
         return false;
@@ -321,8 +337,8 @@ void SelectPlanner::get_slot_column_mapping() {
     if (_ctx->has_derived_table) {
         auto& outer_ref_map = _ctx->ref_slot_id_mapping;
         for (auto& iter_out : outer_ref_map) {
-            auto it = _ctx->derived_table_ctx_mapping.find(iter_out.first);
-            if (it == _ctx->derived_table_ctx_mapping.end()) {
+            auto it = _plan_table_ctx->derived_table_ctx_mapping.find(iter_out.first);
+            if (it == _plan_table_ctx->derived_table_ctx_mapping.end()) {
                 continue;
             }
             auto& sub_ctx = it->second;
@@ -350,6 +366,7 @@ int SelectPlanner::subquery_rewrite() {
     for (auto tuple_id : _ctx->current_tuple_ids) {
         if (_ctx->current_table_tuple_ids.count(tuple_id) == 0) {
             _ctx->expr_params.is_correlated_subquery = true;
+            _ctx->has_derived_table = true;
             return 0;
         }
     }
@@ -476,6 +493,7 @@ int SelectPlanner::create_agg_node() {
 //            expr->add_nodes()->CopyFrom(_select_exprs[idx].nodes(0));
         }
         agg->set_agg_tuple_id(-1);
+        agg->set_arrow_ignore_tuple_id(_order_tuple_id);
         return 0;
     }
     if (_agg_funcs.empty() && _distinct_agg_funcs.empty() && _group_exprs.empty()) {
@@ -505,7 +523,8 @@ int SelectPlanner::create_agg_node() {
         expr->CopyFrom(_distinct_agg_funcs[idx]);
     }
     agg->set_agg_tuple_id(_agg_tuple_id);
-
+    agg->set_arrow_ignore_tuple_id(_order_tuple_id);
+        
     if (!_distinct_agg_funcs.empty() || !_orderby_agg_exprs.empty()) {
         pb::PlanNode* agg_node2 = _ctx->add_plan_node();
         agg_node2->set_node_type(pb::AGG_NODE);
@@ -527,12 +546,17 @@ int SelectPlanner::create_agg_node() {
                     pb::Expr* expr = agg2->add_group_exprs();
                     ExprNode::get_pb_expr(distinct_func, &expr_idx, expr);
                 }
-            } else {
+            } else if (!_need_multi_distinct) {
                 int expr_idx = 1;
                 while (expr_idx < distinct_func.nodes_size()) {
                     pb::Expr* expr = agg2->add_group_exprs();
                     ExprNode::get_pb_expr(distinct_func, &expr_idx, expr);
                 }
+            } else if (distinct_func.nodes(0).fn().name() == "multi_count_distinct"
+                    || distinct_func.nodes(0).fn().name() == "multi_sum_distinct"
+                    || distinct_func.nodes(0).fn().name() == "multi_group_concat_distinct") {
+                pb::Expr* expr = agg2->add_agg_funcs();
+                expr->CopyFrom(distinct_func);
             }
         }
 
@@ -560,6 +584,7 @@ int SelectPlanner::create_agg_node() {
             expr->CopyFrom(_agg_funcs[idx]);
         }
         agg2->set_agg_tuple_id(_agg_tuple_id);
+        agg2->set_arrow_ignore_tuple_id(_order_tuple_id);
     }
     return 0;
 }
@@ -570,10 +595,19 @@ void SelectPlanner::add_single_table_columns(const std::string& table_name, Tabl
             continue;
         }
 
-        pb::SlotDescriptor slot = get_scan_ref_slot(table_name, table_info->id, field.id, field.type);
         pb::Expr select_expr;
-        select_expr.set_database(table_info->name.substr(0, table_info->name.find(".")));
-        select_expr.set_table(table_info->short_name);
+        std::string db = table_info->name.substr(0, table_info->name.find("."));
+        std::string tbl = table_info->short_name;
+        TableInfo* dblink_table_info = get_dblink_table_info_ptr(table_info->id);
+        if (dblink_table_info != nullptr) {
+            // 外部表，使用主meta的dblink表信息
+            db = dblink_table_info->name.substr(0, dblink_table_info->name.find("."));
+            tbl = dblink_table_info->short_name;
+        }
+        select_expr.set_database(db);
+        select_expr.set_table(tbl);
+
+        pb::SlotDescriptor slot = get_scan_ref_slot(table_name, table_info->id, field.id, field.type);
         pb::ExprNode* node = select_expr.add_nodes();
         node->set_node_type(pb::SLOT_REF);
         node->set_col_type(field.type);
@@ -693,26 +727,57 @@ int SelectPlanner::parse_select_field(parser::SelectField* field) {
     return 0;
 }
 
-int SelectPlanner::parse_select_name(parser::SelectField* field, std::string& select_name) {
-    if (field == nullptr) {
-        DB_WARNING("field is nullptr");
-        return -1;
+int SelectPlanner::parse_with() {
+    if (_select->with == nullptr) {
+        return 0;
     }
-    if (field->expr == nullptr) {
-        DB_WARNING("field->expr is nullptr");
-        return -1;
-    }
-    if (!field->as_name.empty()) {
-        select_name = field->as_name.value;
-    } else {
-        if (field->expr->expr_type == parser::ET_COLUMN) {
-            parser::ColumnName* column = static_cast<parser::ColumnName*>(field->expr);
-            select_name = column->name.c_str();
-        } else if (!field->org_name.empty()) {
-            select_name = field->org_name.c_str();
-        } else {
-            select_name = field->expr->to_string();
+    parser::WithClause* with = _select->with;
+    std::unordered_set<std::string> cte_name_set;
+    for (int i = 0; i < with->ctes.size(); ++i) {
+        parser::CommonTableExpr* cte = with->ctes[i];
+        if (cte == nullptr || cte->query_expr == nullptr) {
+            DB_WARNING("cte is nullptr or query_expr is nullptr");
+            return -1;
         }
+        parser::DmlNode* query_stmt = cte->query_expr->query_stmt;
+        pb::SchemaInfo view;
+        if (cte_name_set.count(cte->name.value) > 0) {
+            _ctx->stat_info.error_code = ER_NONUNIQ_TABLE;
+            _ctx->stat_info.error_msg << "Not unique table/alias: \'" << cte->name.value << "\'";
+            DB_WARNING("with cte name %s is duplicated", cte->name.value);
+            return -1;
+        }
+        cte_name_set.insert(cte->name.value);
+        view.set_table_name(cte->name.value);
+
+        ExprParams expr_params;
+        std::shared_ptr<QueryContext> parse_with_ctx = std::make_shared<QueryContext>();
+        auto client = _ctx->client_conn;
+        parse_with_ctx->stmt = query_stmt;
+        parse_with_ctx->expr_params = expr_params;
+        parse_with_ctx->stmt_type = query_stmt->node_type;
+        parse_with_ctx->cur_db = _ctx->cur_db;
+        parse_with_ctx->is_explain = _ctx->is_explain;
+        parse_with_ctx->stat_info.log_id = _ctx->stat_info.log_id;
+        parse_with_ctx->user_info = _ctx->user_info;
+        parse_with_ctx->row_ttl_duration = _ctx->row_ttl_duration;
+        parse_with_ctx->is_complex = _ctx->is_complex;
+        parse_with_ctx->get_runtime_state()->set_client_conn(client);
+        parse_with_ctx->client_conn = client;
+        parse_with_ctx->sql = query_stmt->to_string();
+        parse_with_ctx->charset = _ctx->charset;
+        parse_with_ctx->is_with = true;
+        std::unique_ptr<LogicalPlanner> planner;
+        planner.reset(new SelectPlanner(parse_with_ctx.get()));
+        if (0 != planner->parse_view_select(query_stmt, 
+                                    cte->column_names,
+                                    view)) {
+            DB_WARNING("parse view select failed");
+            _ctx->stat_info.error_code = parse_with_ctx->stat_info.error_code;
+            _ctx->stat_info.error_msg << parse_with_ctx->stat_info.error_msg.str();
+            return -1;
+        }
+        _ctx->table_with_clause_mapping[view.table_name()] = view.view_select_stmt();
     }
     return 0;
 }
@@ -744,6 +809,7 @@ int SelectPlanner::parse_select_fields() {
 }
 
 int SelectPlanner::parse_where() {
+    add_snapshot_blacklist_to_where_filters();
     if (_select->where == nullptr) {
         return 0;
     }
@@ -867,6 +933,69 @@ int SelectPlanner::get_base_subscribe_scan_ref_slot() {
     return 0;
 }
 
+void SelectPlanner::add_snapshot_blacklist_to_where_filters() {
+    auto tables = get_possible_tables("__snapshot__");
+    for (auto table_name : tables) {
+        TableInfo* table_ptr = get_table_info_ptr(table_name);
+        int sb_size = table_ptr->snapshot_blacklist.size();
+        if (sb_size == 0) {
+            continue;
+        }
+        FieldInfo snapshot_field;
+        for (const FieldInfo& f : table_ptr->fields) {
+            if (f.short_name == "__snapshot__") {
+                snapshot_field = f;
+                break;
+            }
+        }
+        // __snapshot__ not in (xx, xx)
+        pb::Expr root;
+        pb::ExprNode* not_node = root.add_nodes();
+        not_node->set_node_type(pb::NOT_PREDICATE);
+        not_node->set_col_type(pb::BOOL);
+        not_node->set_num_children(1);
+        pb::Function* not_func = not_node->mutable_fn();
+        not_func->set_fn_op(parser::FT_LOGIC_NOT);
+        not_func->set_name("logic_not");
+
+        pb::ExprNode* in_predicate_node = root.add_nodes();
+        in_predicate_node->set_node_type(pb::IN_PREDICATE);
+        in_predicate_node->set_col_type(pb::BOOL);
+        in_predicate_node->set_num_children(1 + sb_size);
+        pb::Function* func = in_predicate_node->mutable_fn();
+        func->set_fn_op(parser::FT_IN);
+        func->set_name("in");
+
+        pb::ExprNode* slot_ref_node = root.add_nodes();
+        slot_ref_node->set_node_type(pb::SLOT_REF);
+        slot_ref_node->set_col_type(snapshot_field.type);
+        slot_ref_node->set_num_children(0);
+        pb::SlotDescriptor slot = get_scan_ref_slot(table_name, table_ptr->id, snapshot_field.id, snapshot_field.type);
+        slot_ref_node->mutable_derive_node()->set_tuple_id(slot.tuple_id());
+        slot_ref_node->mutable_derive_node()->set_slot_id(slot.slot_id());
+        slot_ref_node->mutable_derive_node()->set_field_id(slot.field_id());
+        slot_ref_node->set_col_flag(snapshot_field.flag);
+        _ctx->ref_slot_id_mapping[slot.tuple_id()][snapshot_field.lower_short_name] = slot.slot_id();
+
+        for (uint64_t snapshot : table_ptr->snapshot_blacklist) {
+            pb::ExprNode* literal_node = root.add_nodes();
+            literal_node->set_node_type(pb::INT_LITERAL);
+            literal_node->set_col_type(pb::UINT64);
+            literal_node->set_num_children(0);
+            literal_node->mutable_derive_node()->set_int_val(snapshot);
+        }
+        std::vector<std::string> vec;
+        boost::split(vec, table_ptr->name, boost::is_any_of("."));
+        if (vec.size() != 2) {
+            continue;
+        }
+        root.set_database(vec[0]);
+        root.set_table(vec[1]);
+        _where_filters.push_back(root);
+    }
+    return;
+}
+
 int SelectPlanner::plan_cache_get() {
     if (!enable_plan_cache()) {
         return 0;
@@ -918,7 +1047,8 @@ int SelectPlanner::plan_cache_get() {
             SmartTable tbl_ptr = _factory->get_table_info_ptr(table_id);
             if (tbl_ptr == nullptr) {
                 DB_WARNING("tbl_ptr is nullptr, table_id: %ld", table_id);
-                return -1;
+                is_cache_invalid = true;
+                break;
             }
             const int64_t cur_table_version = tbl_ptr->version;
             if (table_version != cur_table_version) {
@@ -936,14 +1066,14 @@ int SelectPlanner::plan_cache_get() {
                 }
                 cache_ctx->root->find_place_holder(cache_ctx->placeholders);
             }
-            if (fill_placeholders(cache_ctx->placeholders, cache_param.parser_placeholders) != 0) {
-                DB_WARNING("Fail to fill_placeholders, %s", _ctx->sql.c_str());
-                return -1;
-            } 
             if (_ctx->copy_query_context(cache_ctx.get()) != 0) {
                 DB_WARNING("Fail to copy_query_context_for_plan_cache, %s", _ctx->sql.c_str());
                 return -1;
-            } 
+            }
+            if (fill_placeholders(cache_ctx->placeholders, cache_param.parser_placeholders) != 0) {
+                DB_WARNING("Fail to fill_placeholders, %s", _ctx->sql.c_str());
+                return -1;
+            }  
             // 输出的字段名重新生成
             if (replace_select_names() != 0) {
                 DB_WARNING("Fail to replace_select_names, %s", _ctx->sql.c_str());
@@ -1049,6 +1179,131 @@ int SelectPlanner::replace_select_names() {
         fields[field_idx].org_name = select_name;
     }
     return 0;
+}
+
+int SelectPlanner::check_multi_distinct() {
+    int multi_distinct_cnt = 0;
+    bool multi_col_single_child = false;
+    std::set<std::string> name_set;
+    check_multi_distinct_in_select(multi_distinct_cnt, 
+                                multi_col_single_child,
+                                name_set);
+    check_multi_distinct_in_having(multi_distinct_cnt, 
+                                multi_col_single_child,
+                                name_set);
+    check_multi_distinct_in_orderby(multi_distinct_cnt, 
+                                multi_col_single_child,
+                                name_set);
+    if (multi_distinct_cnt > 1) {
+        if (multi_col_single_child) {
+            _ctx->stat_info.error_msg << "The query contains multi count/sum/group_concat distinct, each can't have multi columns.";
+            return -1;
+        }
+        if (name_set.size() > 1) {
+            _need_multi_distinct = true;
+        }
+    }
+    return 0;
+}
+
+void SelectPlanner::check_multi_distinct_in_select(int& multi_distinct_cnt, 
+                                                    bool& multi_col_single_child,
+                                                    std::set<std::string>& name_set) {
+    for (int idx = 0; idx < _select->fields.size(); ++idx) {
+        const parser::ExprNode* expr_item = _select->fields[idx]->expr;
+        check_multi_distinct_in_node(expr_item,
+                            multi_distinct_cnt,
+                            multi_col_single_child,
+                            name_set);
+    }
+}
+
+void SelectPlanner::check_multi_distinct_in_having(int& multi_distinct_cnt, 
+                                                    bool& multi_col_single_child,
+                                                    std::set<std::string>& name_set) {
+    if (_select->having == nullptr) {
+        return;
+    }
+    check_multi_distinct_in_node(_select->having,
+                            multi_distinct_cnt,
+                            multi_col_single_child,
+                            name_set);
+}
+
+void SelectPlanner::check_multi_distinct_in_orderby(int& multi_distinct_cnt, 
+                                                    bool& multi_col_single_child,
+                                                    std::set<std::string>& name_set) {
+    if (_select->order == nullptr) {
+        return;
+    }
+    parser::Vector<parser::ByItem*> order_items = _select->order->items;
+    for (int idx = 0; idx < order_items.size(); ++idx) {
+        check_multi_distinct_in_node(order_items[idx]->expr,
+                            multi_distinct_cnt,
+                            multi_col_single_child,
+                            name_set);
+    }
+}
+
+void SelectPlanner::check_multi_distinct_in_node(const parser::ExprNode* item, 
+                                                    int& multi_distinct_cnt, 
+                                                    bool& multi_col_single_child,
+                                                    std::set<std::string>& name_set) {
+    if (item == nullptr) {
+        return;
+    }
+    for (int i = 0; i < item->children.size(); i++) {
+        const parser::ExprNode* expr_item = (const parser::ExprNode*) item->children[i];
+        check_multi_distinct_in_node(expr_item, multi_distinct_cnt, multi_col_single_child, name_set);
+    }
+    if (item->expr_type == parser::ET_FUNC) {
+        parser::FuncExpr* func = (parser::FuncExpr*) item;
+        if (func->distinct == true && 
+                (func->fn_name.to_lower() == "sum" || func->fn_name.to_lower() == "count")) {
+            multi_distinct_cnt ++;
+            if (func->children.size() > 1) {
+                multi_col_single_child = true;
+            }
+            if (func->children.size() == 1) {
+                const parser::ExprNode* expr_item = (const parser::ExprNode*) func->children[0];
+                std::ostringstream os;
+                expr_item->to_stream(os);
+                name_set.insert(os.str());
+            }
+        } else if (func->distinct == true && func->fn_name.to_lower() == "group_concat") {
+            multi_distinct_cnt ++;
+            if (func->children.size() == 2) {
+                const parser::ExprNode* expr_item = (const parser::ExprNode*) func->children[0];
+                if (expr_item->children.size() != 1) {
+                    multi_col_single_child = true;
+                    return;
+                }
+            }
+            if (func->children.size() == 4) {
+                const parser::ExprNode* expr_item1 = (const parser::ExprNode*) func->children[0];
+                const parser::ExprNode* expr_item2 = (const parser::ExprNode*) func->children[2];
+                // 不允许多列 group_concat(distinct col1,col2 order by col2)
+                // 不允许多列 group_concat(distinct col1 order by col1, col2)
+                if (expr_item1->children.size() != expr_item2->children.size()) {
+                    multi_col_single_child = true;
+                    return;
+                }
+
+                // 不允许多列 group_concat(distinct col1 order by col2)
+                std::ostringstream os1;
+                expr_item1->to_stream(os1);
+                std::ostringstream os2;
+                expr_item2->to_stream(os2);
+                if (os1.str() != os2.str()) {
+                    multi_col_single_child = true;
+                    return;
+                }
+            }
+            std::ostringstream os;
+            func->to_stream(os);
+            name_set.insert(os.str());
+        }
+    }
 }
 
 // pb::SlotDescriptor& SelectPlanner::_get_group_expr_slot() {

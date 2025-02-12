@@ -49,6 +49,14 @@ public:
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
     void encode_agg_key(MemRow* row, MutTableKey& key);
     void process_row_batch(RuntimeState* state, RowBatch& batch, int64_t& used_size, int64_t& release_size);
+    virtual bool can_use_arrow_vector();
+    int vectorize_build_group_by_exprs(RuntimeState* state, 
+                                      ExprNode* group_by_expr, 
+                                      std::vector<arrow::FieldRef>& group_by_fields,
+                                      std::set<std::string>& key_field_names,
+                                      std::vector<arrow::compute::Expression>& generate_projection_exprs,
+                                      std::vector<std::string>& generate_projection_exprs_names);
+    virtual int build_arrow_declaration(RuntimeState* state);
     std::vector<ExprNode*>* mutable_group_exprs() {
         return &_group_exprs;
     }
@@ -72,7 +80,6 @@ private:
     //需要推导_agg_tuple_id内部slot的类型
     std::vector<ExprNode*> _group_exprs;
     int32_t _agg_tuple_id;
-    int     _row_cnt = 0;
     pb::TupleDescriptor* _group_tuple_desc;
     std::vector<AggFnCall*> _agg_fn_calls;
     std::set<int> _agg_slot_set;
@@ -81,6 +88,7 @@ private:
     //用于分组和get_next的定位,用map可与mysql保持一致
     butil::FlatMap<std::string, MemRow*> _hash_map;
     butil::FlatMap<std::string, MemRow*>::iterator _iter;
+    int32_t _arrow_ignore_tuple_id = -1; // 忽略的tuple_id, sort_tuple_id
 };
 }
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

@@ -20,7 +20,6 @@
 #include <google/protobuf/dynamic_message.h>
 #include <google/protobuf/descriptor.h>
 
-
 namespace baikaldb {
 class TableKey;
 class IndexInfo;
@@ -155,9 +154,18 @@ public:
         return _used_size * 1.5 + 9 * _tuples.size() + sizeof(*this);
     }
 
+    void set_partition_id(int64_t partition_id) {
+        _partition_id = partition_id;
+    }
+
+    int64_t get_partition_id() {
+        return _partition_id;
+    }
+
 private:
     std::vector<google::protobuf::Message*> _tuples;
     std::vector<bool> _tuples_assignd;
+    int64_t _partition_id = -1;
     int64_t _used_size;
 };
 }

@@ -28,7 +28,7 @@ namespace baikaldb {
 
 class ExtRandomAccessFile : public rocksdb::FSRandomAccessFile {
 public:
-    explicit ExtRandomAccessFile(std::unique_ptr<ExtFileReader> file_reader) { 
+    explicit ExtRandomAccessFile(std::shared_ptr<ExtFileReader> file_reader) { 
         _file_reader = std::move(file_reader);
     }
     virtual ~ExtRandomAccessFile() { 
@@ -53,7 +53,7 @@ public:
     // virtual IOStatus MultiRead(FSReadRequest* reqs, size_t num_reqs,
     //                 const IOOptions& options, IODebugContext* dbg);
 private:
-    std::unique_ptr<ExtFileReader> _file_reader;
+    std::shared_ptr<ExtFileReader> _file_reader;
 };
 
 class SstExtLinker {

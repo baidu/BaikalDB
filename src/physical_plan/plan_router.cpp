@@ -39,35 +39,42 @@ int PlanRouter::analyze(QueryContext* ctx) {
     //DB_NOTICE("need_seperate:%d", plan->need_seperate());
     std::vector<ExecNode*> scan_nodes;
     std::vector<ExecNode*> dual_scan_nodes;
+    std::vector<ExecNode*> join_nodes;
     plan->get_node(pb::SCAN_NODE, scan_nodes);
     plan->get_node(pb::DUAL_SCAN_NODE, dual_scan_nodes);
+    plan->get_node(pb::JOIN_NODE, join_nodes);
     InsertNode* insert_node = static_cast<InsertNode*>(plan->get_node(pb::INSERT_NODE));
     TruncateNode* truncate_node = static_cast<TruncateNode*>(plan->get_node(pb::TRUNCATE_NODE));
     KillNode* kill_node = static_cast<KillNode*>(plan->get_node(pb::KILL_NODE));
     TransactionNode* txn_node = static_cast<TransactionNode*>(plan->get_node(pb::TRANSACTION_NODE));
 
-    size_t scan_size = scan_nodes.size() + dual_scan_nodes.size();
-    if (scan_size > 0) {
-        bool has_join = scan_size > 1;
-        std::set<ExecNode*> escape_get_region_infos;
-        if (has_join) {
-            // 获取所有join_node的非驱动表node。
-            // 如果scan_node在这些非驱动表node的子树里，路由信息会在join执行的时候生成。PlanRouter无需生成这些scan_node的路由信息
-            // 即PlanRouter只需要获取join第一个执行的scan_node的路由信息。
-            // 解决大表作为非驱动表，copy RegionInfo导致查询性能差的问题
-            std::vector<ExecNode*> join_nodes;
-            plan->get_node(pb::JOIN_NODE, join_nodes);
-            for (const auto& join : join_nodes) {
-                if (join == nullptr) {
-                    continue;
-                }
-                JoinNode* join_node = static_cast<JoinNode*>(join);
-                ExecNode* inner_node = join_node->get_inner_node();
-                if (inner_node != nullptr) {
-                    escape_get_region_infos.insert(inner_node);
-                }
+    SignExecType sign_exec_type = SignExecType::SIGN_EXEC_NOT_SET;
+    // 按照sign指定
+    if (ctx->sign_exec_type.count(ctx->stat_info.sign) > 0) {
+        sign_exec_type = ctx->sign_exec_type[ctx->stat_info.sign];
+    }
+    // sql注释指定
+    if (ctx->sql_exec_type_defined != SignExecType::SIGN_EXEC_NOT_SET) {
+        sign_exec_type = ctx->sql_exec_type_defined;
+    }
+    std::set<ExecNode*> escape_get_region_infos;
+    if (!join_nodes.empty() && sign_exec_type != SignExecType::SIGN_EXEC_ARROW_FORCE_NO_INDEX_JOIN) {
+        // 获取所有index join_node的非驱动表node。
+        // 如果scan_node在这些非驱动表node的子树里，路由信息会在join执行的时候生成。PlanRouter无需生成这些scan_node的路由信息
+        // 即PlanRouter只需要获取join第一个执行的scan_node的路由信息
+        // 解决大表作为非驱动表，copy RegionInfo导致查询性能差的问题
+        // 后续apply_node也可以做这个优化
+        for (auto& node : join_nodes) {
+            JoinNode* join_node = static_cast<JoinNode*>(node);
+            join_node->adjudge_join_type();
+            if (join_node->is_use_index_join()) {
+                escape_get_region_infos.insert(static_cast<JoinNode*>(join_node)->get_inner_node());
             }
         }
+    }
+    size_t scan_size = scan_nodes.size() + dual_scan_nodes.size();
+    if (scan_size > 0) {
+        bool has_join = scan_size > 1; // has joinNode or has applyNode
         for (auto scan_node : scan_nodes) {
             auto ret = scan_node_analyze(static_cast<RocksdbScanNode*>(scan_node), ctx, has_join, escape_get_region_infos);
             if (ret != 0) {
@@ -194,13 +201,13 @@ int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node,
     bool covering_index = true;
     int idx = 0;
     bool is_full_export = _is_full_export;
-    bool is_join_inner_table = false;
-    if (has_join) {
-        // 递归判断scan_node是否在join非驱动表node的子树里，是的话，跳过获取路由信息
+    bool skip_index_join_inner_table = false;
+    if (escape_get_region_infos.size() > 0) {
+        // 递归判断scan_node是否在index join非驱动表node的子树里，是的话，跳过获取路由信息
         ExecNode* parent_node_ptr = scan_node;
         while (parent_node_ptr) { 
             if (escape_get_region_infos.find(parent_node_ptr) != escape_get_region_infos.end()) {
-                is_join_inner_table = true;
+                skip_index_join_inner_table = true;
                 break;
             }
             parent_node_ptr = parent_node_ptr->get_parent();
@@ -219,8 +226,7 @@ int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node,
                 continue;
             }
         }
-        
-        if (is_join_inner_table) {
+        if (skip_index_join_inner_table) {
             continue;
         }
         auto index_ptr = schema_factory->get_index_info_ptr(scan_index_info.router_index_id);
@@ -258,7 +264,6 @@ int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node,
             ret = -1;
             break;
         }
-        
         if (ret < 0) {
             DB_WARNING("get_region_by_key:fail :%d", ret);
             return ret;

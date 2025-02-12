@@ -114,9 +114,9 @@ void ExecNode::remove_additional_predicate(std::vector<ExprNode*>& input_exprs) 
     }
 }
 
-void ExecNode::add_filter_node(const std::vector<ExprNode*>& input_exprs) {
+void ExecNode::add_filter_node(const std::vector<ExprNode*>& input_exprs, pb::PlanNodeType type) {
     pb::PlanNode pb_plan_node;
-    pb_plan_node.set_node_type(pb::TABLE_FILTER_NODE);
+    pb_plan_node.set_node_type(type);
     pb_plan_node.set_num_children(1);
     pb_plan_node.set_is_explain(_is_explain);
     pb_plan_node.set_limit(-1);
@@ -126,6 +126,20 @@ void ExecNode::add_filter_node(const std::vector<ExprNode*>& input_exprs) {
     filter_node->add_child(this);
     for (auto& expr : input_exprs) {
         filter_node->add_conjunct(expr);
+    }
+}
+
+void ExecNode::add_filter_node_as_child(const std::vector<ExprNode*>& input_exprs, pb::PlanNodeType type) {
+    if (_children.size() == 1) {
+        _children[0]->add_filter_node(input_exprs, type);
+    } else {
+        DB_FATAL("Fail to add_filter_node_as_child");
+    }
+}
+
+void ExecNode::get_all_dual_scan_node(std::vector<ExecNode*>& exec_nodes) {
+    for (auto c : _children) {
+        c->get_all_dual_scan_node(exec_nodes);
     }
 }
 
@@ -218,6 +232,9 @@ int ExecNode::open(RuntimeState* state) {
         ret = c->open(state);
         if (ret < 0) {
             return ret;
+        }
+        if (c->node_exec_type() == pb::EXEC_ARROW_ACERO) {
+            _node_exec_type = pb::EXEC_ARROW_ACERO;
         }
         num_affected_rows += ret;
     }

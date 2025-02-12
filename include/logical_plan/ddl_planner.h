@@ -35,15 +35,18 @@ public:
 
 private:
     int parse_create_table(pb::SchemaInfo& table);
+    int parse_create_view(pb::SchemaInfo& view);
     int parse_drop_table(pb::SchemaInfo& table);
+    int parse_drop_view(pb::SchemaInfo& view);
     int parse_restore_table(pb::SchemaInfo& table);
     int parse_create_database(pb::DataBaseInfo& database);
     int parse_drop_database(pb::DataBaseInfo& database);
     int parse_alter_table(pb::MetaManagerRequest& alter_request);
+    int parse_alter_view(pb::SchemaInfo& view);
     int check_partition_key_constraint(pb::SchemaInfo& table, const std::string& field_name);
 
     int add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column,
-                       bool is_unique_indicator, const std::string& old_field_name = "");
+                       bool is_unique_indicator, bool is_modify_field = false, const std::string& old_field_name = "");
     int parse_create_namespace(pb::NameSpaceInfo& namespace_info);
     int parse_drop_namespace(pb::NameSpaceInfo& namespace_info);
     int parse_alter_namespace(pb::NameSpaceInfo& namespace_info);
@@ -55,7 +58,7 @@ private:
     int parse_set_password(pb::UserPrivilege& user_privilege);
     int add_user_specs(pb::UserPrivilege& user_privilege, parser::Vector<parser::UserSpec*>& specs);
 
-    int add_constraint_def(pb::SchemaInfo& table, parser::Constraint* constraint,parser::AlterTableSpec* spec);
+    int add_constraint_def(pb::SchemaInfo& table, parser::Constraint* constraint,parser::AlterTableSpec* spec, bool has_ttl);
     bool is_fulltext_type_constraint(pb::StorageType pb_storage_type, bool& has_arrow_type, bool& has_pb_type) const;
     pb::PrimitiveType to_baikal_type(parser::FieldType* field_type);
     int parse_pre_split_keys(std::string split_start_key,
@@ -84,10 +87,14 @@ private:
     int parse_partition_range(pb::SchemaInfo& table, const parser::PartitionRange* p_partition_range);
     int parse_dynamic_partition_attr(pb::SchemaInfo& table, const rapidjson::Document& json);
     int parse_alter_partition(pb::MetaManagerRequest& alter_request, const parser::AlterTableSpec* p_alter_spec);
+    int parse_partition(const parser::TableOption* option, pb::SchemaInfo& table);
+    int add_default_partition_info(pb::SchemaInfo& table);
+
+    // DBLINK
+    int check_dblink_table_valid(const pb::DBLinkInfo& dblink_info);
 
     std::map<std::string, bool> _column_can_null;
 
-    static constexpr const char* PARITITON_PRE_SPLIT_FIELD = "userid";
 };
 
 } //namespace baikal

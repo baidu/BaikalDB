@@ -30,11 +30,6 @@ public:
         for (auto expr : _slot_order_exprs) {
             ExprNode::destroy_tree(expr);
         }
-        for (auto exprs : _select_projections) {
-            for (auto expr : exprs) {
-                ExprNode::destroy_tree(expr);
-            }
-        }
     }
 
     virtual int init(const pb::PlanNode& node) override;
@@ -45,25 +40,20 @@ public:
         for (auto expr : _slot_order_exprs) {
             expr->close();
         }
-        for (auto exprs : _select_projections) {
-            for (auto expr : exprs) {
-                expr->close();
-            }
-        }
         _sorter = nullptr;
     }
-    
-    std::vector<RuntimeState*>* mutable_select_runtime_states() {
-        return &_select_runtime_states;
-    }
-    void steal_projections(std::vector<ExprNode*>& projections) {
-        std::vector<ExprNode*> tmp;
-        tmp.swap(projections);
-        _select_projections.push_back(tmp);
-    }
+
     int32_t union_tuple_id() const {
         return _union_tuple_id;
     }
+
+    // 向量化
+    virtual bool can_use_arrow_vector();
+    virtual int build_arrow_declaration(RuntimeState* state);
+
+    // 谓词下推
+    virtual int predicate_pushdown(std::vector<ExprNode*>& input_exprs) override;
+
 private:
     std::vector<ExprNode*> _slot_order_exprs;
     std::vector<bool> _is_asc;
@@ -73,8 +63,6 @@ private:
     pb::TupleDescriptor* _tuple_desc = nullptr;
     std::shared_ptr<Sorter> _sorter;
     std::shared_ptr<MemRowCompare> _mem_row_compare;
-    std::vector<RuntimeState*> _select_runtime_states;
-    std::vector<std::vector<ExprNode*>>  _select_projections;
 };
 }
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

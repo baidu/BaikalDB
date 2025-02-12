@@ -44,5 +44,6 @@ private:
     int64_t _index_id {0};
     std::string _task_id;
     bool _is_global_index = false;
+    bool _is_rollup_index = false;
 };
 } // namespace  baikaldbame

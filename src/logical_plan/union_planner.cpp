@@ -53,6 +53,13 @@ int UnionPlanner::plan() {
 
     create_union_node();
 
+    if (0 != create_dual_scan_nodes()) {
+        return -1;
+    }
+    if (0 != get_slot_column_mapping()) {
+        return -1;
+    }
+
     if (client->txn_id == 0) {
         _ctx->get_runtime_state()->set_single_sql_autocommit(true);
     } else {
@@ -63,11 +70,12 @@ int UnionPlanner::plan() {
 
 int UnionPlanner::gen_select_stmts_plan() {
     _is_distinct = _union_stmt->distinct;
-    std::vector<std::string>    final_select_names;
-    _union_tuple_id = _plan_table_ctx->tuple_cnt;
+    std::vector<std::string> final_select_names;
+    _union_tuple_id = _unique_id_ctx->tuple_cnt++;
     for (int stmt_idx = 0; stmt_idx < _union_stmt->select_stmts.size(); stmt_idx++) {
         parser::SelectStmt* select = _union_stmt->select_stmts[stmt_idx];
         ExprParams expr_params;
+        expr_params.is_union_subquery = true;
         int ret = gen_subquery_plan(select, _plan_table_ctx, expr_params);
         if (ret < 0) {
             return -1;
@@ -83,6 +91,10 @@ int UnionPlanner::gen_select_stmts_plan() {
             return -1;
         }
         _ctx->add_sub_ctx(_cur_sub_ctx);
+        const int32_t subquery_tuple_id = _unique_id_ctx->tuple_cnt++;
+        const int64_t subquery_table_id = --_unique_id_ctx->derived_table_id;
+        _ctx->derived_table_ctx_mapping[subquery_tuple_id] = _cur_sub_ctx;
+        _subquery_tuple_table_id_vec.emplace_back(subquery_tuple_id, subquery_table_id);
     }
     _select_names.swap(final_select_names);
     return 0;
@@ -158,7 +170,7 @@ void UnionPlanner::create_union_node() {
     plan_node->set_node_type(pb::UNION_NODE);
     plan_node->set_limit(-1);
     plan_node->set_is_explain(_ctx->is_explain);
-    plan_node->set_num_children(0);
+    plan_node->set_num_children(_union_stmt->select_stmts.size());
     pb::DerivePlanNode* derive = plan_node->mutable_derive_node();
     pb::UnionNode* union_node = derive->mutable_union_node();
     union_node->set_union_tuple_id(_union_tuple_id);
@@ -259,6 +271,36 @@ int UnionPlanner::parse_limit() {
     if (limit->count != nullptr && 0 != create_expr_tree(limit->count, _limit_count, CreateExprOptions())) {
         DB_WARNING("create limit count expr failed");
         return -1;
+    }
+    return 0;
+}
+
+int UnionPlanner::create_dual_scan_nodes() {
+    for (const auto& [subquery_tuple_id, subquery_table_id] : _subquery_tuple_table_id_vec) {
+        pb::PlanNode* scan_node = _ctx->add_plan_node();
+        scan_node->set_node_type(pb::DUAL_SCAN_NODE);
+        scan_node->set_limit(-1);
+        scan_node->set_is_explain(_ctx->is_explain);
+        scan_node->set_is_get_keypoint(_ctx->is_get_keypoint);
+        scan_node->set_num_children(0);
+        pb::DerivePlanNode* derive = scan_node->mutable_derive_node();
+        pb::ScanNode* scan = derive->mutable_scan_node();
+        scan->set_tuple_id(subquery_tuple_id);
+        scan->set_table_id(subquery_table_id);
+        scan->set_union_tuple_id(_union_tuple_id);
+    }
+    return 0;
+}
+
+int UnionPlanner::get_slot_column_mapping() {
+    pb::TupleDescriptor* union_tuple_desc = _ctx->get_tuple_desc(_union_tuple_id);
+    if (union_tuple_desc == nullptr) {
+        DB_WARNING("union_tuple_desc is nullptr");
+        return -1;
+    }
+    for (int i = 0; i < union_tuple_desc->slots().size(); ++i) {
+        const pb::SlotDescriptor& slot_desc = union_tuple_desc->slots(i);
+        _ctx->slot_column_mapping[slot_desc.tuple_id()][slot_desc.slot_id()]= i;
     }
     return 0;
 }

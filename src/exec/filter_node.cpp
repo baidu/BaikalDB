@@ -27,6 +27,7 @@
 #include "rapidjson/document.h"
 #include "rapidjson/stringbuffer.h"
 #include "rapidjson/prettywriter.h"
+#include <arrow/acero/options.h>
 
 namespace baikaldb {
 
@@ -42,6 +43,7 @@ int FilterNode::init(const pb::PlanNode& node) {
 
     pb::FilterNode filter_node;
     filter_node.ParseFromString(node.derive_node().filter_node());
+    // DB_WARNING("filter: %s", filter_node.DebugString().c_str());
     for (auto& expr : filter_node.conjuncts()) {
         ExprNode* conjunct = nullptr;
         ret = ExprNode::create_tree(expr, &conjunct);
@@ -49,6 +51,7 @@ int FilterNode::init(const pb::PlanNode& node) {
             //如何释放资源
             return ret;
         }
+        //DB_WARNING("add conjunct, %s", expr.DebugString().c_str());
         _conjuncts.emplace_back(conjunct);
     }
     for (auto& expr : node.derive_node().raw_filter_node().conjuncts()) {
@@ -173,7 +176,11 @@ static int predicate_cut(SlotPredicate& preds, std::set<ExprNode*>& cut_preds) {
                 if (!lit->is_constant()) {
                     return 0;
                 }
-                and_map[static_cast<RowExpr*>(lit)->get_value(nullptr, idx0).get_string()] = lit;
+                if (idx0 >= lit->children_size()) {
+                    DB_WARNING("Invalid idx0: %d, lit->chilren_size(): %d", idx0, (int)lit->children_size());
+                    return 0;                    
+                }
+                and_map[static_cast<RowExpr*>(lit)->get_value(nullptr, idx0).get_string()] = lit->children(idx0);
             }
         } else {
             for (uint32_t i = 1; i < preds.in_preds[0]->children_size(); i++) {
@@ -287,7 +294,6 @@ static int predicate_cut(SlotPredicate& preds, std::set<ExprNode*>& cut_preds) {
             }
         }
         DB_DEBUG("in size:%lu", preds.in_preds[0]->children_size() -1);
-
         return 0;
     }
     ExprNode* lt_le = nullptr;
@@ -348,7 +354,7 @@ int FilterNode::expr_optimize(QueryContext* ctx) {
         //类型推导
         ret = expr->expr_optimize();
         if (ret < 0) {
-            DB_WARNING("expr type_inferer fail:%d", ret);
+            DB_WARNING("this:%p, expr type_inferer fail:%d", this, ret);
             return ret;
         }
         ExprNode::or_node_optimize(&expr);
@@ -546,6 +552,44 @@ int FilterNode::predicate_pushdown(std::vector<ExprNode*>& input_exprs) {
     return 0;
 }
 
+bool FilterNode::can_use_arrow_vector() {
+    for (auto expr : _conjuncts) {
+        if (!expr->can_use_arrow_vector()) {
+            return false;
+        }
+    }
+    for (auto& c : _children) {
+        if (!c->can_use_arrow_vector()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+int FilterNode::build_arrow_declaration(RuntimeState* state) {
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
+    for (auto c : _children) {
+        if (c->build_arrow_declaration(state) != 0) {
+            return -1;
+        }
+    }
+    std::vector<arrow::compute::Expression> sub_exprs;
+    sub_exprs.reserve(_pruned_conjuncts.size());
+    for (int i = 0; i < _pruned_conjuncts.size(); ++i) {
+        int ret = _pruned_conjuncts[i]->transfer_to_arrow_expression();
+        if (ret < 0) {
+            DB_FATAL_STATE(state, "expr transfer arrow fail, ret:%d", ret);
+            return ret;
+        }
+        sub_exprs.emplace_back(_pruned_conjuncts[i]->arrow_expr());
+        DB_DEBUG("handle sub filter, idx: %d: %s", i, sub_exprs[i].ToString().c_str());
+    }
+    arrow::acero::Declaration dec{"filter", arrow::acero::FilterNodeOptions{arrow::compute::and_(sub_exprs)}};
+    LOCAL_TRACE_ARROW_PLAN(dec);
+    state->append_acero_declaration(dec);
+    return 0;
+}
+
 int FilterNode::open(RuntimeState* state) {
     START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
     
@@ -668,6 +712,10 @@ int FilterNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
                     DB_WARNING_STATE(state, "_children get_next fail");
                     return ret;
                 }
+                set_node_exec_type(_children[0]->node_exec_type());
+                if (_node_exec_type == pb::EXEC_ARROW_ACERO) {
+                    return 0;
+                }
                 //DB_WARNING_STATE(state, "_child_row_batch:%u %u", _child_row_batch.capacity(), _child_row_batch.size());
                 //DB_NOTICE("scan cost:%ld", cost.get_time());
                 continue;
@@ -738,6 +786,26 @@ void FilterNode::show_explain(std::vector<std::map<std::string, std::string>>& o
     if (_raw_filter_node.conjuncts_size() != 0) {
         output.back()["Extra"] += "Using where; ";
     }
+}
+
+int FilterNode::arrow_steal_conjuncts(std::vector<arrow::compute::Expression>& conjuncts, int64_t& limit) {
+    if (limit == -1 && get_limit() > 0) {
+        limit = get_limit();
+    }
+    if (_pruned_conjuncts.size() == 0) {
+        return 0;
+    }
+    for (int i = 0; i < _pruned_conjuncts.size(); ++i) {
+        int ret = _pruned_conjuncts[i]->transfer_to_arrow_expression();
+        if (ret < 0) {
+            DB_FATAL("expr transfer arrow fail, ret:%d", ret);
+            return ret;
+        }
+        conjuncts.emplace_back(_pruned_conjuncts[i]->arrow_expr());
+        DB_DEBUG("handle sub filter, idx: %d: %s", i, sub_exprs[i].ToString().c_str());
+    }
+    _pruned_conjuncts.clear();
+    return 0;
 }
 }
 

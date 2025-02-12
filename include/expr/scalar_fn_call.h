@@ -17,6 +17,7 @@
 #include <functional>
 #include "expr_node.h"
 #include "fn_manager.h"
+#include "arrow_function.h"
 
 namespace baikaldb {
 class ScalarFnCall : public ExprNode {
@@ -40,6 +41,9 @@ public:
         }
         return ExprNode::get_last_insert_id();
     }
+    // vectorized
+    virtual int transfer_to_arrow_expression();
+    virtual bool can_use_arrow_vector();
 private:
     ExprValue multi_eq_value(MemRow* row) {
         for (size_t i = 0; i < children(0)->children_size(); i++) {
@@ -118,6 +122,8 @@ protected:
     pb::Function _fn;
     bool _is_row_expr = false;
     std::function<ExprValue(const std::vector<ExprValue>&)> _fn_call;
+    // FT_COMMON构建arrow expression
+    std::function<int(std::vector<ExprNode*>&, pb::Function*, const pb::PrimitiveType&, arrow::compute::Expression&)> _arrow_fn_call; 
 };
 }
 

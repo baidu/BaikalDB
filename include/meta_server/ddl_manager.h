@@ -68,11 +68,13 @@ public:
     DBManager() {
         bthread_mutex_init(&_broadcast_mutex, NULL);
         bthread_mutex_init(&_address_instance_mutex, NULL);
+        bthread_mutex_init(&_task_store_mutex, NULL);
     }
 
     ~DBManager() {
         bthread_mutex_destroy(&_broadcast_mutex);
         bthread_mutex_destroy(&_address_instance_mutex);
+        bthread_mutex_destroy(&_task_store_mutex);
     }
 
     void set_meta_state_machine(MetaStateMachine* meta_state_machine) {
@@ -148,16 +150,29 @@ public:
     }
 
     void clear_all_task() {
+        DB_NOTICE("DBManger clear all task");
         _common_task_map.clear();
         _broadcast_task_map.clear();
+        {
+            BAIDU_SCOPED_LOCK(_task_store_mutex);
+            store_ddlwork_cnt_map.clear();
+            task_store_map.clear();
+        }
     }
     void update_txn_ready(int64_t table_id);
 
     void clear_all_tasks() {
         DB_NOTICE("DBManger clear all tasks.");
         _common_task_map.clear();
-        BAIDU_SCOPED_LOCK(_broadcast_mutex);
-        _broadcast_task_map.clear();
+        {
+            BAIDU_SCOPED_LOCK(_broadcast_mutex);
+            _broadcast_task_map.clear();
+        }
+        {
+            BAIDU_SCOPED_LOCK(_task_store_mutex);
+            store_ddlwork_cnt_map.clear();
+            task_store_map.clear();
+        }
     }
 
     void clear_task(int64_t table_id) {
@@ -175,6 +190,32 @@ public:
             remove_func(task_map.to_do_task_map);
             remove_func(task_map.doing_task_map);
         });
+        {
+            BAIDU_SCOPED_LOCK(_task_store_mutex);
+            for (auto iter = task_store_map.begin(); iter != task_store_map.end();) {
+                if (iter->first.find(task_prefix) == 0) {
+                    DB_NOTICE("store_check DBManger clear task: %s", iter->first.c_str());
+                    store_ddlwork_cnt_map.erase(iter->first);
+                    iter = task_store_map.erase(iter);
+                } else {
+                    iter++;
+                }
+            }
+        }
+    }
+
+    void clear_store_check(const std::string& task_id) {
+        BAIDU_SCOPED_LOCK(_task_store_mutex);
+        if (task_store_map.count(task_id) != 0) {
+            store_ddlwork_cnt_map[task_store_map[task_id]]--;
+            if (store_ddlwork_cnt_map[task_store_map[task_id]] <= 0) {
+                store_ddlwork_cnt_map.erase(task_store_map[task_id]);
+            }
+            task_store_map.erase(task_id);
+            DB_WARNING("store_check task_%s remove from task_store_map", task_id.c_str());
+        } else {
+            DB_WARNING("store_check task_%s not exist in task_store_map", task_id.c_str());
+        }
     }
 
     struct BroadcastTask {
@@ -202,6 +243,12 @@ private:
     //txn
     std::unordered_map<int64_t, BroadcastTaskPtr> _broadcast_task_map;
     bthread_mutex_t                          _broadcast_mutex;
+
+    // store ip -> ddlwork cnt
+    std::unordered_map<std::string, int> store_ddlwork_cnt_map; 
+    // taskid -> store ip
+    std::unordered_map<std::string, std::string> task_store_map;
+    bthread_mutex_t        _task_store_mutex;
 
     std::atomic<bool> _shutdown {false};
     MetaStateMachine* _meta_state_machine {nullptr};
@@ -292,6 +339,10 @@ public:
         BAIDU_SCOPED_LOCK(_table_mutex);
         return _table_ddl_mem.count(table_id) > 0;
     }
+    int is_region_work_need_executor(MemRegionDdlWork& region_work, int64_t table_id, bool& done);
+    bool execute_or_retry_task(bool& done, bool& rollback, int64_t table_id, 
+                        size_t region_size, size_t& current_task_number, size_t max_task_number, 
+                        pb::DdlWorkInfo& ddl_work, int32_t& wait_num, MemRegionDdlWork& region_work);
 
 private:
     int update_ddl_status(bool is_suspend, int64_t table_id);

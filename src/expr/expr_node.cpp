@@ -134,7 +134,10 @@ bool ExprNode::contains_null_function() {
         return true;
     } else if (_node_type == pb::FUNCTION_CALL) {
         if (static_cast<ScalarFnCall*>(this)->fn().name() == "ifnull" 
-            || static_cast<ScalarFnCall*>(this)->fn().name() == "isnull") {
+            || static_cast<ScalarFnCall*>(this)->fn().name() == "isnull"
+            || static_cast<ScalarFnCall*>(this)->fn().name() == "if"
+            || static_cast<ScalarFnCall*>(this)->fn().name() == "case_when"
+            || static_cast<ScalarFnCall*>(this)->fn().name() == "case_expr_when") {
             return true;
         }
     }
@@ -215,10 +218,80 @@ void ExprNode::replace_slot_ref_to_literal(const std::set<int64_t>& sign_set,
                 _children[i] = expr;
                 literal_maps[sign].emplace_back(expr);
             }
-            continue;
+        } else {
+            if (_children[i]->children_size() > 0) {
+                _children[i]->replace_slot_ref_to_literal(sign_set, literal_maps);
+            }
         }
-        _children[i]->replace_slot_ref_to_literal(sign_set, literal_maps);
     }
+}
+
+int ExprNode::replace_slot_ref_to_expr(const int32_t tuple_id,
+                                       const std::map<int32_t, int32_t>& slot_column_mapping,
+                                       const std::vector<ExprNode*>& derived_table_projections) {
+    for (size_t i = 0; i < _children.size(); i++) {
+        if (_children[i] == nullptr) {
+            DB_WARNING("_children[%d] is nullptr", (int)i);
+            return -1;
+        }
+        if (_children[i]->node_type() == pb::SLOT_REF && _children[i]->tuple_id() == tuple_id) {
+            const int32_t outer_slot_id = _children[i]->slot_id();
+            if (slot_column_mapping.find(outer_slot_id) == slot_column_mapping.end()) {
+                DB_WARNING("Fail to get slot column, outer_slot_id: %d, tuple_id: %d", outer_slot_id, tuple_id);
+                return -1;
+            }
+            const int32_t inner_column_id = slot_column_mapping.at(outer_slot_id);
+            if (inner_column_id < 0 || inner_column_id >= derived_table_projections.size()) {
+                DB_WARNING("Invalid inner_column_id: %d, projections_size: %d", 
+                            inner_column_id, (int)derived_table_projections.size());
+                return -1;
+            }
+            if (derived_table_projections[inner_column_id] == nullptr) {
+                DB_WARNING("derived_table_projections[%d] is nullptr", inner_column_id);
+                return -1;
+            }
+            pb::Expr pb_expr;
+            ExprNode::create_pb_expr(&pb_expr, derived_table_projections[inner_column_id]);
+            ExprNode* expr_node = nullptr;
+            int ret = ExprNode::create_tree(pb_expr, &expr_node);
+            if (ret < 0) {
+                DB_WARNING("Fail to create_tree");
+                return -1;
+            }
+            delete _children[i];
+            _children[i] = expr_node;
+        } else {
+            if (_children[i]->children_size() > 0) {
+                _children[i]->replace_slot_ref_to_expr(tuple_id, slot_column_mapping, derived_table_projections);
+            }
+        }
+    }
+    return 0;
+}
+
+int ExprNode::has_agg_projection(const std::map<int32_t, int32_t>& slot_column_mapping,
+                                 const std::vector<bool>& derived_table_projections_agg_vec,
+                                 bool& has_agg) {
+    has_agg = false;
+    std::unordered_set<int32_t> slot_ids;
+    get_all_slot_ids(slot_ids);
+    for (auto slot_id : slot_ids) {
+        if (slot_column_mapping.find(slot_id) == slot_column_mapping.end()) {
+            DB_WARNING("Fail to get slot column, slot_id: %d", slot_id);
+            return -1;
+        }
+        const int32_t inner_column_id = slot_column_mapping.at(slot_id);
+        if (inner_column_id < 0 || inner_column_id >= derived_table_projections_agg_vec.size()) {
+            DB_WARNING("Invalid inner_column_id: %d, projections_size: %d", 
+                        inner_column_id, (int)derived_table_projections_agg_vec.size());
+            return -1;
+        }
+        if (derived_table_projections_agg_vec[inner_column_id]) {
+            has_agg = true;
+            break;
+        }
+    }
+    return 0;
 }
 
 void ExprNode::get_all_field_ids(std::unordered_set<int32_t>& field_ids) {

@@ -14,12 +14,14 @@
 
 #pragma once
 
+#include <arrow/compute/expression.h>
 #include <vector>
 #include <unordered_set>
 #include <unordered_map>
 #include "expr_value.h"
 #include "mem_row.h"
 #include "proto/expr.pb.h"
+#include "proto/plan.pb.h"
 
 namespace baikaldb {
 const int NOT_BOOL_ERRCODE = -100;
@@ -165,7 +167,18 @@ public:
             e->close();
         }
     }
-
+    virtual int transfer_to_arrow_expression() {
+        return -1;
+    }
+    virtual bool can_use_arrow_vector() {
+        return false;
+    }
+    void set_arrow_expr(arrow::compute::Expression& arrow_expr) {
+        _arrow_expr = std::move(arrow_expr);
+    }
+    const arrow::compute::Expression& arrow_expr() {
+        return _arrow_expr;
+    }
     virtual int64_t used_size() {
         int64_t size = sizeof(*this);
         for (auto c : _children) {
@@ -182,6 +195,15 @@ public:
 
     virtual void replace_slot_ref_to_literal(const std::set<int64_t>& sign_set,
                     std::map<int64_t, std::vector<ExprNode*>>& literal_maps);
+
+    virtual int replace_slot_ref_to_expr(const int32_t tuple_id,
+                                         const std::map<int32_t, int32_t>& slot_column_mapping,
+                                         const std::vector<ExprNode*>& derived_table_projections);
+
+    // 判断表达式中的slot是否包含子查询中的agg projection；表达式中的slot需要在同一个tuple中                
+    virtual int has_agg_projection(const std::map<int32_t, int32_t>& slot_column_mapping,
+                                   const std::vector<bool>& derived_table_projections,
+                                   bool& has_agg);
 
     ExprNode* get_slot_ref(int32_t tuple_id, int32_t slot_id);
     ExprNode* get_parent(ExprNode* child);
@@ -218,6 +240,9 @@ public:
     }
     size_t children_size() {
         return _children.size();
+    }
+    std::vector<ExprNode*> children() {
+        return _children;
     }
     ExprNode* children(size_t idx) {
         return _children[idx];
@@ -305,6 +330,7 @@ protected:
     int32_t _slot_id = -1;
     int32_t _float_precision_len = -1;
     bool is_logical_and_or_not();
+    arrow::compute::Expression _arrow_expr;
 public:
     static int create_expr_node(const pb::ExprNode& node, ExprNode** expr_node);
 private:

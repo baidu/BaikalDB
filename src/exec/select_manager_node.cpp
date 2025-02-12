@@ -19,14 +19,22 @@
 #include "limit_node.h"
 #include "agg_node.h"
 #include "query_context.h"
+#include <arrow/acero/options.h>
+#include "arrow_io_excutor.h"
+#include "join_node.h"
+#include "vectorize_helpper.h"
+#include "arrow_io_excutor.h"
 
 namespace baikaldb {
 DEFINE_bool(global_index_read_consistent, true, "double check for global and primary region consistency");
 DEFINE_int32(max_select_region_count, -1, "max select sql region count limit, default:-1 means no limit");
+DECLARE_int32(chunk_size);
+DECLARE_int32(arrow_multi_threads);
 int SelectManagerNode::open(RuntimeState* state) {
     START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, ([state](TraceLocalNode& local_node) {
         local_node.set_scan_rows(state->num_scan_rows());
     }));
+    set_node_exec_type(pb::EXEC_ROW);
     if (_return_empty) {
         return 0;
     }
@@ -38,73 +46,140 @@ int SelectManagerNode::open(RuntimeState* state) {
     client_conn->seq_id++;
     _mem_row_compare = std::make_shared<MemRowCompare>(_slot_order_exprs, _is_asc, _is_null_first);
     _sorter = std::make_shared<Sorter>(_mem_row_compare.get());
-    if (_sub_query_node != nullptr) {
-        return subquery_open(state);
+
+    if (state->execute_type == pb::EXEC_ARROW_ACERO) {
+        ExecNode* parent = this;
+        while (parent != nullptr) {
+            if (parent->node_type() == pb::JOIN_NODE 
+                || parent->node_type() == pb::UNION_NODE) {
+                break;
+            }
+            if (parent->is_delay_fetcher_store()) {
+                _delay_fetcher_store = true;
+                set_node_exec_type(pb::EXEC_ARROW_ACERO);
+                break;
+            }
+            parent = parent->get_parent();
+        }
     }
+
+    std::vector<ExecNode*> dual_scan_nodes;
+    get_node(pb::DUAL_SCAN_NODE, dual_scan_nodes);
     std::vector<ExecNode*> scan_nodes;
     get_node(pb::SCAN_NODE, scan_nodes);
-    if (scan_nodes.size() != 1) {
-        DB_WARNING("select manager has more than one scan node, scan_node_size: %lu, txn_id: %lu, log_id:%lu",
-                    scan_nodes.size(), state->txn_id, state->log_id());
+    if (dual_scan_nodes.size() + scan_nodes.size() != 1) {
+        DB_WARNING("Invalid SelectManagerNode, dual_scan_nodes_size: %lu, scan_nodes_size: %lu, txn_id: %lu, log_id:%lu",
+                    dual_scan_nodes.size(), scan_nodes.size(), state->txn_id, state->log_id());
         return -1;
     }
-    RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(scan_nodes[0]);
+    if (dual_scan_nodes.size() == 1) {
+        _is_dual_scan = true;
+        dual_scan_nodes[0]->set_delay_fetcher_store(_delay_fetcher_store);
+        return subquery_open(state);
+    } 
+    _scan_tuple_id = static_cast<RocksdbScanNode*>(scan_nodes[0])->tuple_id();
+    if (_delay_fetcher_store) {
+        return 0;
+    }
+    int ret = fetcher_store_run(state, scan_nodes[0]);
+    if (ret < 0) {
+        return -1;
+    }
+    if (_arrow_schema != nullptr) {
+        state->arrow_input_schemas[_scan_tuple_id] = _arrow_schema;
+    }
+    return 0;
+}
 
-    return fetcher_store_run(state, scan_node);
+int SelectManagerNode::delay_fetcher_store(RuntimeState* state) {
+    RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(get_node(pb::SCAN_NODE));
+    int ret = fetcher_store_run(state, scan_node);
+    if (ret < 0) {
+        return -1;
+    }
+    return 0;
+}
+
+int SelectManagerNode::build_arrow_declaration(RuntimeState* state) {
+    if (_is_dual_scan) {
+        return _children[0]->build_arrow_declaration(state);
+    }
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
+    int ret = 0;
+    // add SourceNode
+    std::shared_ptr<FetcherStoreVectorizedReader> vectorized_reader = std::make_shared<FetcherStoreVectorizedReader>();
+    ret = vectorized_reader->init(this, state);
+    if (ret != 0) {
+        return -1;
+    } 
+    std::function<arrow::Iterator<std::shared_ptr<arrow::RecordBatch>>()> iter_maker = [vectorized_reader] () {
+        arrow::Iterator<std::shared_ptr<arrow::RecordBatch>> batch_it = arrow::MakeIteratorFromReader(vectorized_reader);
+        return batch_it;
+    };
+    if (FLAGS_arrow_multi_threads <= 0 || state->vectorlized_parallel_execution == false) {
+        arrow::acero::Declaration dec{"record_batch_source",
+                arrow::acero::RecordBatchSourceNodeOptions{state->arrow_input_schemas[_scan_tuple_id], std::move(iter_maker)}}; 
+        LOCAL_TRACE_ARROW_PLAN_WITH_SCHEMA(dec, state->arrow_input_schemas[_scan_tuple_id], &_delay_fetcher_store);
+        state->append_acero_declaration(dec);
+    } else {
+        auto executor = BthreadArrowExecutor::Make(1);
+        _arrow_io_executor = *executor;
+        arrow::acero::Declaration dec{"record_batch_source",
+                arrow::acero::RecordBatchSourceNodeOptions{state->arrow_input_schemas[_scan_tuple_id], std::move(iter_maker), _arrow_io_executor.get()}}; 
+        LOCAL_TRACE_ARROW_PLAN_WITH_SCHEMA(dec, state->arrow_input_schemas[_scan_tuple_id], &_delay_fetcher_store);
+        state->append_acero_declaration(dec);
+    }
+    // add SortNode
+    if (!_slot_order_exprs.empty()) {
+        std::vector<arrow::compute::SortKey> sort_keys;
+        sort_keys.reserve(_slot_order_exprs.size());
+        for (int i = 0; i < _slot_order_exprs.size(); ++i) {
+            int ret = _slot_order_exprs[i]->transfer_to_arrow_expression();
+            if (ret != 0 || _slot_order_exprs[i]->arrow_expr().field_ref() == nullptr) {
+                DB_FATAL_STATE(state, "get sort field ref fail, maybe is not slot ref");
+                return -1;
+            }
+            auto field_ref = _slot_order_exprs[i]->arrow_expr().field_ref();
+            sort_keys.emplace_back(*field_ref, _is_asc[i] ? arrow::compute::SortOrder::Ascending : arrow::compute::SortOrder::Descending);
+        }
+        arrow::compute::Ordering ordering{sort_keys, 
+                                      _is_asc[0] ? arrow::compute::NullPlacement::AtStart : arrow::compute::NullPlacement::AtEnd};
+        arrow::acero::Declaration dec{"order_by", arrow::acero::OrderByNodeOptions{ordering}};
+        LOCAL_TRACE_ARROW_PLAN(dec);
+        state->append_acero_declaration(dec);
+    }
+    return 0;
 }
 
 int SelectManagerNode::subquery_open(RuntimeState* state) {
-    int ret = 0;
-    for (auto expr : _derived_table_projections) {
-        ret = expr->open();
-        if (ret < 0) {
-            DB_WARNING("Expr::open fail:%d", ret);
-            return ret;
-        }
-    }
-    ret = _sub_query_node->open(_sub_query_runtime_state);
-    if (ret < 0) {
-        return ret;
-    }
-
-    pb::TupleDescriptor* tuple_desc = state->get_tuple_desc(_derived_tuple_id);
-    if (tuple_desc == nullptr) {
+    if (_children.empty()) {
+        DB_WARNING("has no child");
         return -1;
     }
-    MemRowDescriptor* mem_row_desc = state->mem_row_desc();
+    int ret = 0;
+    ret = ExecNode::open(state);
+    if (ret < 0) {
+        DB_WARNING_STATE(state, "ExecNode::open fail, ret:%d", ret);
+        return ret;
+    }
     bool eos = false;
     int32_t affected_rows = 0;
     do {
-        RowBatch batch;
-        ret = _sub_query_node->get_next(_sub_query_runtime_state, &batch, &eos);
+        std::shared_ptr<RowBatch> batch = std::make_shared<RowBatch>();
+        ret = _children[0]->get_next(state, batch.get(), &eos);
         if (ret < 0) {
-            DB_WARNING("children:get_next fail:%d", ret);
+            DB_WARNING("children::get_next fail:%d", ret);
             return ret;
         }
-        std::shared_ptr<RowBatch> batch_ptr = std::make_shared<RowBatch>();
-        for (batch.reset(); !batch.is_traverse_over(); batch.next()) {
-            MemRow* row = batch.get_row().get();
-            std::unique_ptr<MemRow> dual_row = mem_row_desc->fetch_mem_row();
-            for (auto iter : _slot_column_mapping) {
-                int32_t outer_slot_id = iter.first;
-                int32_t inter_column_id = iter.second;
-                auto expr = _derived_table_projections[inter_column_id];
-                ExprValue result = expr->get_value(row).cast_to(expr->col_type());
-                auto slot = tuple_desc->slots(outer_slot_id - 1);
-                dual_row->set_value(slot.tuple_id(), slot.slot_id(), result);
-            }
-            batch_ptr->move_row(std::move(dual_row));
+        set_node_exec_type(_children[0]->node_exec_type());
+        if (_node_exec_type == pb::EXEC_ARROW_ACERO) {
+            break;
         }
-        if (batch_ptr->size() != 0) {
-            affected_rows += batch_ptr->size();
-            _sorter->add_batch(batch_ptr);
+        if (batch != nullptr && batch->size() != 0) {
+            affected_rows += batch->size();
+            _sorter->add_batch(batch);
         }
     } while (!eos);
-    //更新子查询信息到外层的state
-    state->inc_num_returned_rows(_sub_query_runtime_state->num_returned_rows());
-    state->inc_num_affected_rows(_sub_query_runtime_state->num_affected_rows());
-    state->inc_num_scan_rows(_sub_query_runtime_state->num_scan_rows());
-    state->inc_num_filter_rows(_sub_query_runtime_state->num_filter_rows());
     _sorter->merge_sort();
     return affected_rows;
 }
@@ -119,7 +194,6 @@ int SelectManagerNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos)
         *eos = true;
         return 0;
     }
-
     if (state->is_cancelled()) {
         DB_WARNING_STATE(state, "cancelled");
         *eos = true;
@@ -285,20 +359,46 @@ int SelectManagerNode::fetcher_store_run(RuntimeState* state, ExecNode* exec_nod
         }
     } 
 
-    for (auto& pair : fetcher_store->start_key_sort) {
-        auto iter = fetcher_store->region_batch.find(pair.second);
-        if (iter != fetcher_store->region_batch.end()) {
-            auto& batch = iter->second;
-            if (batch != nullptr && batch->size() != 0) {
-                _sorter->add_batch(batch);
-            }
-            fetcher_store->region_batch.erase(iter);
-        }
-    }
-    // 无sort节点时不会排序，按顺序输出
-    _sorter->merge_sort();
-    return fetcher_store->affected_rows.load();
+    if (state->execute_type == pb::EXEC_ARROW_ACERO && fetcher_store->arrow_schema != nullptr) {
+        set_node_exec_type(pb::EXEC_ARROW_ACERO);
+    } 
 
+    if (_node_exec_type == pb::EXEC_ROW) {
+        // EXEC_ROW(只会返回memrow), EXEC_ARROW_ACERO(单表查询所有region都返回memrow)
+        for (auto& pair : fetcher_store->start_key_sort) {
+            auto iter = fetcher_store->region_batch.find(pair.second);
+            if (iter != fetcher_store->region_batch.end()) {
+                auto& batch = iter->second.row_data;
+                if (batch != nullptr && batch->size() != 0) {
+                    _sorter->add_batch(batch);
+                    if (state->execute_type == pb::EXEC_ARROW_ACERO) {
+                        _region_batches.emplace_back(iter->second);
+                    }
+                }
+                fetcher_store->region_batch.erase(iter);
+            }
+        }
+        // 无sort节点时不会排序，按顺序输出
+        _sorter->merge_sort();
+    } else {
+        // EXEC_ARROW_ACERO(多表查询, 或者单表查询有region返回了arrow格式)
+        for (auto& pair : fetcher_store->start_key_sort) {
+            auto iter = fetcher_store->region_batch.find(pair.second);
+            if (iter != fetcher_store->region_batch.end()) {
+                auto& batch = iter->second;
+                if (batch.arrow_data != nullptr && batch.arrow_data->num_rows() > 0) {
+                    _region_batches.emplace_back(batch);
+                    // arrow列式执行,将返回的store_response交给select_manager_node保管其生命周期
+                    _arrow_responses.emplace_back(fetcher_store->region_vectorized_response[pair.second]);
+                } else if (batch.row_data != nullptr && batch.row_data->size() > 0) {
+                    _region_batches.emplace_back(batch);
+                }
+                fetcher_store->region_batch.erase(iter);
+            }
+        }
+        _arrow_schema = fetcher_store->arrow_schema;
+    }
+    return fetcher_store->affected_rows.load();
 }
 
 int SelectManagerNode::open_global_index(FetcherInfo* fetcher, RuntimeState* state, ExecNode* exec_node, 
@@ -423,12 +523,18 @@ int SelectManagerNode::construct_primary_possible_index(
     scan_index_info->region_primary.clear();
     scan_index_info->router_index_id = main_table_id;
     scan_index_info->index_id = main_table_id;
+
+    if (fetcher_store.arrow_schema != nullptr) {
+        return construct_primary_possible_index_vectorize(fetcher_store, 
+                scan_index_info, state, exec_node, main_table_id, pri_info, limit);
+    }
+
     pb::PossibleIndex pos_index;
     pos_index.set_index_id(main_table_id);
     SmartRecord record_template = _factory->new_record(main_table_id);
     auto tsorter = std::make_shared<Sorter>(_mem_row_compare.get());
     for (auto& pair : fetcher_store.start_key_sort) {
-        auto& batch = fetcher_store.region_batch[pair.second];
+        auto& batch = fetcher_store.region_batch[pair.second].row_data;
         if (batch == nullptr) {
             continue;
         }
@@ -484,6 +590,7 @@ int SelectManagerNode::construct_primary_possible_index(
             range->set_right_field_cnt(pri_info->fields.size());
             range->set_left_open(false);
             range->set_right_open(false);
+            range->add_partition_ids(mem_row->get_partition_id());
             limit_cnt --;
             if(!limit_cnt) {
                 eos = true;
@@ -497,4 +604,243 @@ int SelectManagerNode::construct_primary_possible_index(
                 &scan_index_info->region_primary, scan_node->get_partition());
 }
 
+int SelectManagerNode::construct_primary_possible_index_vectorize(
+                      FetcherStore& fetcher_store,
+                      ScanIndexInfo* scan_index_info,
+                      RuntimeState* state,
+                      ExecNode* exec_node,
+                      int64_t main_table_id,
+                      SmartIndex pri_info,
+                      LimitNode* limit) {
+    RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(exec_node);
+    int32_t tuple_id = scan_node->tuple_id();
+    pb::PossibleIndex pos_index;
+    pos_index.set_index_id(main_table_id);
+    SmartRecord record_template = _factory->new_record(main_table_id);
+    std::vector<std::shared_ptr<arrow::RecordBatch>> batchs;
+    std::shared_ptr<Chunk> chunk;
+    auto tuple = state->get_tuple_desc(tuple_id);
+    for (auto& pair : fetcher_store.start_key_sort) {
+        auto row_batch = fetcher_store.region_batch[pair.second].row_data;
+        if (row_batch != nullptr) {
+            if (chunk == nullptr) {
+                chunk = std::make_shared<Chunk>();
+                if (0 != chunk->init({tuple})) {
+                    DB_FATAL("chunk init fail");
+                    return -1;
+                }
+            }
+            // chunk复用，内部会reset
+            if (0 != row_batch->transfer_rowbatch_to_arrow({tuple}, chunk, nullptr, &fetcher_store.region_batch[pair.second].arrow_data)) {
+                DB_FATAL("add row batch to chunk fail");
+                return -1;
+            }
+        }
+        if (fetcher_store.region_batch[pair.second].arrow_data == nullptr) {
+            continue;
+        }
+        batchs.push_back(fetcher_store.region_batch[pair.second].arrow_data);
+    }
+    if (batchs.size() == 0){ 
+        return 0;
+    }
+    arrow::Result<std::shared_ptr<arrow::Table>> build_table = arrow::Table::FromRecordBatches(batchs);
+    if (!build_table.ok()) {
+        DB_FATAL_STATE(state, "build arrow table fail: %s", build_table.status().ToString().c_str());
+        return -1;
+    }
+    std::shared_ptr<arrow::Table> table = *build_table;
+    if (!_mem_row_compare->need_not_compare()) {
+        arrow::compute::SortOptions option;
+        if (0 != _mem_row_compare->build_arrow_sort_option(option)) {
+            DB_FATAL("build arrow sort option fail");
+            return -1;
+        }
+        arrow::Datum datum(table);
+        arrow::Result<std::shared_ptr<arrow::Array>> indices = arrow::compute::SortIndices(datum, option, /*ExecContext* ctx = */ nullptr);
+        if (!indices.ok()) {
+            DB_FATAL("sort indices fail: %s", indices.status().ToString().c_str());
+            return -1;
+        }
+        arrow::Result<arrow::Datum> sorted = arrow::compute::Take(table, *indices, arrow::compute::TakeOptions::NoBoundsCheck(), /*ExecContext* ctx = */ nullptr);
+        if (!sorted.ok()) {
+            DB_FATAL("take fail: %s", sorted.status().ToString().c_str());
+            return -1;
+        }
+        table = sorted->table();
+    }
+
+    if (limit != nullptr) {
+        int64_t offset_cnt = limit->get_offset();
+        int64_t limit_cnt = limit->get_limit();
+        table = table->Slice(offset_cnt, limit_cnt);
+        limit->add_num_rows_skipped(offset_cnt);
+    }
+    std::unordered_map<int64_t, std::shared_ptr<arrow::ChunkedArray>> field_id_to_arrow_array;
+    for (auto& pri_field : pri_info->fields) {
+        int32_t field_id = pri_field.id;
+        int32_t slot_id = state->get_slot_id(tuple_id, field_id);
+        if (slot_id == -1) {
+            DB_WARNING("field_id:%d tuple_id:%d, slot_id:%d", field_id, tuple_id, slot_id);
+            return -1;
+        }
+        auto arrow_array = table->GetColumnByName(std::to_string(tuple_id) + "_" + std::to_string(slot_id));
+        if (arrow_array == nullptr) {
+            DB_FATAL("not find arrow column, field_id:%d tuple_id:%d, slot_id:%d", field_id, tuple_id, slot_id);
+            return -1;
+        }
+        field_id_to_arrow_array[field_id] = arrow_array;
+    }
+    for (auto row_idx = 0; row_idx < table->num_rows(); ++row_idx) {
+        SmartRecord record = record_template->clone(false);
+        for (auto& field : field_id_to_arrow_array) {
+            record->set_value(record->get_field_by_tag(field.first), VectorizeHelpper::get_vectorized_value(field.second.get(), row_idx));
+        }
+        auto range = pos_index.add_ranges();
+        MutTableKey  key;
+        if (record->encode_key(*pri_info.get(), key, pri_info->fields.size(), false, false) != 0) {
+            DB_FATAL("Fail to encode_key left, table:%ld", pri_info->id);
+            return -1;
+        }
+        range->set_left_key(key.data());
+        range->set_left_full(key.get_full());
+        range->set_right_key(key.data());
+        range->set_right_full(key.get_full());
+        range->set_left_field_cnt(pri_info->fields.size());
+        range->set_right_field_cnt(pri_info->fields.size());
+        range->set_left_open(false);
+        range->set_right_open(false);
+        // [ARROW todo] 全局索引反查partition分发
+        // range->set_partition_id(mem_row->get_partition_id());
+    }
+    //重新做路由选择
+    pos_index.SerializeToString(&scan_index_info->raw_index);
+    return _factory->get_region_by_key(main_table_id, *pri_info, &pos_index, scan_index_info->region_infos,
+                &scan_index_info->region_primary, scan_node->get_partition());
+}
+
+
+
+// arrow vectorize
+int FetcherStoreVectorizedReader::init(SelectManagerNode* select_node, RuntimeState* state) {
+    _schema = select_node->get_arrow_schema();
+    _need_fetcher_store = select_node->is_delay_fetcher_store();
+    int32_t scan_tuple_id = select_node->get_scan_tuple_id();
+    pb::TupleDescriptor* tuple = state->get_tuple_desc(scan_tuple_id);
+    if (state->is_simple_select) {
+        // 没join的简单查询, or子查询
+        for (auto& tuple : state->tuple_descs()) {
+            _tuples.emplace_back(&tuple);
+        }
+    } else {
+        _tuples.emplace_back(tuple);
+    }
+    if (_schema == nullptr) {
+        // 当store返回的数据都是row pb, 但是需要列式执行, 如index join场景; 或是非index join延迟访问store
+        // 1. 初始化根据tuple_id(用scannode的tuple_id)生成对应tuple对应的arrow schema 
+        // 2. 列式执行过程中将返回的memrow转arrow
+        // 3. 列式执行返回的record batch, 转换为db构建的schema
+        _chunk = std::make_shared<Chunk>();
+        if (_chunk->init(_tuples) != 0) {
+            DB_FATAL("build arrow schema fail, scan_tuple_id: %d", scan_tuple_id);
+            return -1;
+        }
+        _schema = _chunk->get_arrow_schema();
+        if (_schema == nullptr) {
+            DB_FATAL("build arrow schema fail");
+            return -1;
+        }
+        _need_check_arrow_schema = true;
+    } 
+    state->arrow_input_schemas[scan_tuple_id] = _schema;
+    _select_node = select_node;
+    _state = state;
+    return 0;
+}
+    
+arrow::Status FetcherStoreVectorizedReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* out) {
+    int ret = 0;
+    if (_need_fetcher_store) {
+        ret = _select_node->delay_fetcher_store(_state);
+        if (ret != 0) {
+            return arrow::Status::IOError("delay fetcher store fail");
+        }
+        _need_fetcher_store = false;
+    }
+    std::vector<RegionReturnData>& region_batches = _select_node->get_region_batches();
+    if (_eos || _record_batch_idx >= region_batches.size()) {
+        out->reset();
+        return arrow::Status::OK();
+    }
+    
+    if (_select_node->is_return_empty()) {
+        DB_WARNING_STATE(_state, "return_empty");
+        _state->set_eos();
+        out->reset();
+        _eos = true;
+        return arrow::Status::OK();
+    }
+
+    if (_state->is_cancelled()) {
+        DB_WARNING_STATE(_state, "cancelled");
+        out->reset();
+        _eos = true;
+        return arrow::Status::OK();
+    }
+    if (!_select_node->need_sorter() && _select_node->reached_limit()) {
+        _eos = true;
+        out->reset();
+        return arrow::Status::OK();
+    }
+    // 1. 单表查询, reader的arrow schema是store返回的, rowbatch转arrow需要转换所有的tuple(agg)
+    // 2. join没子查询, reader的arrow schema可能是自己构造的(根据scannode的tuple id构造的), rowbatch转arrow只要转换该tupleid
+    // 3. join子查询, 需要进行内外schema转换 [todo]
+    while (_record_batch_idx < region_batches.size()) {
+        auto& batch = region_batches[_record_batch_idx];
+        if (batch.arrow_data != nullptr) {
+            if (_need_check_arrow_schema && _row_idx_in_record_batch == 0) {
+                if (!_schema->Equals(batch.arrow_data->schema())
+                        && 0 != VectorizeHelpper::change_arrow_record_batch_schema(_schema, batch.arrow_data, &(batch.arrow_data))) {
+                    return arrow::Status::IOError("change arrow record batch schema fail");
+                }
+            } 
+            *out = batch.arrow_data->Slice(_row_idx_in_record_batch, FLAGS_chunk_size);
+            _select_node->add_num_rows_returned((*out)->num_rows());
+            _row_idx_in_record_batch += FLAGS_chunk_size;
+            if (batch.arrow_data->num_rows() <= _row_idx_in_record_batch) {
+                ++_record_batch_idx;
+                _row_idx_in_record_batch = 0;
+            }
+            //DB_WARNING("row batch size: %ld, _record_batch_idx: %d, _row_idx_in_record_batch: %ld, values: %s", (*out)->num_rows(), _record_batch_idx, _row_idx_in_record_batch, (*out)->ToString().c_str());
+            return arrow::Status::OK();
+        } else if (batch.row_data != nullptr && batch.row_data->size() > 0) {
+            // memrow -> arrow recordbatch
+            if (_chunk == nullptr) {
+                _chunk = std::make_shared<Chunk>();
+                if (_chunk->init(_tuples) != 0) {
+                    return arrow::Status::IOError("transfer rowbatch to arrow fail");
+                }
+            }
+            // chunk复用，内部会reset, 行返回数据不会超过chunk_size, 不需要slice, 根据tuple内容构建recordbatch
+            if (0 != batch.row_data->transfer_rowbatch_to_arrow(_tuples, _chunk, nullptr, out)) {
+                return arrow::Status::IOError("transfer rowbatch to arrow fail");
+            }
+            // 调整schema
+            if (0 != VectorizeHelpper::change_arrow_record_batch_schema(_schema, *out, out)) {
+                return arrow::Status::IOError("change arrow record batch schema fail");
+            }
+            _select_node->add_num_rows_returned((*out)->num_rows());
+            ++_record_batch_idx;
+            _row_idx_in_record_batch = 0;
+            return arrow::Status::OK();
+        }
+        ++_record_batch_idx;
+    }
+    if (_record_batch_idx >= region_batches.size()) {
+        _eos = true;
+        out->reset();
+        return arrow::Status::OK();
+    }
+    return arrow::Status::OK();
+}
 }

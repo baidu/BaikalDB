@@ -15,6 +15,7 @@
 #include "sort_node.h"
 #include "runtime_state.h"
 #include "query_context.h"
+#include <arrow/acero/options.h>
 
 namespace baikaldb {
 int SortNode::init(const pb::PlanNode& node) {
@@ -128,6 +129,110 @@ int SortNode::expr_optimize(QueryContext* ctx) {
     return 0;
 }
 
+bool SortNode::can_use_arrow_vector() {
+    // arrow sort目前排序所有列对于null的处理只能整体AtStart/AtEnd,不能配置单个列的规则
+    if (!_monotonic) {
+        return false;
+    }
+    // 只支持slot ref的order by
+    for (auto& expr : _order_exprs) {
+        if (!expr->can_use_arrow_vector()) {
+            return false;
+        }
+    }
+    for (auto& expr : _slot_order_exprs) {
+        if (!expr->can_use_arrow_vector()) {
+            return false;
+        }
+    }
+    for (auto& c : _children) {
+        if (!c->can_use_arrow_vector()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+int SortNode::build_arrow_declaration(RuntimeState* state) {
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
+    int ret = 0;
+    for (auto c : _children) {
+        ret = c->build_arrow_declaration(state);
+        if (ret < 0) {
+            return ret;
+        }
+    }
+    if (state->sort_use_index()) {
+        // 要求store不开acero并发
+        return 0;
+    }
+    if (0 != build_sort_arrow_declaration(state, get_trace())) {
+        return -1;
+    }
+    return 0;
+}
+
+int SortNode::build_sort_arrow_declaration(RuntimeState* state, pb::TraceNode* trace_node) {
+    if (state->acero_declarations.size() > 0 && state->acero_declarations.back().factory_name == "order_by") {
+        return 0;
+    }
+    // sortNode提到最后在packetNode里处理: otherNode build -> sortNode build -> packetNode build -> handle limit(slice)
+    // 解决如 a join b join c join d order by a.id,
+    // a.id的sortNode可能推到最下面的join上, join1->sort->join2->join3, 后面的join会导致乱序
+    START_LOCAL_TRACE(trace_node, state->get_trace_cost(), OPEN_TRACE, nullptr);
+    std::vector<arrow::compute::SortKey> sort_keys;
+    sort_keys.reserve(_slot_order_exprs.size());
+    std::vector<arrow::compute::Expression> generate_projection_exprs;
+    std::vector<std::string> generate_projection_exprs_names;
+
+    int slot_id = 1;
+    for (auto& expr : _order_exprs) {
+        if (expr->node_type() != pb::SLOT_REF && expr->node_type() != pb::AGG_EXPR) {
+            if (0 != expr->transfer_to_arrow_expression()) {
+                DB_FATAL_STATE(state, "build order by expr fail");
+                return -1;
+            }
+            // project
+            generate_projection_exprs.emplace_back(expr->arrow_expr());
+            std::string tmp_name = std::to_string(_tuple_id) + "_" + std::to_string(slot_id++);
+            generate_projection_exprs_names.emplace_back(tmp_name);
+        }
+    }
+    
+    for (int i = 0; i < _slot_order_exprs.size(); ++i) {
+        int ret = _slot_order_exprs[i]->transfer_to_arrow_expression();
+        if (ret != 0 || _slot_order_exprs[i]->arrow_expr().field_ref() == nullptr) {
+            DB_FATAL_STATE(state, "get arrow sort field ref fail, maybe is not slot ref");
+            return -1;
+        }
+        auto field_ref = _slot_order_exprs[i]->arrow_expr().field_ref(); 
+        sort_keys.emplace_back(*field_ref, _is_asc[i] ? arrow::compute::SortOrder::Ascending : arrow::compute::SortOrder::Descending);
+    }
+    if (generate_projection_exprs.size() > 0) {
+        // projection
+        for (auto& tuple : state->tuple_descs()) {
+            if (tuple.tuple_id() == _tuple_id) {
+                continue;
+            }
+            for (const auto& slot : tuple.slots()) {
+                std::string name = std::to_string(tuple.tuple_id()) + "_" + std::to_string(slot.slot_id());
+                generate_projection_exprs.emplace_back(arrow::compute::field_ref(name));
+                generate_projection_exprs_names.emplace_back(name);
+            }
+        }
+        arrow::acero::Declaration dec{"project", arrow::acero::ProjectNodeOptions{std::move(generate_projection_exprs), std::move(generate_projection_exprs_names)}};
+        LOCAL_TRACE_ARROW_PLAN(dec);
+        state->append_acero_declaration(dec);
+    }
+    // NullPlacement: Whether nulls and NaNs are placed at the start or at the end
+    arrow::compute::Ordering ordering{sort_keys, 
+                                      _is_asc[0] ? arrow::compute::NullPlacement::AtStart : arrow::compute::NullPlacement::AtEnd};
+    arrow::acero::Declaration dec{"order_by", arrow::acero::OrderByNodeOptions{ordering}};
+    LOCAL_TRACE_ARROW_PLAN(dec);
+    state->append_acero_declaration(dec);
+    return 0;
+}
+
 int SortNode::open(RuntimeState* state) {
     START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
     int ret = 0;
@@ -152,6 +257,9 @@ int SortNode::open(RuntimeState* state) {
     }
     if (state->sort_use_index()) {
         //DB_WARNING_STATE(state, "sort use index, limit:%ld", _limit);
+        if (_limit > 0) {
+            _children[0]->set_limit(_limit);
+        }
         return 0;
     }
     _mem_row_desc = state->mem_row_desc();
@@ -171,6 +279,10 @@ int SortNode::open(RuntimeState* state) {
         if (ret < 0) {
             DB_WARNING_STATE(state, "child->get_next fail, ret:%d", ret);
             return ret;
+        }
+        set_node_exec_type(_children[0]->node_exec_type());
+        if (_node_exec_type == pb::EXEC_ARROW_ACERO) {
+            return 0;
         }
         //照理不会出现拿到0行数据
         if (batch->size() == 0) {
@@ -211,6 +323,10 @@ int SortNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
     if (ret < 0) {
         DB_WARNING_STATE(state, "_sorter->get_next fail, ret:%d", ret);
         return ret;
+    }
+    set_node_exec_type(_children[0]->node_exec_type());
+    if (_node_exec_type == pb::EXEC_ARROW_ACERO) {
+        return 0;
     }
     _num_rows_returned += batch->size();
     if (reached_limit()) {

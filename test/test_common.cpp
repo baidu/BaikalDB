@@ -609,7 +609,7 @@ TEST(ttl_test, ttl) {
     DB_WARNING("encode: %lu, 0x%8x%8x%8x%8x%8x%8x%8x%8x", encode, 
         data[0] & 0xFF, data[1]& 0xFF, data[2]& 0xFF, data[3]& 0xFF, data[4]& 0xFF, data[5]& 0xFF, data[6]& 0xFF, data[7]& 0xFF);
 }
-extern int get_size_by_external_file_name(uint64_t* size, const std::string& external_file);
+extern int get_size_by_external_file_name(uint64_t* size, uint64_t* lines, const std::string& external_file);
 TEST(sst_ext_linker_test, sst_ext) {
     // butil::FilePath path("sst_ext_map");
     // butil::DeleteFile(path, false);
@@ -626,7 +626,7 @@ TEST(sst_ext_linker_test, sst_ext) {
     {
         SstExtLinker::ExtFileInfo info;
         info.full_name = "afs://yinglong.afs.baidu.com:9902/abc/100_1_1_456.extsst";
-        get_size_by_external_file_name(&info.size, info.full_name);
+        get_size_by_external_file_name(&info.size, nullptr, info.full_name);
         map["001.sst"] = info; 
     }
     ret = linker->sst_link("afs://yinglong.afs.baidu.com:9902/abc/100_1_2_456.extsst", "002.sst");
@@ -634,7 +634,7 @@ TEST(sst_ext_linker_test, sst_ext) {
     {
         SstExtLinker::ExtFileInfo info;
         info.full_name = "afs://yinglong.afs.baidu.com:9902/abc/100_1_2_456.extsst";
-    get_size_by_external_file_name(&info.size, info.full_name);
+    get_size_by_external_file_name(&info.size, nullptr, info.full_name);
         map["002.sst"] = info; 
     }
     ret = linker->sst_link("afs://yinglong.afs.baidu.com:9902/abc/100_1_3_456.extsst", "003.sst");
@@ -642,7 +642,7 @@ TEST(sst_ext_linker_test, sst_ext) {
     {
         SstExtLinker::ExtFileInfo info;
         info.full_name = "afs://yinglong.afs.baidu.com:9902/abc/100_1_3_456.extsst";
-        get_size_by_external_file_name(&info.size, info.full_name);
+        get_size_by_external_file_name(&info.size, nullptr, info.full_name);
         map["003.sst"] = info; 
     }
     ret = linker->sst_rename("002.sst", "004.sst");
@@ -657,7 +657,7 @@ TEST(sst_ext_linker_test, sst_ext) {
     {
         SstExtLinker::ExtFileInfo info;
         info.full_name = "afs://yinglong.afs.baidu.com:9902/abc/100_1_4_456.extsst";
-        get_size_by_external_file_name(&info.size, info.full_name);
+        get_size_by_external_file_name(&info.size, nullptr, info.full_name);
         map["005.sst"] = info; 
     }
     linker->TESTclear();

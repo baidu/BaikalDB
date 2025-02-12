@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "apply_node.h"
+#include "dual_scan_node.h"
 #include "filter_node.h"
 #include "expr_node.h"
 #include "rocksdb_scan_node.h"
@@ -21,8 +22,11 @@
 #include "plan_router.h"
 #include "logical_planner.h"
 #include "literal.h"
+#include "vectorize_helpper.h"
 
 namespace baikaldb {
+DECLARE_bool(use_arrow_vector);
+
 int Joiner::init(const pb::PlanNode& node) {
     int ret = 0;
     ret = ExecNode::init(node);
@@ -96,7 +100,7 @@ bool Joiner::is_slot_ref_equal_condition(ExprNode* left, ExprNode* right) {
     return false;
 }
 
-bool Joiner::expr_is_equal_condition(ExprNode* expr) {
+bool Joiner::expr_is_equal_condition_and_build_slot(ExprNode* expr) {
     if (expr->node_type() != pb::FUNCTION_CALL 
         || static_cast<ScalarFnCall*>(expr)->fn().fn_op() != parser::FT_EQ) {
         return false;
@@ -117,13 +121,70 @@ bool Joiner::expr_is_equal_condition(ExprNode* expr) {
     return is_slot_ref_equal_condition(left_child, right_child);
 }
 
+void Joiner::construct_in_condition_placeholder(ExecNode* child, 
+                                                std::vector<ExprNode*>& equal_slot, 
+                                                std::unordered_map<ExecNode*, std::vector<ExprNode*>>& condition_filter) {
+    if (child == nullptr) {
+        return;
+    }
+    if (child->node_type() == pb::JOIN_NODE) {
+        static_cast<JoinNode*>(child)->get_join_on_condition_filter(condition_filter);
+    } 
+    if (!FLAGS_use_arrow_vector) {
+        return;
+    }
+    std::vector<ExecNode*> scan_nodes;
+    child->get_node(pb::SCAN_NODE, scan_nodes);
+    if (scan_nodes.size() != 1) {
+        return;
+    }
+    std::vector<ExprNode*> in_expr;
+    ExprValueVec vec_values;
+    ExprValueSet in_values;
+    in_values.init(1);
+    vec_values.vec.reserve(equal_slot.size());
+    for (auto& slot : equal_slot) {
+        ExprValue value(pb::PLACE_HOLDER);
+        vec_values.vec.emplace_back(value);
+    }
+    in_values.insert(vec_values);
+    if (construct_in_condition(equal_slot, in_values, in_expr)) {
+        DB_FATAL("construct left table in condition fail");
+        return;
+    }
+    if (in_expr.size() == 1) {
+        condition_filter[scan_nodes[0]].emplace_back(in_expr[0]);
+    }
+}
+
+void Joiner::get_join_on_condition_filter(std::unordered_map<ExecNode*, std::vector<ExprNode*>>& condition_filter) {
+    if (_inner_node == nullptr || _outer_node == nullptr) {
+        // 子查询没做PredicatePushDown
+        _outer_node = _children[0];
+        _inner_node = _children[1];
+        _outer_tuple_ids = _left_tuple_ids;
+        _inner_tuple_ids = _right_tuple_ids;
+        if (_join_type == pb::RIGHT_JOIN) {
+            _outer_node = _children[1];
+            _inner_node = _children[0];
+            _outer_tuple_ids = _right_tuple_ids;
+            _inner_tuple_ids = _left_tuple_ids;
+        }
+    }
+    for (auto& expr : _conditions) {
+        expr_is_equal_condition_and_build_slot(expr);
+    }
+    construct_in_condition_placeholder(_inner_node, _inner_equal_slot, condition_filter);
+    construct_in_condition_placeholder(_outer_node, _outer_equal_slot, condition_filter);
+}
+
 int Joiner::strip_out_equal_slots() {
     auto iter = _conditions.begin();
     _outer_equal_slot.clear();
     _inner_equal_slot.clear();
     while (iter != _conditions.end()) {
         auto expr = *iter;
-        if (expr_is_equal_condition(expr)) {
+        if (expr_is_equal_condition_and_build_slot(expr)) {
             iter = _conditions.erase(iter);
             _have_removed.emplace_back(expr);
         } else {
@@ -142,7 +203,12 @@ int Joiner::strip_out_equal_slots() {
     return 0;
 }
 
-void Joiner::do_plan_router(RuntimeState* state, std::vector<ExecNode*>& scan_nodes, bool& index_has_null) {
+int Joiner::do_plan_router(RuntimeState* state, std::vector<ExecNode*>& scan_nodes, bool& index_has_null) {
+    QueryContext* ctx = state->ctx();
+    if (ctx == nullptr) {
+        DB_FATAL("ctx is nullptr");
+        return -1;
+    }
     //重新做路由选择
     for (auto& exec_node : scan_nodes) {
         RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(exec_node);
@@ -154,6 +220,7 @@ void Joiner::do_plan_router(RuntimeState* state, std::vector<ExecNode*>& scan_no
         if (parent_node_ptr->node_type() == pb::WHERE_FILTER_NODE
                 || parent_node_ptr->node_type() == pb::TABLE_FILTER_NODE) {
             filter_node = static_cast<FilterNode*>(parent_node_ptr);
+            // FIXME: a in (1, 2) and a > 0优化成a in (1, 2)，filter_node需要进行expr_optimize
         }
         SortNode* sort_node = nullptr;
         while (parent_node_ptr != nullptr
@@ -165,19 +232,20 @@ void Joiner::do_plan_router(RuntimeState* state, std::vector<ExecNode*>& scan_no
             }
             parent_node_ptr = parent_node_ptr->get_parent();
         }
-        auto get_slot_id = [state](int32_t tuple_id, int32_t field_id) ->
-                int32_t {return state->get_slot_id(tuple_id, field_id);};
-
-        auto get_tuple_desc = [state] (int32_t tuple_id)->
-        pb::TupleDescriptor* { return state->get_tuple_desc(tuple_id);};
-        
+        auto get_slot_id = [ctx](int32_t tuple_id, int32_t field_id) ->
+                int32_t {return ctx->get_slot_id(tuple_id, field_id);};
+        auto get_tuple_desc = [ctx] (int32_t tuple_id)->
+                pb::TupleDescriptor* { return ctx->get_tuple_desc(tuple_id);};
         scan_node->clear_possible_indexes();
         //索引选择
         std::map<int32_t, int> field_range_type;
-        IndexSelector().index_selector(state->tuple_descs(),
+        IndexSelector(ctx).index_selector(ctx->tuple_descs(),
                                         scan_node, 
                                         filter_node,
                                         sort_node,
+                                        NULL,
+                                        NULL,
+                                        NULL,
                                         NULL,
                                         &index_has_null, field_range_type, "");
         if (!_is_explain && !index_has_null) {
@@ -185,12 +253,87 @@ void Joiner::do_plan_router(RuntimeState* state, std::vector<ExecNode*>& scan_no
             //这一块做完索引选择之后如果命中二级索引需要重构mem_row的结构，mem_row已经在run_time
             //init中构造了，需要销毁重新搞(todo)
             PlanRouter().scan_plan_router(scan_node, get_slot_id, get_tuple_desc, false, {});
+            if (state->reset_tuple_descs_and_mem_row_descriptor(ctx->tuple_descs()) != 0) {
+                DB_FATAL("Fail to reset_tuple_descs_and_mem_row_descriptor");
+                return -1;
+            }
             ExecNode* related_manager_node = scan_node->get_related_manager_node();
+            if (related_manager_node == nullptr) {
+                DB_WARNING("related_manager_node is null, scan_node:%p", scan_node);
+                return -1;
+            }
             auto region_infos = scan_node->region_infos();
             //更改scan_node对应的fethcer_node的region信息
             related_manager_node->set_region_infos(region_infos);
         }
     }
+    return 0;
+}
+
+int Joiner::runtime_filter(RuntimeState* state, ExecNode* node, std::vector<ExprNode*>* in_exprs_back) {
+    if (node == nullptr) {
+        DB_WARNING("node is nullptr");
+        return -1;
+    }
+
+    // 构造in条件
+    std::vector<ExprNode*> in_exprs;
+    int ret = construct_in_condition(_inner_equal_slot, _outer_join_values, in_exprs);
+    if (ret < 0) {
+        DB_WARNING("ExecNode::create in condition for right table fail");
+        return ret;
+    }
+    if (in_exprs_back != nullptr) {
+        *in_exprs_back = in_exprs;
+    }
+    // 表达式下推
+    node->predicate_pushdown(in_exprs);
+    if (in_exprs.size() > 0) {
+        DB_WARNING("inner node add filter node");
+        node->add_filter_node(in_exprs);
+    }
+    // 重新做索引选择、路由选择
+    std::vector<ExecNode*> scan_nodes;
+    node->get_node(pb::SCAN_NODE, scan_nodes);
+    bool index_has_null = false;
+    if (do_plan_router(state, scan_nodes, index_has_null) != 0) {
+        DB_WARNING("Fail to do_plan_router");
+        return -1;
+    }
+    if (index_has_null) {
+        node->set_return_empty();
+    }
+    // 谓词下推后可能生成新的plannode重新生成tracenode
+    node->create_trace();
+    // 节点包含的所有子查询都重新做索引选择、路由选择
+    std::vector<ExecNode*> dual_scan_nodes;
+    node->get_all_dual_scan_node(dual_scan_nodes);
+    for (auto node : dual_scan_nodes) {
+        DualScanNode* dual_scan_node = static_cast<DualScanNode*>(node);
+        // 不可以下推的子查询不重新进行索引选择、路由选择
+        if (!dual_scan_node->can_predicate_pushdown()) {
+            continue;
+        }
+        auto sub_query_plan = dual_scan_node->sub_query_node();
+        auto sub_query_runtime_state = dual_scan_node->sub_query_runtime_state();
+        if (sub_query_plan == nullptr) {
+            DB_WARNING("sub_query_plan is nullptr");
+            return -1;
+        }
+        if (sub_query_runtime_state == nullptr) {
+            DB_WARNING("sub_query_runtime_state is nullptr");
+            return -1;
+        }
+        std::vector<ExecNode*> derived_scan_nodes;
+        sub_query_plan->get_node(pb::SCAN_NODE, derived_scan_nodes);
+        bool index_has_null = false;
+        if (do_plan_router(sub_query_runtime_state, derived_scan_nodes, index_has_null) != 0) {
+            DB_WARNING("Fail to do_plan_router");
+            return -1;
+        }
+        sub_query_plan->create_trace();
+    }
+    return 0;
 }
 
 void Joiner::find_place_holder(std::unordered_multimap<int, ExprNode*>& placeholders) {
@@ -227,27 +370,12 @@ int Joiner::fetcher_inner_table_data(RuntimeState* state,
     TimeCost time_cost;
     _outer_join_values.clear();
     construct_equal_values(outer_tuple_data, _outer_equal_slot);
-    std::vector<ExprNode*> in_exprs;
-    int ret = construct_in_condition(_inner_equal_slot, _outer_join_values, in_exprs);
+    std::vector<ExprNode*> in_exprs_back;
+    int ret = runtime_filter(state, _inner_node, &in_exprs_back);
     if (ret < 0) {
-        DB_WARNING("ExecNode::create in condition for right table fail");
+        DB_WARNING("Fail to runtime_filter");
         return ret;
     }
-    std::vector<ExprNode*> in_exprs_back = in_exprs;
-    //表达式下推，下推的那个节点重新做索引选择，路由选择
-    _inner_node->predicate_pushdown(in_exprs);
-    if (in_exprs.size() > 0) {
-        DB_WARNING("inner node add filter node");
-        _inner_node->add_filter_node(in_exprs);
-    }
-    std::vector<ExecNode*> scan_nodes;
-    _inner_node->get_node(pb::SCAN_NODE, scan_nodes);
-    bool index_has_null = false;
-    do_plan_router(state, scan_nodes, index_has_null);
-    if (index_has_null) {
-        _inner_node->set_return_empty();
-    }
-    _inner_node->create_trace();
     ret = _inner_node->open(state);
     if (ret < 0) {
         DB_WARNING("ExecNode::inner table open fail");
@@ -258,7 +386,6 @@ int Joiner::fetcher_inner_table_data(RuntimeState* state,
         DB_WARNING("fetcher inner node fail");
         return ret;
     }
-
     _inner_node->remove_additional_predicate(in_exprs_back);
     _inner_node->close(state);
 
@@ -359,6 +486,86 @@ void Joiner::construct_equal_values(const std::vector<MemRow*>& tuple_data,
     }
 }
 
+void Joiner::adjudge_join_type() {
+    std::vector<ExecNode*> scan_nodes;
+    if (_inner_node->node_type() == pb::JOIN_NODE) {
+        static_cast<JoinNode*>(_inner_node)->adjudge_join_type();
+        _use_index_join = static_cast<JoinNode*>(_inner_node)->is_use_index_join();
+    } else {
+        _inner_node->get_node(pb::SCAN_NODE, scan_nodes);
+        if (scan_nodes.size() != 1) {
+            return;
+        }
+        ScanNode* scan_node = static_cast<ScanNode*>(scan_nodes[0]);
+        if (FLAGS_use_arrow_vector
+                && scan_node->can_use_no_index_join()) {
+            _use_index_join = false;
+        }
+    }
+    return;
+}
+
+void Joiner::construct_equal_values_for_vectorized(std::shared_ptr<arrow::Table> outer_table,
+                                const std::vector<ExprNode*>& slot_refs) {
+    // arrow table -> ExprValueVec
+    std::vector<arrow::ChunkedArray*> arrow_arrays;
+    for (auto& slot_ref : slot_refs) {
+        std::string arrow_field_name = static_cast<SlotRef*>(slot_ref)->arrow_field_name();
+        std::shared_ptr<arrow::ChunkedArray> field = outer_table->GetColumnByName(arrow_field_name);
+        arrow_arrays.emplace_back(field.get());
+    }   
+    for (auto row = 0; row < outer_table->num_rows(); ++row) {
+        ExprValueVec join_values;
+        join_values.vec.reserve(slot_refs.size());
+        for (auto& array : arrow_arrays) {
+            ExprValue value = VectorizeHelpper::get_vectorized_value(array, row); 
+            join_values.vec.emplace_back(value);
+        }
+        _outer_join_values.insert(join_values);
+    }
+}
+
+void Joiner::construct_equal_values_for_vectorized(const std::vector<RegionReturnData>& outer_data,
+                                const std::vector<ExprNode*>& slot_refs) {
+    TimeCost t;
+    int row = 0;
+    int pb_rows = 0;
+    for (auto& region_data : outer_data) {
+        if (region_data.row_data != nullptr) {
+            // row pb -> ExprValueVec
+            for (region_data.row_data->reset(); !region_data.row_data->is_traverse_over(); region_data.row_data->next()) {
+                ExprValueVec join_values;
+                join_values.vec.reserve(slot_refs.size());
+                for (auto& slot_ref_expr : slot_refs) {
+                    ExprValue value = region_data.row_data->get_row()->get_value(static_cast<SlotRef*>(slot_ref_expr)->tuple_id(), 
+                                                    static_cast<SlotRef*>(slot_ref_expr)->slot_id());
+                    join_values.vec.emplace_back(value);
+                }
+                _outer_join_values.insert(join_values);
+            }
+            pb_rows += region_data.row_data->size();
+        } else if (region_data.arrow_data != nullptr) {
+            // arrow record batch -> ExprValueVec
+            std::vector<arrow::ChunkedArray> arrow_arrays;
+            for (auto& slot_ref : slot_refs) {
+                std::string arrow_field_name = static_cast<SlotRef*>(slot_ref)->arrow_field_name();
+                arrow_arrays.emplace_back(region_data.arrow_data->GetColumnByName(arrow_field_name));
+            }
+            for (auto row = 0; row < region_data.arrow_data->num_rows(); ++row) {
+                ExprValueVec join_values;
+                join_values.vec.reserve(slot_refs.size());
+                for (auto& array : arrow_arrays) {
+                    ExprValue value = VectorizeHelpper::get_vectorized_value(&array, row); 
+                    join_values.vec.emplace_back(value);
+                }
+                _outer_join_values.insert(join_values);
+            }
+            row += region_data.arrow_data->num_rows();
+        }
+    }
+    DB_WARNING("get in value pb_rows: %d, vec_rows: %d, cost: %ld", pb_rows, row, t.get_time());
+}
+
 bool Joiner::is_satisfy_filter(MemRow* row) {
     for (auto& condition : _conditions) {
         ExprValue value = condition->get_value(row);
@@ -375,6 +582,7 @@ void Joiner::encode_hash_key(MemRow* row,
     for (auto& slot_ref_expr : slot_ref_exprs) {
         ExprValue value = row->get_value(static_cast<SlotRef*>(slot_ref_expr)->tuple_id(), 
                                          static_cast<SlotRef*>(slot_ref_expr)->slot_id());
+        // TODO: 同类型可以不转string
         key.append_value(value.cast_to(pb::STRING)); 
     }
 }
@@ -478,6 +686,8 @@ void Joiner::close(RuntimeState* state) {
     _outer_table_is_null = false;
     _inner_row_batch.clear();
     _child_eos = false;
+    _outer_intermediate_join_result_table.reset();
+    _inner_intermediate_join_result_table.reset();
 }
 
 void Joiner::show_explain(std::vector<std::map<std::string, std::string>>& output) {

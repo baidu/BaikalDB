@@ -29,6 +29,9 @@ int main(int argc, char* argv[])
     return RUN_ALL_TESTS();
 }
 #include "uconv.h"
+namespace baikaldb {
+    DEFINE_int32(first_batch_size_for_vector, 1024, "first_batch_size_for_vector, default: 1024, max: 1024");
+}
 namespace parser {
 
 TEST(test_parser, case_all) {
@@ -112,6 +115,64 @@ TEST(test_parser, case_create_table) {
     }
 }
 
+TEST(test_parser, case_create_view) {
+    parser::SqlParser parser1;
+    std::string sql1 = "create or replace view aa (a,b,c,d) as select i,j,k,l from t1";
+    parser1.parse(sql1);
+    printf("errormsg: %d, %s\n", parser1.error, parser1.syntax_err_str.c_str());
+    EXPECT_EQ(1, parser1.result.size());
+    if (parser1.result.size() != 1) {
+        return;
+    }
+    CreateViewStmt* stmt1 = (CreateViewStmt*)parser1.result[0];
+    EXPECT_EQ(parser::NT_CREATE_VIEW, stmt1->node_type);
+    EXPECT_EQ(true, stmt1->or_replace);
+    EXPECT_EQ(nullptr, ((parser::SelectStmt*)stmt1->view_select_stmt)->fields[0]->wild_card);
+
+    parser::SqlParser parser2;
+    std::string sql2 = "create view aa(a,b,c,d) as select * from t1";
+    parser2.parse(sql2);
+    printf("errormsg: %d, %s\n", parser2.error, parser2.syntax_err_str.c_str());
+    EXPECT_EQ(1, parser2.result.size());
+    if (parser2.result.size() != 1) {
+        return;
+    }
+    EXPECT_EQ(parser::NT_CREATE_VIEW, parser2.result[0]->node_type);
+    CreateViewStmt* stmt2 = (CreateViewStmt*)parser2.result[0];
+    EXPECT_EQ(false, stmt2->or_replace);
+    std::ostringstream os;
+    parser::SelectStmt* view_select_stmt = (parser::SelectStmt*)stmt2->view_select_stmt;
+    view_select_stmt->to_stream(os);
+    EXPECT_EQ("SELECT * FROM t1", os.str());
+    EXPECT_EQ(true, view_select_stmt->fields[0]->wild_card->table_name.empty());
+    EXPECT_EQ(true, view_select_stmt->fields[0]->wild_card->db_name.empty());
+
+    std::ostringstream view_name_os;
+    stmt2->view_name->to_stream(view_name_os);
+    EXPECT_EQ("aa", view_name_os.str());
+    EXPECT_EQ(4, stmt2->column_names.size());
+    EXPECT_EQ(strcmp("a", stmt2->column_names[0]->name.value), 0);
+    EXPECT_EQ(strcmp("b", stmt2->column_names[1]->name.value), 0);
+    EXPECT_EQ(strcmp("c", stmt2->column_names[2]->name.value), 0);
+    EXPECT_EQ(strcmp("d", stmt2->column_names[3]->name.value), 0);
+}
+
+TEST(test_parser, case_with_select) {
+    parser::SqlParser parser1;
+    std::string sql1 = "with cte1 as (select * from aaa) select * from cte1;";
+    parser1.parse(sql1);
+    printf("errormsg: %d, %s\n", parser1.error, parser1.syntax_err_str.c_str());
+    EXPECT_EQ(1, parser1.result.size());
+    if (parser1.result.size() != 1) {
+        return;
+    }
+    std::ostringstream with_select_os;
+    SelectStmt* stmt1 = (SelectStmt*)parser1.result[0];
+    stmt1->to_stream(with_select_os);
+    std::string with_selelct_string = "WITH cte1 AS (SELECT * FROM aaa) AS SELECT * FROM cte1";
+    EXPECT_EQ(with_selelct_string, with_select_os.str());
+}
+
 TEST(test_parser, case_create_table_hll) {
     parser::SqlParser parser;
     
@@ -156,6 +217,47 @@ TEST(test_parser, case_create_table_hll) {
     for (int idx = 0; idx < stmt->columns.size(); ++idx) {
         stmt->columns[idx]->name->print();
 
+    }
+}
+
+TEST(test_parser, case_create_rollup_table) {
+    parser::SqlParser parser;
+    
+    std::string sql = "create table score_diary_book ("
+        "`book_id` bigint(20) NOT NULL COMMENT '日记本ID',"
+        "`parent_id` bigint(20) NOT NULL COMMENT '父ID',"
+        "`score_type` int(11) NOT NULL COMMENT '1-日记本净分数 2-日记本总分',"
+        "`score` double NOT NULL COMMENT '分数',"
+        "`__sign__` bigint(20) unsigned NOT NULL DEFAULT '0'," 
+        "`__version__` bigint(20) unsigned NOT NULL DEFAULT '0'," 
+        "PRIMARY KEY (book_id, score_type, __sign__),"
+        "ROLLUP KEY `rollup_index` (book_id)"
+    ") ENGINE=Rocksdb DEFAULT CHARSET=gbk AVG_ROW_LENGTH=500 COMMENT='{\"comment\":"", \"resource_tag\":\"e0-nj\", \"namespace\":\"FENGCHAO\"}'";
+
+    parser.parse(sql);
+    //EXPECT_EQ(parser::SUCC, parser.error);
+    printf("errormsg: %d, %s\n", parser.error, parser.syntax_err_str.c_str());
+
+    EXPECT_EQ(1, parser.result.size());
+
+    if (parser.result.size() != 1) {
+        return;
+    }
+    EXPECT_EQ(parser::NT_CREATE_TABLE, parser.result[0]->node_type);
+    CreateTableStmt* stmt = (CreateTableStmt*)parser.result[0];
+    EXPECT_EQ(parser::NT_CREATE_TABLE, stmt->node_type);
+    EXPECT_FALSE(stmt->if_not_exist);
+
+    printf("stmt->table_name: %p", stmt->table_name);
+
+    if (!stmt->table_name->db.empty()) {
+        printf("db: %s\n", stmt->table_name->db.value);
+    }
+    if (stmt->table_name->table.value) {
+        printf("table: %s\n", stmt->table_name->table.value);
+    }
+    for (int idx = 0; idx < stmt->columns.size(); ++idx) {
+        stmt->columns[idx]->name->print();
     }
 }
 

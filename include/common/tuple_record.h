@@ -19,6 +19,7 @@
 #include "mem_row.h"
 #include "schema_factory.h"
 #include "rocksdb/slice.h"
+#include "chunk.h"
 
 namespace baikaldb {
 class TupleRecord {
@@ -77,15 +78,18 @@ public:
     // decode 'required' (rather than 'all') fields from serialized protobuf bytes
     // and fill to SmartRecord, if null, fill default_value
     int decode_fields(const std::map<int32_t, FieldInfo*>& fields, SmartRecord record) {
-        return decode_fields(fields, nullptr, &record, 0, nullptr);
+        return decode_fields(fields, nullptr, &record, 0, nullptr, nullptr);
     }
     int decode_fields(const std::map<int32_t, FieldInfo*>& fields, 
             std::vector<int32_t>& field_slot, int32_t tuple_id, std::unique_ptr<MemRow>& mem_row) {
-        return decode_fields(fields, &field_slot, nullptr, tuple_id, &mem_row);
+        return decode_fields(fields, &field_slot, nullptr, tuple_id, &mem_row, nullptr);
     }
     int decode_fields(const std::map<int32_t, FieldInfo*>& fields, const std::vector<int32_t>* field_slot,
-            SmartRecord* record, int32_t tuple_id, std::unique_ptr<MemRow>* mem_row);
-
+            SmartRecord* record, int32_t tuple_id, std::unique_ptr<MemRow>* mem_row, std::shared_ptr<Chunk> chunk = nullptr);
+    int decode_fields_for_chunk(const std::map<int32_t, FieldInfo*>& fields, 
+        const std::vector<int32_t>* field_slot,
+        int32_t tuple_id, 
+        std::shared_ptr<Chunk>);
     int verification_fields(int32_t max_field_id);
 private:
     const char*   _data;

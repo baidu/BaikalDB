@@ -106,6 +106,8 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
     case pb::OP_DROP_TABLE: 
     case pb::OP_DROP_TABLE_TOMBSTONE: 
     case pb::OP_RESTORE_TABLE: 
+    case pb::OP_CREATE_VIEW:
+    case pb::OP_DROP_VIEW:
     case pb::OP_ADD_FIELD:
     case pb::OP_DROP_FIELD:
     case pb::OP_MODIFY_FIELD:
@@ -392,7 +394,6 @@ void SchemaManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* r
     }
     TimeCost step_time_cost; 
     std::set<std::int64_t> report_table_ids;
-    std::unordered_map<int64_t, std::set<std::int64_t>> report_region_ids;
     int64_t prepare_time =0;
     step_time_cost.reset(); 
 
@@ -401,9 +402,14 @@ void SchemaManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* r
         return;
     }
 
-    std::unordered_set<int64_t> heartbeat_table_ids;
+    // key: table_id, value: partition_ids
+    // 基准场景获取指定的partition；若partition_ids为空，则获取所有partition
+    std::unordered_map<int64_t, std::unordered_set<int64_t>> heartbeat_table_partition_map;
+    std::unordered_map<int64_t, std::unordered_set<int64_t>> new_heartbeat_table_partition_map; // 按需获取场景，新增表需要获取心跳基准
+    std::unordered_set<int64_t> heartbeat_binlog_main_table_ids; // binlog capture场景，存储binlog表的对应主表
     bool need_heartbeat_table  = (request->has_need_heartbeat_table() && request->need_heartbeat_table());
     bool need_binlog_heartbeat = (request->has_need_binlog_heartbeat() && request->need_binlog_heartbeat());
+    bool need_global_index_heartbeat = (request->has_need_global_index_heartbeat() && request->need_global_index_heartbeat());
     if (need_heartbeat_table) {
         for (const auto& table_info : request->heartbeat_tables()) {
             if (need_binlog_heartbeat && table_info.table_name() == "*") {
@@ -416,22 +422,76 @@ void SchemaManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* r
                     DB_WARNING("Fail to get_table_ids, database_id : %ld", database_id);
                     continue;
                 }
-                heartbeat_table_ids.insert(table_ids.begin(), table_ids.end());
+                for (const int64_t& table_id : table_ids) {
+                    heartbeat_table_partition_map[table_id] = std::unordered_set<int64_t>();
+                    for (const auto& partition_id : table_info.partition_ids()) {
+                        heartbeat_table_partition_map[table_id].insert(partition_id);
+                    }
+                }
             } else {
+                if (table_info.has_table_id()) {
+                    // 表删除场景或表重命名场景，旧表信息需要进行同步
+                    heartbeat_table_partition_map[table_info.table_id()] = std::unordered_set<int64_t>();
+                    for (const auto& partition_id : table_info.partition_ids()) {
+                        heartbeat_table_partition_map[table_info.table_id()].insert(partition_id);
+                    }
+                }
                 const std::string& full_table_name = 
                         table_info.namespace_name() + "\001" + table_info.database() + "\001" + table_info.table_name();
                 const int64_t table_id = TableManager::get_instance()->get_table_id(full_table_name);
                 if (table_id == 0) {
-                    DB_FATAL("Fail to get table_id, table_name: %s", full_table_name.c_str());
+                    DB_WARNING("Fail to get_table_id, table_name: %s", full_table_name.c_str());
                     continue;
                 }
-                heartbeat_table_ids.insert(table_id);
+                if (table_info.has_table_id() && table_id == table_info.table_id()) {
+                    continue;
+                }
+                if (table_info.has_table_id() && table_id != table_info.table_id()) {
+                    // 重命名场景，新表发基准
+                    new_heartbeat_table_partition_map[table_id] = std::unordered_set<int64_t>();
+                    for (const auto& partition_id : table_info.partition_ids()) {
+                        new_heartbeat_table_partition_map[table_id].insert(partition_id);
+                    }
+                    continue;
+                }
+                if (table_info.is_new()) {
+                    // dblink场景，新增外部映射表，需要获取心跳基准数据
+                    new_heartbeat_table_partition_map[table_id] = std::unordered_set<int64_t>();
+                    for (const auto& partition_id : table_info.partition_ids()) {
+                        new_heartbeat_table_partition_map[table_id].insert(partition_id);
+                    }
+                } else {
+                    // partition_ids只在这里使用，其他地方没有用到，仅做代码格式兼容
+                    heartbeat_table_partition_map[table_id] = std::unordered_set<int64_t>();
+                    for (const auto& partition_id : table_info.partition_ids()) {
+                        heartbeat_table_partition_map[table_id].insert(partition_id);
+                    }
+                }
             }
         }
-
+        if (need_global_index_heartbeat) {
+            auto get_gloabl_index_func = 
+                    [] (std::unordered_map<int64_t, std::unordered_set<int64_t>>& heartbeat_table_partition_map) {
+                for (const auto& [table_id, partition_ids] : heartbeat_table_partition_map) {
+                    pb::SchemaInfo table_info;
+                    if (TableManager::get_instance()->get_table_info(table_id, table_info) != 0) {
+                        DB_WARNING("Fail to get_table_info, table_id: %ld", table_id);
+                        continue;
+                    }
+                    for (const auto& index_info : table_info.indexs()) {
+                        if (!index_info.is_global()) {
+                            continue;
+                        }
+                        heartbeat_table_partition_map[index_info.index_id()] = partition_ids;
+                    }
+                }
+            };
+            get_gloabl_index_func(heartbeat_table_partition_map);
+            get_gloabl_index_func(new_heartbeat_table_partition_map);
+        }
         if (need_binlog_heartbeat) {
             std::unordered_set<int64_t> heartbeat_binlog_table_ids;
-            for (const int64_t& table_id : heartbeat_table_ids) {
+            for (const auto& [table_id, _] : heartbeat_table_partition_map) {
                 pb::SchemaInfo table_info;
                 int ret = TableManager::get_instance()->get_table_info(table_id, table_info);
                 if (ret < 0) {
@@ -453,62 +513,110 @@ void SchemaManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* r
             if (heartbeat_binlog_table_ids.empty()) {
                 DB_WARNING("heartbeat_binlog_table_ids is empty");
             }
-            // Binlog心跳只需要返回Binlog Table对应的Region
-            std::swap(heartbeat_table_ids, heartbeat_binlog_table_ids);
+            // Binlog心跳主表schema信息需要下发
+            for (const auto& [table_id, _] : heartbeat_table_partition_map) {
+                heartbeat_binlog_main_table_ids.insert(table_id);
+            }
+            heartbeat_table_partition_map.clear();
+            // Binlog心跳只需要返回Binlog Table对应的Region，主表Region信息不需要下发
+            for (const auto& binlog_table_id : heartbeat_binlog_table_ids) {
+                // 下发binlog所有分区的region，binlog和主表的分区可能不是一一对应
+                heartbeat_table_partition_map[binlog_table_id] = std::unordered_set<int64_t>();
+            }
         }
     }
+    prepare_time = step_time_cost.get_time(); 
+    step_time_cost.reset(); 
 
     bool need_update_schema = false;
     bool need_update_region = false;
     int64_t last_updated_index = request->last_updated_index();
     int64_t applied_index = _meta_state_machine->applied_index();
+    int64_t update_incremental_time_table = 0;
+    int64_t update_incremental_time_region = 0;
+    static std::atomic<int64_t> need_update_region_cnt = 0;
+    static TimeCost all_region_time;
+    // 兜底防止雪崩，120s内超过3次，则不再全量更新region
+    if (all_region_time.get_time() > 120 * 1000000LL) {
+        all_region_time.reset();
+        need_update_region_cnt = 0;
+    }
     if (last_updated_index > 0) {
         need_update_schema = TableManager::get_instance()->check_and_update_incremental(
-                                                            request, response, applied_index);
+                                                            request, response, applied_index, heartbeat_table_partition_map, 
+                                                            heartbeat_binlog_main_table_ids);
+        update_incremental_time_table = step_time_cost.get_time();
         need_update_region = RegionManager::get_instance()->check_and_update_incremental(
-                                                            request, response, applied_index, heartbeat_table_ids);
-        //DB_WARNING("update  update_incremental last_updated_index:%ld log_id: %lu", last_updated_index, log_id);
+                                                            request, response, applied_index, heartbeat_table_partition_map);
+        if (need_update_region && ++need_update_region_cnt > 3) {
+            need_update_region = false;
+            DB_FATAL("update region too frequently, need_update_region_cnt: %ld",
+                    need_update_region_cnt.load());
+        }
+        update_incremental_time_region = step_time_cost.get_time();
     }
-    int64_t update_incremental_time = step_time_cost.get_time();
     step_time_cost.reset(); 
     if (last_updated_index == 0 || need_update_schema || need_update_region) {
         for (auto& schema_heart_beat : request->schema_infos()) {
             int64_t table_id = schema_heart_beat.table_id();
             report_table_ids.insert(table_id);
-            report_region_ids[table_id] = std::set<std::int64_t>{};
-            for (auto& region_info : schema_heart_beat.regions()) {
-                report_region_ids[table_id].insert(region_info.region_id());
-            }
-        }      
-        prepare_time = step_time_cost.get_time(); 
-        step_time_cost.reset();
+        }
     }
     if (last_updated_index == 0 || need_update_schema) {
-        //DB_WARNING("DEBUG schema update all applied_index:%ld log_id: %lu", applied_index, log_id);
         response->set_last_updated_index(applied_index);
         //判断上报的表是否已经更新或删除
         TableManager::get_instance()->check_update_or_drop_table(request, response); 
         //判断是否有新增的表没有下推给baikaldb
         std::vector<int64_t> new_add_region_ids;
         TableManager::get_instance()->check_add_table(
-            report_table_ids, new_add_region_ids, request, response, heartbeat_table_ids);
+            report_table_ids, new_add_region_ids, request, response, heartbeat_table_partition_map,
+            heartbeat_binlog_main_table_ids);
         RegionManager::get_instance()->add_region_info(new_add_region_ids, response);
     }
     int64_t update_table_time = step_time_cost.get_time();
     step_time_cost.reset(); 
     if (last_updated_index == 0 || need_update_region) {
-        //DB_WARNING("region update all applied_index:%ld log_id: %lu", applied_index, log_id);
         response->set_last_updated_index(applied_index);
-        //判断上报的region是否已经更新或删除
-        RegionManager::get_instance()->check_update_region(request, response);
-        //判断是否有新增的region没有下推到baikaldb
+        // last_updated_index为0时，report_table_ids为空，不会获取到基准region数据；
+        // 只有need_update_region场景，才会获取到基准region数据；
         TableManager::get_instance()->check_add_region(
-            report_table_ids, report_region_ids, request, response, heartbeat_table_ids);
+            report_table_ids, request, response, heartbeat_table_partition_map);
     }
     int64_t update_region_time = step_time_cost.get_time();
-    DB_NOTICE("process schema info for baikal heartbeat, prepare_time: %ld, update_incremental_time:%ld,"
-                " update_table_time: %ld, update_region_time: %ld, log_id: %lu",
-                prepare_time, update_incremental_time, update_table_time, update_region_time, log_id);
+    step_time_cost.reset();
+    // 按需获取场景，新增表获取心跳基准
+    if (!new_heartbeat_table_partition_map.empty()) {
+        std::vector<int64_t> new_add_region_ids;
+        for (const auto& [table_id, partition_ids] : new_heartbeat_table_partition_map) {
+            pb::SchemaInfo table_info;
+            if (TableManager::get_instance()->get_table_info(table_id, table_info) != 0) {
+                DB_WARNING("Fail to get_table_info, table_id: %ld", table_id);
+                continue;
+            }
+            if (table_id == table_info.table_id()) {
+                // 主表添加Schema信息
+                response->add_schema_change_info()->Swap(&table_info);
+            }
+            if (partition_ids.empty()) {
+                std::vector<int64_t> region_ids;
+                TableManager::get_instance()->get_region_ids(table_id, region_ids);
+                new_add_region_ids.insert(new_add_region_ids.end(), region_ids.begin(), region_ids.end());
+            } else {
+                std::set<int64_t> region_ids;
+                TableManager::get_instance()->get_region_ids(table_id, partition_ids, region_ids);
+                new_add_region_ids.insert(new_add_region_ids.end(), region_ids.begin(), region_ids.end());
+            }
+        }
+        RegionManager::get_instance()->add_region_info(new_add_region_ids, response);
+    }
+    int64_t add_new_heartbeat_tables_time = step_time_cost.get_time();
+    DB_NOTICE("process schema info for baikal heartbeat, prepare_time: %ld,"
+            "update_incremental_time_table:%ld, update_incremental_time_region:%ld"
+            " update_table_time: %ld, update_region_time: %ld, new_heartbeat_table_time: %ld"
+            " log_id: %lu, last_updated_index: %ld, applied_index: %ld",
+            prepare_time, update_incremental_time_table, update_incremental_time_region, 
+            update_table_time, update_region_time, add_new_heartbeat_tables_time, log_id, 
+            last_updated_index, applied_index);
     //判断是否需要更新内存中虚拟索引影响面信息
     TableManager::get_instance()->load_virtual_indextosqls_to_memory(request);
 }
@@ -743,9 +851,31 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
         SET_REQUEST_TABLE_INFO(byte_size_per_record);
         SET_REQUEST_TABLE_INFO(replica_num);
         SET_REQUEST_TABLE_INFO(region_split_lines);
+        SET_REQUEST_TABLE_INFO(main_logical_room);
 
     #undef SET_REQUEST_TABLE_INFO
 
+        if (table_info.learner_resource_tags().empty()) {
+            if (!database_info.learner_resource_tags().empty()) {
+                table_info.mutable_learner_resource_tags()->CopyFrom(database_info.learner_resource_tags());
+            } else if (!namespace_info.learner_resource_tags().empty()) {
+                table_info.mutable_learner_resource_tags()->CopyFrom(namespace_info.learner_resource_tags());
+            }
+        }
+        if (table_info.binlog_infos().empty()) {
+            if (!database_info.binlog_infos().empty()) {
+                table_info.mutable_binlog_infos()->CopyFrom(database_info.binlog_infos());
+            } else if (!namespace_info.binlog_infos().empty()) {
+                table_info.mutable_binlog_infos()->CopyFrom(namespace_info.binlog_infos());
+            }
+        }
+        if (table_info.dists().empty()) {
+            if (!database_info.dists().empty()) {
+                table_info.mutable_dists()->CopyFrom(database_info.dists());
+            } else if (!namespace_info.dists().empty()) {
+                table_info.mutable_dists()->CopyFrom(namespace_info.dists());
+            }
+        }
         if (!table_info.has_resource_tag()) {
             std::string ns_resource_tag = namespace_info.resource_tag();
             std::string db_resource_tag = database_info.resource_tag();
@@ -756,8 +886,24 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
             }
         }
     }
+
+    //set default values if not specified by user
+    if (!table_info_ptr->has_byte_size_per_record()) {
+        DB_WARNING("no avg_row_length set in comments, use default:50");
+        table_info_ptr->set_byte_size_per_record(50);
+    }
+
     // 目前建表新建region不考虑dist分布
     table_info_ptr->set_resource_tag(resource_tag);
+
+    // 非Rocksdb引擎限制ttl
+    if (table_info.engine() != pb::ROCKSDB && table_info.engine() != pb::ROCKSDB_CSTORE) {
+        if (table_info.has_ttl_duration()) {
+            ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
+                               "engine != rocksdb/rocksdb_cstore can not create ttl table", request->op_type(), log_id);        
+            return -1;
+        }
+    }
 
     return 0;
 }
@@ -1386,7 +1532,7 @@ int SchemaManager::pre_process_for_dynamic_partition(const pb::MetaManagerReques
         get_current_month_timestamp(dynamic_partition_attr.start_day_of_month(), normalized_current_ts);
     }
 
-    for (size_t i = 0; i <= dynamic_partition_attr.end(); ++i) {
+    for (int32_t i = dynamic_partition_attr.cold(); i <= dynamic_partition_attr.end(); ++i) {
         pb::RangePartitionInfo range_partition_info;
         partition_utils::create_dynamic_range_partition_info(dynamic_partition_attr.prefix(), partition_col_type,
                                                              normalized_current_ts, i, unit, range_partition_info);

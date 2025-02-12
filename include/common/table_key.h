@@ -158,6 +158,8 @@ public:
             const FieldDescriptor* field, 
             const FieldInfo& field_info,
             int& pos) const;
+    int decode_field_for_chunk(ExprValue* value, const FieldInfo& field_info, int& pos) const;
+
 
     int skip_field(const FieldInfo& field_info, int& pos) const;
 

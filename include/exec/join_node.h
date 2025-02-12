@@ -79,6 +79,9 @@ public:
 
     int nested_loop_join(RuntimeState* state);
 
+    // 非index join, 目前只有向量化执行支持该种模式
+    int no_index_hash_join(RuntimeState* state);
+
     void reorder_clear() {
         _conditions.clear();
         for (auto& child : _children) {
@@ -95,6 +98,18 @@ public:
             std::map<int32_t, std::set<int32_t>>& tuple_equals_map, 
             std::vector<int32_t>& tuple_order,
             std::vector<ExprNode*>& conditions);
+
+    int build_table_arrow_declaration(RuntimeState* state, 
+            arrow::acero::Declaration& dec,
+            ExecNode* node, 
+            std::unordered_set<int32_t>& tuple_ids, 
+            std::vector<MemRow*>& mem_rows,
+            std::shared_ptr<arrow::Table>& intermediate_table,
+            const std::unordered_map<int32_t, std::set<int32_t>>& cast_string_slot_ids);
+
+    virtual int build_arrow_declaration(RuntimeState* state);
+    
+    virtual bool can_use_arrow_vector();
 };
 }
 

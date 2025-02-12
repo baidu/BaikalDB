@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "meta_server_interact.hpp"
+#include "schema_factory.h"
 #include <gflags/gflags.h>
 
 namespace baikaldb {
@@ -37,10 +38,33 @@ int MetaServerInteract::init(bool is_backup) {
 }
 
 int MetaServerInteract::init_internal(const std::string& meta_bns) {
-    _master_leader_address.ip = butil::IP_ANY;                                             
-    _master_leader_address.port = 0; 
     _connect_timeout = FLAGS_meta_connect_timeout;
     _request_timeout = FLAGS_meta_request_timeout;
+    return init_meta_interact(meta_bns, _meta_interact_info); 
+}
+
+int MetaServerInteract::init_other_meta(const int64_t meta_id) {
+    std::string meta_bns;
+    if (SchemaFactory::get_instance()->get_meta_name(meta_id, meta_bns) != 0) {
+        DB_FATAL("get_meta_name fail. bns:%ld", meta_id);
+        return -1;
+    }
+    std::shared_ptr<MetaInteractInfo> p_meta_interact_info = std::make_shared<MetaInteractInfo>();
+    if (init_meta_interact(meta_bns, *p_meta_interact_info) != 0) {
+        DB_WARNING("init_meta_interact fail. meta_id: %ld, meta_bns: %s", meta_id, meta_bns.c_str());
+        return -1;
+    }
+    std::lock_guard<std::mutex> lock(_meta_map_mutex);
+    if (_meta_interact_info_map.find(meta_id) == _meta_interact_info_map.end()) {
+        _meta_interact_info_map[meta_id] = p_meta_interact_info;
+    }
+    return 0;
+}
+
+int MetaServerInteract::init_meta_interact(const std::string& meta_bns, MetaInteractInfo& meta_interact_info) {
+    meta_interact_info.master_leader_address.ip = butil::IP_ANY;
+    meta_interact_info.master_leader_address.port = 0;
+
     //初始化channel，但是该channel是meta_server的 bns pool，大部分时间用不到
     brpc::ChannelOptions channel_opt;
     channel_opt.timeout_ms = FLAGS_meta_request_timeout;
@@ -52,16 +76,16 @@ int MetaServerInteract::init_internal(const std::string& meta_bns) {
     } else {
         meta_server_addr = std::string("list://") + meta_bns;
     }
-    std::unique_lock<std::mutex> lck(_bns_channel_mutex);
-    if (_bns_channel == nullptr) {
-        _bns_channel = new brpc::Channel();
+    std::unique_lock<bthread::Mutex> lck(meta_interact_info.bns_channel_mutex);
+    if (meta_interact_info.bns_channel == nullptr) {
+        meta_interact_info.bns_channel = new brpc::Channel();
     }
-    if (_bns_channel->Init(meta_server_addr.c_str(), "rr", &channel_opt) != 0) {
-        DB_FATAL("meta server bns pool init fail. bns_name:%s", meta_server_addr.c_str());
+    if (meta_interact_info.bns_channel->Init(meta_server_addr.c_str(), "rr", &channel_opt) != 0) {
+        DB_WARNING("meta server bns pool init fail. bns_name:%s", meta_server_addr.c_str());
         return -1;
     }
-    _is_inited = true;
-    return 0; 
+    meta_interact_info.is_inited = true;
+    return 0;
 }
 
 
@@ -82,9 +106,9 @@ int MetaServerInteract::reset_bns_channel(const std::string& meta_bns) {
         DB_FATAL("meta server bns pool init fail. bns_name:%s", meta_server_addr.c_str());
         return -1;
     }
-    std::unique_lock<std::mutex> lck(_bns_channel_mutex);
-    SAFE_DELETE(_bns_channel);
-    _bns_channel = tmp;
+    std::unique_lock<bthread::Mutex> lck(_meta_interact_info.bns_channel_mutex);
+    SAFE_DELETE(_meta_interact_info.bns_channel);
+    _meta_interact_info.bns_channel = tmp;
     return 0; 
 }
 }

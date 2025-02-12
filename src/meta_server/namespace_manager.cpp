@@ -116,29 +116,48 @@ void NamespaceManager::modify_namespace(const pb::MetaManagerRequest& request, b
     }
     //目前支持改quota, resource_tag
     int64_t namespace_id = _namespace_id_map[namespace_name];
-    pb::NameSpaceInfo tmp_info = _namespace_info_map[namespace_id];
-    if (namespace_info.has_quota()) {
-        tmp_info.set_quota(namespace_info.quota());
+    pb::NameSpaceInfo tmp_info;
+    if (request.is_force_setting()) {
+        // 用于删除某个配置项的场景，删除时需要配置其他全部配置项
+        tmp_info = namespace_info;
+        tmp_info.set_namespace_id(namespace_id);
+    } else {
+        tmp_info = _namespace_info_map[namespace_id];
+        if (namespace_info.has_quota()) {
+            tmp_info.set_quota(namespace_info.quota());
+        }
+        if (namespace_info.has_resource_tag()) {
+            tmp_info.set_resource_tag(namespace_info.resource_tag());
+        }
+        if (namespace_info.has_engine()) {
+            tmp_info.set_engine(namespace_info.engine());
+        }
+        if (namespace_info.has_charset()) {
+            tmp_info.set_charset(namespace_info.charset());
+        }
+        if (namespace_info.has_byte_size_per_record()) {
+            tmp_info.set_byte_size_per_record(namespace_info.byte_size_per_record());
+        }
+        if (namespace_info.has_replica_num()) {
+            tmp_info.set_replica_num(namespace_info.replica_num());
+        }
+        if (namespace_info.has_region_split_lines()) {
+            tmp_info.set_region_split_lines(namespace_info.region_split_lines());
+        }
+        if (!namespace_info.dists().empty()) {
+            tmp_info.mutable_dists()->CopyFrom(namespace_info.dists());
+        }
+        if (namespace_info.has_main_logical_room()) {
+            tmp_info.set_main_logical_room(namespace_info.main_logical_room());
+        }
+        if (!namespace_info.learner_resource_tags().empty()) {
+            tmp_info.mutable_learner_resource_tags()->CopyFrom(namespace_info.learner_resource_tags());
+        }
+        if (!namespace_info.binlog_infos().empty()) {
+            tmp_info.mutable_binlog_infos()->CopyFrom(namespace_info.binlog_infos());
+        }
     }
-    if (namespace_info.has_resource_tag()) {
-        tmp_info.set_resource_tag(namespace_info.resource_tag());
-    }
-    if (namespace_info.has_engine()) {
-        tmp_info.set_engine(namespace_info.engine());
-    }
-    if (namespace_info.has_charset()) {
-        tmp_info.set_charset(namespace_info.charset());
-    }
-    if (namespace_info.has_byte_size_per_record()) {
-        tmp_info.set_byte_size_per_record(namespace_info.byte_size_per_record());
-    }
-    if (namespace_info.has_replica_num()) {
-        tmp_info.set_replica_num(namespace_info.replica_num());
-    }
-    if (namespace_info.has_region_split_lines()) {
-        tmp_info.set_region_split_lines(namespace_info.region_split_lines());
-    }
-    tmp_info.set_version(tmp_info.version() + 1);
+    tmp_info.set_version(_namespace_info_map[namespace_id].version() + 1);
 
     //持久化新的namespace信息
     std::string namespace_value;
@@ -169,6 +188,15 @@ int NamespaceManager::load_namespace_snapshot(const std::string& value) {
     DB_WARNING("namespace snapshot:%s", namespace_pb.ShortDebugString().c_str());
     set_namespace_info(namespace_pb);
     return 0;
+}
+
+void NamespaceManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* request, 
+                                               pb::BaikalHeartBeatResponse* response) {
+    BAIDU_SCOPED_LOCK(_namespace_mutex);
+    for (auto& ns_info : _namespace_info_map) {
+        auto ns = response->add_ns_info();    
+        *ns = ns_info.second;
+    }
 }
 
 }//namespace 

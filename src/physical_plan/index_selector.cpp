@@ -17,7 +17,6 @@
 #include "scalar_fn_call.h"
 #include "predicate.h"
 #include "join_node.h"
-#include "agg_node.h"
 #include "limit_node.h"
 #include "parser.h"
 
@@ -36,10 +35,27 @@ int get_field_hit_type_weight(RangeType &ty) {
     }
     return 0;
 }
+static std::unordered_map<std::string, pb::RollupType> name_to_rollup_type_map = {
+    {"sum", pb::SUM},
+};
 
 int IndexSelector::analyze(QueryContext* ctx) {
     ExecNode* root = ctx->root;
     _ctx = ctx;
+
+    JoinNode* join_node = static_cast<JoinNode*>(root->get_node(pb::JOIN_NODE));
+    std::unordered_map<ExecNode*, std::vector<ExprNode*>> join_on_conditions;
+    if (join_node != nullptr) {
+        join_node->get_join_on_condition_filter(join_on_conditions);
+    }
+    ScopeGuard scope_guard([&join_on_conditions]() {
+        for (auto& pair : join_on_conditions) {
+            for (auto& expr : pair.second) {
+                ExprNode::destroy_tree(expr);
+            }
+        }
+    });
+
     std::vector<ExecNode*> scan_nodes;
     root->get_node(pb::SCAN_NODE, scan_nodes);
     if (scan_nodes.size() == 0) {
@@ -48,7 +64,9 @@ int IndexSelector::analyze(QueryContext* ctx) {
     LimitNode* limit_node = static_cast<LimitNode*>(root->get_node(pb::LIMIT_NODE));
     AggNode* agg_node = static_cast<AggNode*>(root->get_node(pb::AGG_NODE));
     SortNode* sort_node = static_cast<SortNode*>(root->get_node(pb::SORT_NODE));
-    JoinNode* join_node = static_cast<JoinNode*>(root->get_node(pb::JOIN_NODE));
+    PacketNode* packet_node = static_cast<PacketNode*>(root->get_node(pb::PACKET_NODE));
+    FilterNode* having_filter_node = static_cast<FilterNode*>(root->get_node(pb::HAVING_FILTER_NODE));
+
     // TODO sort可以增加topN
     if (limit_node != nullptr && sort_node != nullptr) {
         sort_node->set_limit(limit_node->other_limit());
@@ -72,11 +90,14 @@ int IndexSelector::analyze(QueryContext* ctx) {
         std::map<int32_t, int> field_range_type;
         bool index_has_null = false;
         if (join_node != NULL || agg_node != NULL) {
-            ret =index_selector(ctx->tuple_descs(),
+            ret = index_selector(ctx->tuple_descs(),
                             static_cast<ScanNode*>(scan_node_ptr), 
                             filter_node, 
                             NULL,
                             join_node,
+                            packet_node,
+                            agg_node,
+                            having_filter_node,
                             &index_has_null,
                             field_range_type,
                             ctx->stat_info.sample_sql.str());
@@ -86,6 +107,9 @@ int IndexSelector::analyze(QueryContext* ctx) {
                            filter_node, 
                            sort_node,
                            join_node,
+                           packet_node,
+                           agg_node,
+                           having_filter_node,
                            &index_has_null,
                            field_range_type, 
                            ctx->stat_info.sample_sql.str());
@@ -98,9 +122,27 @@ int IndexSelector::analyze(QueryContext* ctx) {
         if (ret < 0) {
             return ret;
         }
+        if (join_on_conditions.count(scan_node_ptr) > 0) {
+            index_selector(ctx->tuple_descs(),
+                            static_cast<ScanNode*>(scan_node_ptr), 
+                            filter_node, 
+                            NULL,
+                            join_node,
+                            packet_node,
+                            agg_node,
+                            having_filter_node,
+                            &index_has_null,
+                            field_range_type,
+                            ctx->stat_info.sample_sql.str(),
+                            &join_on_conditions[scan_node_ptr]);
+        }
         if (ret > 0) {
             ctx->index_ids.insert(ret);
             ctx->field_range_type = field_range_type;
+            // 子查询下推后可能选中全局索引，该场景下不使用全量导出
+            if (ret != static_cast<ScanNode*>(scan_node_ptr)->table_id()) {
+                ctx->is_full_export = false;
+            }
         }
     }
     return 0;
@@ -194,7 +236,8 @@ void IndexSelector::hit_row_field_range(ExprNode* expr,
                         return;
                     }
                     int32_t field_id = slots[0]->field_id();
-                    if (field_range_map[field_id].left.size() > 0) {
+                    // 修复 (a,b) > (1,1) and (a,b)>(2,2)
+                    if (!field_range_map[field_id].left.empty()) {
                         return;
                     }
                     tmp_type = RANGE;
@@ -217,7 +260,7 @@ void IndexSelector::hit_row_field_range(ExprNode* expr,
                         return;
                     }
                     int32_t field_id = slots[0]->field_id();
-                    if (field_range_map[field_id].right.size() > 0) {
+                    if (!field_range_map[field_id].right.empty()) {
                         return;
                     }
                     tmp_type = RANGE;
@@ -243,8 +286,8 @@ void IndexSelector::hit_row_field_range(ExprNode* expr,
                 size_t idx = pair.first;
                 SlotRef* slot = pair.second;
                 int32_t field_id = slot->field_id();
-                if (field_range_map[field_id].type != NONE &&
-                    field_range_map[field_id].eq_in_values.size() <= values[idx].size()) {
+                if (field_range_map[field_id].type != NONE
+                    && field_range_map[field_id].eq_in_values.size() <= values[idx].size()) {
                     continue;
                 }
                 field_range_map[field_id].eq_in_values = values[idx];
@@ -449,12 +492,14 @@ void IndexSelector::hit_field_range(ExprNode* expr,
         return;
     }
     RangeType tmp_type;
+
     switch (expr->node_type()) {
         case pb::FUNCTION_CALL: {
             int32_t fn_op = static_cast<ScalarFnCall*>(expr)->fn().fn_op();
             switch (fn_op) {
                 case parser::FT_EQ:
                     field_range_map[field_id].eq_in_values = values;
+                    field_range_map[field_id].conditions.clear();
                     field_range_map[field_id].conditions.insert(expr);
                     field_range_map[field_id].type = EQ;
                     return;
@@ -464,10 +509,9 @@ void IndexSelector::hit_field_range(ExprNode* expr,
                     if (get_field_hit_type_weight(field_range_map[field_id].type) > get_field_hit_type_weight(tmp_type)) {
                         return;
                     }
-                    if (field_range_map[field_id].left.size() > 0){
-                        field_range_map[field_id].left.clear();
-                        field_range_map[field_id].left_row_field_ids.clear();
-                        field_range_map[field_id].is_row_expr = false;
+                    
+                    if (!field_range_map[field_id].left.empty()) {
+                        return;
                     }
                     field_range_map[field_id].left.push_back(values[0]);
                     field_range_map[field_id].left_open = fn_op == parser::FT_GT;
@@ -480,10 +524,9 @@ void IndexSelector::hit_field_range(ExprNode* expr,
                     if (get_field_hit_type_weight(field_range_map[field_id].type) > get_field_hit_type_weight(tmp_type)) {
                         return;
                     }
-                    if(field_range_map[field_id].right.size() > 0){
-                        field_range_map[field_id].right.clear();
-                        field_range_map[field_id].right_row_field_ids.clear();
-                        field_range_map[field_id].is_row_expr = false;
+                    
+                    if (!field_range_map[field_id].right.empty()) {
+                        return;
                     }
                     field_range_map[field_id].right.push_back(values[0]);
                     field_range_map[field_id].right_open = fn_op == parser::FT_LT;
@@ -495,9 +538,16 @@ void IndexSelector::hit_field_range(ExprNode* expr,
             }
         }
         case pb::IN_PREDICATE: {
-            if (field_range_map[field_id].type == IN &&
-                field_range_map[field_id].eq_in_values.size() <= values.size()) {
+            bool do_this = false;
+            if (field_range_map[field_id].type == NONE) {
+                do_this = true;
+            } else if ((field_range_map[field_id].type == EQ || field_range_map[field_id].type == IN)
+                && !field_range_map[field_id].is_row_expr
+                && values.size() < field_range_map[field_id].eq_in_values.size()) {
                 // 1个字段对应多个in preds时 例如: a in ("a1", "a2") and (a, b) in (("a1","b1")),取数量少的pred
+                do_this = true;
+            }
+            if  (!do_this) {
                 return;
             }
             tmp_type = IN;
@@ -573,9 +623,13 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
                                     FilterNode* filter_node, 
                                     SortNode* sort_node,
                                     JoinNode* join_node,
+                                    PacketNode* packet_node,
+                                    AggNode* agg_node,
+                                    FilterNode* having_filter_node,
                                     bool* index_has_null,
                                     std::map<int32_t, int>& field_range_type,
-                                    const std::string& sample_sql) {
+                                    const std::string& sample_sql,
+                                    std::vector<ExprNode*>* join_on_conditions) {
     int64_t table_id = scan_node->table_id();
     int32_t tuple_id = scan_node->tuple_id();
     auto table_info = _factory->get_table_info_ptr(table_id);
@@ -611,6 +665,14 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
                 break;
             }
             expr->get_all_field_ids(expr_field_map[expr]);
+        }
+    }
+    bool pushed_join_on_condition = false;
+    if (join_on_conditions != nullptr) {
+        pushed_join_on_condition = true;
+        for (auto expr : *join_on_conditions) {
+            bool index_predicate_is_null = false;
+            hit_field_range(expr, *field_range_map, &index_predicate_is_null, table_id, fulltext_index_tree.root.get());
         }
     }
 
@@ -681,6 +743,19 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
                 continue;
             }
         }
+        
+        if (index_info.type == pb::I_ROLLUP && !check_rollup_index_valid(
+                                                        table_info, 
+                                                        index_info, 
+                                                        filter_node, 
+                                                        sort_node, 
+                                                        packet_node, 
+                                                        agg_node,
+                                                        having_filter_node,
+                                                        *field_range_map)) {
+            continue;
+        }
+
         SmartPath access_path = std::make_shared<AccessPath>();
         if (force_indexs.count(index_id) == 1) {
             access_path->hint = AccessPath::FORCE_INDEX;
@@ -720,9 +795,13 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
                 calc_covering_user_slots = &slot_ids;
             }
         }
+        access_path->set_pushed_join_on_condition(pushed_join_on_condition);
         access_path->insert_no_cut_condition(expr_field_map, scan_node->is_get_keypoint());
         access_path->calc_is_covering_index(tuple_descs[tuple_id], calc_covering_user_slots);
         scan_node->add_access_path(access_path);
+    }
+    if (pushed_join_on_condition) {
+        return scan_node->select_join_index_in_baikaldb(sample_sql); 
     }
     // 分区表解析分区信息
     if (select_partition(table_info, scan_node, *field_range_map) != 0) {
@@ -750,8 +829,12 @@ int IndexSelector::select_partition(SmartTable& table_info, ScanNode* scan_node,
             }
         }
         
+        bool is_read = false;
         std::shared_ptr<UserInfo> user_info = nullptr;
         if (_ctx != nullptr) {
+            if (_ctx->stmt_type == parser::NT_SELECT || _ctx->stmt_type == parser::NT_UNION) {
+                is_read = true;
+            }
             auto client_conn = _ctx->client_conn;
             if (client_conn == nullptr) {
                 DB_WARNING("client_conn is nullptr");
@@ -813,13 +896,21 @@ int IndexSelector::select_partition(SmartTable& table_info, ScanNode* scan_node,
                         eq_in_values_set.insert(value);
                     }
                     for (auto& value : eq_in_values_set) {
-                        int64_t partition_index = partition_ptr->calc_partition(user_info, value);
+                        // 如果命中2个分区，第一个分区id作为返回值，第二个分区id存储在another_partition_id中；
+                        // 如果命中1个分区，这个分区id直接作为返回值；
+                        // 如果命中0个分区，则直接返回-1；
+                        int64_t another_partition_id = -1;
+                        int64_t partition_index = partition_ptr->calc_partition(user_info, value, is_read, &another_partition_id);
                         if (partition_index < 0) {
                             // 未找到partition，则跳过
                             continue;
                         }
                         scan_node->add_expr_partition_pair(value.get_string(), partition_index);
                         partition_ids.emplace(partition_index);
+                        if (another_partition_id != -1) {
+                            scan_node->add_expr_partition_pair(value.get_string(), another_partition_id);
+                            partition_ids.emplace(another_partition_id);
+                        }
                     }
                 } else {
                     // 范围条件
@@ -839,18 +930,117 @@ int IndexSelector::select_partition(SmartTable& table_info, ScanNode* scan_node,
                         }
                     }
                     if (partition_ptr->calc_partitions(user_info, 
-                            left_value, left_open, right_value, right_open, partition_ids) != 0) {
+                            left_value, left_open, right_value, right_open, partition_ids, is_read) != 0) {
                         DB_WARNING("Fail to calc_partitions");
                         return -1;
                     }
                 }
             } else {
-                partition_ids = partition_ptr->get_specified_partition_ids(user_info);
+                if (partition_ptr->get_specified_partition_ids(user_info, partition_ids, is_read) != 0) {
+                    DB_WARNING("Fail to calc_partitions");
+                    return -1;
+                }
             }
             scan_node->replace_partition(partition_ids, false);
         }
     }
     return 0;
+}
+
+// 检查ROLLUP索引是否要选择
+bool IndexSelector::check_rollup_index_valid(SmartTable& table_info,
+                                    const IndexInfo& index_info, 
+                                    FilterNode* filter_node, 
+                                    SortNode* sort_node,
+                                    PacketNode* packet_node,
+                                    AggNode* agg_node,
+                                    FilterNode* having_filter_node,
+                                    std::map<int32_t, range::FieldRange>& field_range_map) {
+    if (packet_node == nullptr || packet_node->op_type() != pb::OP_SELECT) {
+        return false;
+    }
+
+    std::unordered_set<int32_t> rollup_key_check_set;   // query中需要在指标中的列
+    std::unordered_set<int32_t> rollup_value_check_set; // query中需要在维度中的列
+    std::unordered_set<int32_t> rollup_kv_check_set;    // query中需要在指标 + 维度中的列
+
+    std::unordered_set<int32_t> fields_value_set;       // rollup索引中的指标列
+    std::unordered_set<int32_t> fields_key_set;         // rollup索引中的维度列
+    std::unordered_set<int32_t> fields_kv_set;          // rollup索引中的指标列 + 维度列
+
+    for (ExprNode* projection: packet_node->mutable_projections()) {
+        if (projection->is_slot_ref()) {
+            projection->get_all_field_ids(rollup_key_check_set);
+        }
+    }
+    if (agg_node == nullptr || agg_node->mutable_group_exprs()->empty()) {
+        return false;
+    }
+    for (ExprNode* group_expr: *(agg_node->mutable_group_exprs())) {
+        group_expr->get_all_field_ids(rollup_key_check_set);
+    }
+    for (AggFnCall* agg_fn_call: *(agg_node->mutable_agg_fn_calls())) {
+        if (name_to_rollup_type_map[agg_fn_call->agg_func_name()] != index_info.rollup_type) {
+            return false;
+        }
+        if (agg_fn_call->is_children_single_slot_ref()) {
+            agg_fn_call->get_all_field_ids(rollup_value_check_set);
+        } else {
+            return false;
+        }
+    }
+    if (sort_node != nullptr) {
+        for (ExprNode* order_expr: *(sort_node->mutable_order_exprs())) {
+            order_expr->get_all_field_ids(rollup_kv_check_set);
+        }
+    }
+    if (filter_node != nullptr) {
+        for (ExprNode* conjunct: *(filter_node->mutable_conjuncts())) {
+            conjunct->get_all_field_ids(rollup_key_check_set);
+        }
+    }
+    if (having_filter_node != nullptr) {
+        for (ExprNode* conjunct: *(having_filter_node->mutable_conjuncts())) {
+            // filter表达式优化后, field_id会丢失
+            // 如 select id2,sum(score) as score_sum from t27  group by id2 having score_sum > 1, 【score_sum > 1】的field会变成0 
+            std::unordered_set<int32_t> tmp_id_set;
+            conjunct->get_all_field_ids(tmp_id_set);
+            for (int32_t field_id: tmp_id_set) {
+                if (field_id != 0) {
+                    rollup_kv_check_set.insert(field_id);
+                }
+            }
+        }
+    }
+    // ROLLUP指标列
+    for (const FieldInfo& value_field: table_info->fields_need_sum) {
+        fields_value_set.insert(value_field.id);
+        fields_kv_set.insert(value_field.id);
+    }
+    // ROLLUP维度列
+    for (const FieldInfo& key_field: index_info.fields) {
+        fields_key_set.insert(key_field.id);
+        fields_kv_set.insert(key_field.id);    
+    }
+    // 是否都在ROLLUP维度列中
+    for (int32_t check_key: rollup_key_check_set) {
+        if (fields_key_set.count(check_key) == 0) {
+            return false;
+        }
+    }
+    // 是否都在指标列中
+    for (int32_t check_value: rollup_value_check_set) {
+        if (fields_value_set.count(check_value) == 0) {
+            return false;
+        }
+    }
+    // 是否都在纬度列 + 指标列中
+    for (int32_t check_kv: rollup_kv_check_set) {
+        if (fields_kv_set.count(check_kv) == 0) {
+            return false;
+        }
+    }
+    return true;
 }
 
 }

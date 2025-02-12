@@ -388,6 +388,9 @@ public:
     }
     void close() {
         delete _txn_db;
+        if (_cold_txn_db != nullptr) {
+            delete _cold_txn_db;
+        }
     }
     bool is_any_stall() {
         uint64_t value = 0;

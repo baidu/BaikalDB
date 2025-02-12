@@ -89,7 +89,7 @@ int UpdateManagerNode::init_update_info(UpdateNode* update_node) {
             }
         }
         if (has_id) {
-            if (info.id == _table_id) {
+            if (info.type == pb::I_PRIMARY) {
                 _affect_primary = true;
             } else if (info.is_global) {
                 if (info.type == pb::I_UNIQ) {

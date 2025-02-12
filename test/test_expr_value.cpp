@@ -286,6 +286,20 @@ TEST(test_compare, case_all) {
         EXPECT_STREQ(v1.get_string().c_str(), "1");
     }
     {
+        ExprValue v1(pb::FLOAT);
+        v1._u.float_val = 123.234567;
+        v1.float_precision_len = 3;
+        std::cout << v1.get_string() << "\n";
+        EXPECT_STREQ(v1.get_string().c_str(), "123.235");
+    }
+    {
+        ExprValue v1(pb::DOUBLE);
+        v1._u.double_val = 123.234567;
+        v1.float_precision_len = 4;
+        std::cout << v1.get_string() << "\n";
+        EXPECT_STREQ(v1.get_string().c_str(), "123.2346");
+    }
+    {
         ExprValue v1(pb::INT64);
         v1._u.int64_val = 1;
         ExprValue v2(pb::INT32);
@@ -346,6 +360,13 @@ TEST(test_compare, case_all) {
         v2.cast_to(pb::DATETIME);
         std::cout << v1.compare(v2) << std::endl;
         EXPECT_GT(v1.compare(v2), 0);
+    }
+    {
+        ExprValue v1(pb::STRING);
+        v1.str_val = "2037-10-11 01:52:41.123456";
+        v1.float_precision_len = 4;
+        v1.cast_to(pb::DATETIME);
+        EXPECT_STREQ(v1.get_string().c_str(), "2037-10-11 01:52:41.1234");
     }
     {
         ExprValue v1(pb::STRING);

@@ -104,15 +104,19 @@ int DMLNode::init_schema_info(RuntimeState* state) {
             return -1;
         }
     }
+    
+    bool has_rollup_index = SchemaFactory::get_instance()->has_rollup_index(_table_id);
     // update and on_dup_key_update need all fields
     // delete and insert/replace need get index fields
     // replace/delete binlog need all old fields
+    // 对rollup也要拿表所有的列
     if (_node_type == pb::UPDATE_NODE || _on_dup_key_update
-        || (_local_index_binlog && (_is_replace || _node_type == pb::DELETE_NODE))) {
+        || ((_local_index_binlog || has_rollup_index) && (_is_replace || _node_type == pb::DELETE_NODE))) {
         //保存所有字段，主键不在pb里，不需要传入
         for (auto& field_info : _table_info->fields) {
             if (_pri_field_ids.count(field_info.id) == 0) {
                 _field_ids[field_info.id] = &field_info;
+
             }
         }
     } else {
@@ -163,8 +167,12 @@ int DMLNode::init_schema_info(RuntimeState* state) {
                     break;
                 }
             }
+            // 如果是ROLLUP索引, 一定是被更改了, 后续如果只修改维度列有可能没有被更改
+            if (info.type == pb::I_ROLLUP) {
+                has_id = true;
+            }
             if (has_id) {
-                if (info.id == _table_id) {
+                if (info.type == pb::I_PRIMARY) {
                     _update_affect_primary = true;
                     break;
                 } else {
@@ -261,7 +269,8 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
                 return 0;
             }
             ret = -2;
-        } else if (_is_merge && _all_indexes.size() == 1) {
+        } else if (_is_merge) {
+            _txn->set_leader_merge_in_raft(FLAGS_leader_merge_in_raft);
             if (!_txn->fits_region_range_for_primary(*_pri_info, pk_key)) {
                 // DB_DEBUG("replace_no_get fail to fit: %s", rocksdb::Slice(pk_key.data()).ToString(true).c_str());
                 return 0;
@@ -416,7 +425,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
         if (_ignore_index_ids.count(info.id) == 1) {
             continue;
         }
-        if (info.id == _table_id) {
+        if (info.type == pb::I_PRIMARY) {
             continue;
         }
         auto index_state = info.state;
@@ -459,11 +468,15 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             }
             continue;
         } else if (vector_index_map.count(info.id) == 1) {
-            // inverted index only support single field
-            if (info.id == -1 || info.fields.size() != 1) {
+            // vector index only can support one or two field
+            if (info.id == -1 || (info.fields.size() != 1 && info.fields.size() != 2)) {
                 return -1;
             }
-            auto field = record->get_field_by_idx(info.fields[0].pb_idx);
+            int field_idx = 0;
+            if (info.fields.size() > 1) {
+                field_idx = 1;
+            }
+            auto field = record->get_field_by_idx(info.fields[field_idx].pb_idx);
             if (record->is_null(field)) {
                 continue;
             }
@@ -493,6 +506,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
     }
     // 列存为节省空间, 插入默认值或空值时不会put
     // cstore_update_fields_partly为true时更新前旧值尚未被删除
+    _txn->set_watt_stats_version(_watt_stats_version);
     ret = _txn->put_primary(_region_id, *_pri_info, record,
                             cstore_update_fields_partly ? &_update_field_ids : nullptr, _is_merge);
     if (ret < 0) {
@@ -568,7 +582,7 @@ int DMLNode::remove_row(RuntimeState* state, SmartRecord record,
             continue;
         }
 
-        if (info.id == _table_id) {
+        if (info.type == pb::I_PRIMARY) {
             continue;
         }
         if (reverse_index_map.count(info.id) == 1) {
@@ -594,12 +608,16 @@ int DMLNode::remove_row(RuntimeState* state, SmartRecord record,
             }
             continue;
         } else if (vector_index_map.count(info.id) == 1) {
-            // inverted index only support single field
-            if (info.id == -1 || info.fields.size() != 1) {
+            // vector index only can support one or two field
+            if (info.id == -1 || (info.fields.size() != 1 && info.fields.size() != 2)) {
                 DB_WARNING_STATE(state, "indexinfo get fail, index_id:%ld", info.id);
                 return -1;
             }
-            auto field = record->get_field_by_idx(info.fields[0].pb_idx);
+            int field_idx = 0;
+            if (info.fields.size() > 1) {
+                field_idx = 1;
+            }
+            auto field = record->get_field_by_idx(info.fields[field_idx].pb_idx);
             if (record->is_null(field)) {
                 continue;
             }
@@ -717,6 +735,10 @@ int DMLNode::update_row(RuntimeState* state, SmartRecord record, MemRow* row) {
         auto& slot = _update_slots[i];
         auto expr = _update_exprs[i];
 
+        if (_update_fields.count(slot.field_id()) == 0) {
+            DB_WARNING("vector out of range, region_id: %ld, field_id: %d", _region_id, slot.field_id());
+            continue;
+        }
         auto field = _update_fields[slot.field_id()];
         if (field->type == pb::FLOAT || field->type == pb::DOUBLE || field->type == pb::DATETIME) {
             auto& expr_value = expr->get_value(row).cast_to(slot.slot_type());

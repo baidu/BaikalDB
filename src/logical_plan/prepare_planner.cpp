@@ -172,6 +172,7 @@ int PreparePlanner::stmt_prepare(const std::string& stmt_name, const std::string
     prepare_ctx->client_conn = client;
     prepare_ctx->get_runtime_state()->set_client_conn(client);
     prepare_ctx->sql = stmt_sql;
+    prepare_ctx->charset = _ctx->charset;
 
     std::unique_ptr<LogicalPlanner> planner;
     switch (prepare_ctx->stmt_type) {
@@ -196,6 +197,11 @@ int PreparePlanner::stmt_prepare(const std::string& stmt_name, const std::string
         _ctx->stat_info.error_code = prepare_ctx->stat_info.error_code;
         _ctx->stat_info.error_msg.str(prepare_ctx->stat_info.error_msg.str());
         DB_WARNING("gen plan failed, type:%d", prepare_ctx->stmt_type);
+        return -1;
+    }
+    if (prepare_ctx->has_unable_cache_expr) {
+        _ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+        _ctx->stat_info.error_msg << "Sql has unable cache expression";
         return -1;
     }
     if (prepare_ctx->stat_info.sign == 0) {
@@ -292,7 +298,18 @@ int PreparePlanner::stmt_execute(const std::string& stmt_name, std::vector<pb::E
                                       << params.size() << ", " 
                                       << (max_placeholder_id + 1);
             return -1;
-        }        
+        }
+        if (_ctx->need_convert_charset && params[placeholder_id].node_type() == pb::STRING_LITERAL) {
+            std::string convert_str;
+            if (convert_charset(_ctx->charset, params[placeholder_id].derive_node().string_val(),
+                                _ctx->table_charset, convert_str) != 0) {
+                DB_FATAL("Fail to convert_charset, connection_charset: %d, table_charset: %d, value: %s",
+                          _ctx->charset, _ctx->table_charset, 
+                          params[placeholder_id].derive_node().string_val().c_str());
+                return -1;
+            }
+            params[placeholder_id].mutable_derive_node()->set_string_val(convert_str);
+        }
         place_holder->init(params[placeholder_id]);
     }
     _ctx->exec_prepared = true;

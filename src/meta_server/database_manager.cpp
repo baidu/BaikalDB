@@ -16,6 +16,7 @@
 #include "meta_util.h"
 #include "meta_rocksdb.h"
 #include "namespace_manager.h"
+#include "privilege_manager.h"
 
 namespace baikaldb {
 void DatabaseManager::create_database(const pb::MetaManagerRequest& request, braft::Closure* done) {
@@ -62,7 +63,19 @@ void DatabaseManager::create_database(const pb::MetaManagerRequest& request, bra
         }  
         if (!database_info.has_region_split_lines() && namespace_info.has_region_split_lines()) {
             database_info.set_region_split_lines(namespace_info.region_split_lines());
-        } 
+        }
+        if (database_info.dists().empty() && !namespace_info.dists().empty()) {
+            database_info.mutable_dists()->CopyFrom(namespace_info.dists());
+        }
+        if (!database_info.has_main_logical_room() && namespace_info.has_main_logical_room()) {
+            database_info.set_main_logical_room(namespace_info.main_logical_room());
+        }
+        if (database_info.learner_resource_tags().empty() && !namespace_info.learner_resource_tags().empty()) {
+            database_info.mutable_learner_resource_tags()->CopyFrom(namespace_info.learner_resource_tags());
+        }
+        if (database_info.binlog_infos().empty() && !namespace_info.binlog_infos().empty()) {
+            database_info.mutable_binlog_infos()->CopyFrom(namespace_info.binlog_infos());
+        }
     }
     database_info.set_version(1);
     
@@ -92,6 +105,19 @@ void DatabaseManager::create_database(const pb::MetaManagerRequest& request, bra
     NamespaceManager::get_instance()->add_database_id(namespace_id, tmp_database_id);
     IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
     DB_NOTICE("create database success, request:%s", request.ShortDebugString().c_str());
+    // 默认给创建database的user加上权限
+    add_privilege_for_database(request);
+
+}
+
+void DatabaseManager::add_privilege_for_database(const pb::MetaManagerRequest& request) {
+    if (!request.has_user_privilege()) {
+        return;
+    }
+    pb::MetaManagerRequest add_privilege_request;
+    add_privilege_request.set_op_type(pb::OP_ADD_PRIVILEGE);
+    add_privilege_request.mutable_user_privilege()->CopyFrom(request.user_privilege());
+    PrivilegeManager::get_instance()->add_privilege(add_privilege_request, nullptr);
 }
 
 void DatabaseManager::drop_database(const pb::MetaManagerRequest& request, braft::Closure* done) {
@@ -116,6 +142,10 @@ void DatabaseManager::drop_database(const pb::MetaManagerRequest& request, braft
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "database has table");
         return;
     }
+
+    // 给所有包含该database的user删除该database的权限
+    drop_privilege_for_database(request, database_id);
+
     //持久化数据
     int ret = MetaRocksdb::get_instance()->delete_meta_info(
                 std::vector<std::string>{construct_database_key(database_id)});
@@ -130,6 +160,22 @@ void DatabaseManager::drop_database(const pb::MetaManagerRequest& request, braft
     NamespaceManager::get_instance()->delete_database_id(namespace_id, database_id);
     IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
     DB_NOTICE("drop database success, request:%s", request.ShortDebugString().c_str());
+}
+
+void DatabaseManager::drop_privilege_for_database(const pb::MetaManagerRequest& request, const int64_t database_id) {
+    std::unordered_set<std::string> user_set;
+    if (PrivilegeManager::get_instance()->get_db_user_set(database_id, user_set) == 0) {
+        for (const auto& user : user_set) {
+            pb::MetaManagerRequest drop_privilege_request;
+            drop_privilege_request.set_op_type(pb::OP_DROP_PRIVILEGE);
+            pb::UserPrivilege* pri = drop_privilege_request.mutable_user_privilege();
+            pri->set_namespace_name(request.database_info().namespace_name());
+            pri->set_username(user);
+            pb::PrivilegeDatabase* pri_db = pri->add_privilege_database();
+            pri_db->set_database(request.database_info().database());
+            PrivilegeManager::get_instance()->drop_privilege(drop_privilege_request, nullptr);
+        }
+    }
 }
 
 void DatabaseManager::modify_database(const pb::MetaManagerRequest& request, braft::Closure* done) {
@@ -149,29 +195,52 @@ void DatabaseManager::modify_database(const pb::MetaManagerRequest& request, bra
     }
     int64_t database_id = _database_id_map[database_name];
     
-    pb::DataBaseInfo tmp_database_info = _database_info_map[database_id];
-    tmp_database_info.set_version(tmp_database_info.version() + 1);
-    if (database_info.has_quota()) {
-        tmp_database_info.set_quota(database_info.quota());
+    pb::DataBaseInfo tmp_database_info;
+    if (request.is_force_setting()) {
+        // 用于删除某个配置项的场景，删除时需要配置其他全部配置项
+        tmp_database_info = database_info;
+        tmp_database_info.set_database_id(database_id);
+        tmp_database_info.set_namespace_id(namespace_id);
+    } else {
+        tmp_database_info = _database_info_map[database_id];
+        if (database_info.has_quota()) {
+            tmp_database_info.set_quota(database_info.quota());
+        }
+        if (database_info.has_resource_tag()) {
+            tmp_database_info.set_resource_tag(database_info.resource_tag());
+        }
+        if (database_info.has_engine()) {
+            tmp_database_info.set_engine(database_info.engine());
+        }
+        if (database_info.has_charset()) {
+            tmp_database_info.set_charset(database_info.charset());
+        }
+        if (database_info.has_byte_size_per_record()) {
+            tmp_database_info.set_byte_size_per_record(database_info.byte_size_per_record());
+        }
+        if (database_info.has_replica_num()) {
+            tmp_database_info.set_replica_num(database_info.replica_num());
+        }
+        if (database_info.has_region_split_lines()) {
+            tmp_database_info.set_region_split_lines(database_info.region_split_lines());
+        }
+        if (!database_info.dists().empty()) {
+            tmp_database_info.mutable_dists()->CopyFrom(database_info.dists());
+        }
+        if (database_info.has_main_logical_room()) {
+            tmp_database_info.set_main_logical_room(database_info.main_logical_room());
+        }
+        if (!database_info.learner_resource_tags().empty()) {
+            tmp_database_info.mutable_learner_resource_tags()->CopyFrom(database_info.learner_resource_tags());
+        }
+        if (!database_info.binlog_infos().empty()) {
+            tmp_database_info.mutable_binlog_infos()->CopyFrom(database_info.binlog_infos());
+        }
+        if (database_info.has_partition_info_str()) {
+            tmp_database_info.set_partition_info_str(database_info.partition_info_str());
+        }
     }
-    if (database_info.has_resource_tag()) {
-        tmp_database_info.set_resource_tag(database_info.resource_tag());
-    }
-    if (database_info.has_engine()) {
-        tmp_database_info.set_engine(database_info.engine());
-    }
-    if (database_info.has_charset()) {
-        tmp_database_info.set_charset(database_info.charset());
-    }
-    if (database_info.has_byte_size_per_record()) {
-        tmp_database_info.set_byte_size_per_record(database_info.byte_size_per_record());
-    }
-    if (database_info.has_replica_num()) {
-        tmp_database_info.set_replica_num(database_info.replica_num());
-    }
-    if (database_info.has_region_split_lines()) {
-        tmp_database_info.set_region_split_lines(database_info.region_split_lines());
-    }
+    tmp_database_info.set_version(_database_info_map[database_id].version() + 1);
     std::string database_value;
     if (!tmp_database_info.SerializeToString(&database_value)) {
         DB_WARNING("request serializeToArray fail, request:%s",request.ShortDebugString().c_str());

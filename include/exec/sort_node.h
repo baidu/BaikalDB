@@ -40,6 +40,9 @@ public:
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state);
+    virtual bool can_use_arrow_vector();
+    virtual int build_arrow_declaration(RuntimeState* state);
+    int build_sort_arrow_declaration(RuntimeState* state, pb::TraceNode* trace_node = nullptr);
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
         ExecNode::transfer_pb(region_id, pb_node);
         auto sort_node = pb_node->mutable_derive_node()->mutable_sort_node();
@@ -108,7 +111,6 @@ public:
             output.back()["Extra"] += "Using filesort";
         }
     }
-
 private:
     int fill_tuple(RowBatch* batch);
 

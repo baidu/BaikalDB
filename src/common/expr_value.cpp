@@ -62,7 +62,7 @@ SerializeStatus ExprValue::serialize_to_mysql_text_packet(char* buf, size_t size
         }
         case pb::FLOAT: {
             size_t body_len = 0;
-            char tmp_buf[100] = {0};
+            char tmp_buf[24] = {0};
             if (float_precision_len == -1) {
                 body_len = snprintf(tmp_buf, sizeof(tmp_buf), "%.6g", _u.float_val);
             } else {
@@ -81,7 +81,7 @@ SerializeStatus ExprValue::serialize_to_mysql_text_packet(char* buf, size_t size
         }
         case pb::DOUBLE: {
             size_t body_len = 0;
-            char tmp_buf[100] = {0};
+            char tmp_buf[24] = {0};
             if (float_precision_len == -1) {
                 body_len = snprintf(tmp_buf, sizeof(tmp_buf), "%.12g", _u.double_val);
             } else {

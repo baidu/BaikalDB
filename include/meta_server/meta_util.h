@@ -66,18 +66,18 @@ struct IdcInfo {
 
 namespace partition_utils {
 
-constexpr char* MIN_DATE = "0000-01-01";
-constexpr char* MAX_DATE = "9999-12-31";
-constexpr char* MIN_DATETIME = "0000-01-01 00:00:00";
-constexpr char* MAX_DATETIME = "9999-12-31 23:59:59";
-constexpr char* DATE_FORMAT = "%Y-%m-%d";
-constexpr char* DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S";
-constexpr char* DAY_FORMAT = "%Y%m%d";
-constexpr char* MONTH_FORMAT = "%Y%m";
-constexpr char* PREFIX = "p";
-constexpr int32_t START_DAY_OF_MONTH = 1;
-constexpr int32_t MIN_START_DAY_OF_MONTH = 1;
-constexpr int32_t MAX_START_DAY_OF_MONTH = 28;
+static const char* MIN_DATE = "0000-01-01";
+static const char* MAX_DATE = "9999-12-31";
+static const char* MIN_DATETIME = "0000-01-01 00:00:00";
+static const char* MAX_DATETIME = "9999-12-31 23:59:59";
+static const char* DATE_FORMAT = "%Y-%m-%d";
+static const char* DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S";
+static const char* DAY_FORMAT = "%Y%m%d";
+static const char* MONTH_FORMAT = "%Y%m";
+static const char* PREFIX = "p";
+const int32_t START_DAY_OF_MONTH = 1;
+const int32_t MIN_START_DAY_OF_MONTH = 1;
+const int32_t MAX_START_DAY_OF_MONTH = 28;
 
 int64_t compare(const pb::Expr& left, const pb::Expr& right);
 pb::Expr min(const pb::Expr& left, const pb::Expr& right);
@@ -118,8 +118,17 @@ int get_partition_range(
 
 inline bool is_specified_partition(
         const pb::RangePartitionInfo& partition_info, const pb::RangePartitionInfo& new_partition_info) {
-    // 获取指定类型的热分区
-    if (!partition_info.is_cold() && !new_partition_info.is_cold() && partition_info.type() != new_partition_info.type()) {
+    // 外挂分区只和外挂分区进行比较
+    if (partition_info.type() == pb::RPT_ADDITIONAL || new_partition_info.type() == pb::RPT_ADDITIONAL) {
+        if (partition_info.type() == new_partition_info.type()) {
+            return true;
+        } else {
+            return false;
+        }
+    }
+    // 获取指定类型的热分区，热分区也需要和冷分区进行比较
+    if (!partition_info.is_cold() && !new_partition_info.is_cold() && 
+            partition_info.type() != new_partition_info.type()) {
         return false;
     }
     return true;

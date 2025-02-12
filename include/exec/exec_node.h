@@ -36,6 +36,32 @@ inline bool is_dml_op_type(const pb::OpType& op_type) {
         }
         return false;
     }
+inline bool is_cold_data_op_type(const pb::OpType& op_type) {
+        if (op_type != pb::OP_SELECT 
+             && op_type != pb::OP_TRUNCATE_TABLE
+             && op_type != pb::OP_SELECT_FOR_UPDATE
+             && op_type != pb::OP_ROLLUP_REGION_INIT
+             && op_type != pb::OP_ROLLUP_REGION_FINISH
+             && op_type != pb::OP_ROLLUP_REGION_FAILED) {
+            return true;
+        }
+        return false;
+    }
+inline bool is_unsupport_rollup_ddl_type(const pb::StoreReq* request) {
+        if (request->op_type() == pb::OP_DELETE
+             || request->op_type() == pb::OP_UPDATE) {
+            return true;
+        }
+        if (request->op_type() == pb::OP_INSERT) {
+            for (int i = 0; i < request->plan().nodes_size(); ++i) {
+                const auto& node = request->plan().nodes(i);
+                if (node.derive_node().insert_node().is_merge() == false) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
 inline bool is_2pc_op_type(const pb::OpType& op_type) {
     if (op_type == pb::OP_PREPARE
             || op_type == pb::OP_ROLLBACK
@@ -70,8 +96,12 @@ public:
     virtual int predicate_pushdown(std::vector<ExprNode*>& input_exprs);
 
     virtual void remove_additional_predicate(std::vector<ExprNode*>& input_exprs);
-    void add_filter_node(const std::vector<ExprNode*>& input_exprs);
+    // 在计划树中插入一个filter node，filter node是该节点的父节点
+    void add_filter_node(const std::vector<ExprNode*>& input_exprs, pb::PlanNodeType type = pb::TABLE_FILTER_NODE);
+    // 在计划树中插入一个filter node，filter node是该节点的子节点
+    void add_filter_node_as_child(const std::vector<ExprNode*>& input_exprs, pb::PlanNodeType type = pb::TABLE_FILTER_NODE);
     
+    virtual void get_all_dual_scan_node(std::vector<ExecNode*>& exec_nodes);
     void get_node(const pb::PlanNodeType node_type, std::vector<ExecNode*>& exec_nodes);
     ExecNode* get_node(const pb::PlanNodeType node_type);
     ExecNode* get_parent() {
@@ -102,6 +132,8 @@ public:
     virtual void close(RuntimeState* state) {
         _num_rows_returned = 0;
         _return_empty = false;
+        _delay_fetcher_store = false;
+        _node_exec_type = pb::EXEC_ROW;
         for (auto e : _children) {
             e->close(state);
         }
@@ -300,6 +332,52 @@ public:
     bool is_get_keypoint() {
         return _is_get_keypoint;
     }
+    void add_num_rows_returned(int64_t row) {
+        _num_rows_returned += row;
+    }
+    bool is_return_empty() {
+        return _return_empty;
+    }
+    // for vectorized execute
+    virtual bool can_use_arrow_vector() {
+        return false;
+    }
+    virtual int build_arrow_declaration(RuntimeState* state) {
+        DB_FATAL_STATE(state, "not support type: %d", _node_type);
+        return -1;
+    }
+    void set_node_exec_type(const pb::ExecuteType& type) {
+        _node_exec_type = type;
+    }
+
+    void set_delay_fetcher_store(bool delay) {
+        _delay_fetcher_store = delay;
+    }
+
+    bool is_delay_fetcher_store() {
+        return _delay_fetcher_store;
+    }
+
+    pb::ExecuteType node_exec_type() {
+        return _node_exec_type;
+    }
+
+    // [ARROW] 临时用, 后续会删除
+    ExecNode* vec_get_limit_node() {
+        if (_node_type == pb::LIMIT_NODE) {
+            return this;
+        } else if (_node_type == pb::UNION_NODE) {
+            return nullptr;
+        } else {
+            for (auto c : _children) {
+                ExecNode* node = c->vec_get_limit_node();
+                if (node != nullptr) {
+                    return node;
+                }
+            }
+            return nullptr;
+        }
+    }
 protected:
     int64_t _limit = -1;
     int64_t _num_rows_returned = 0;
@@ -315,10 +393,14 @@ protected:
     bool  _local_index_binlog = false;
     bool  _is_manual = false;
     std::vector<int64_t> _partitions {0};
+
+    pb::ExecuteType _node_exec_type = pb::EXEC_ROW;  // node实际上执行的类型
+    bool _delay_fetcher_store = false;
     
     //返回给baikaldb的结果
     std::map<int64_t, std::vector<SmartRecord>> _return_old_records;
     std::map<int64_t, std::vector<SmartRecord>> _return_records;
+
 private:
     static int create_tree(const pb::Plan& plan, int* idx, ExecNode* parent, 
                            ExecNode** root);

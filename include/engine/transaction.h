@@ -30,6 +30,7 @@
 
 namespace baikaldb {
 DECLARE_bool(disable_wal);
+DECLARE_bool(leader_merge_in_raft);
 class ReverseIndexBase;
 
 typedef std::map<int, pb::CachePlan> CachePlanMap;
@@ -127,9 +128,8 @@ public:
 
     // UNIQUE INDEX format: <region_id + index_id + null_flag + index_fields, primary_key>
     // NON-UNIQUE INDEX format: <region_id + index_id + null_flag + index_fields + primary_key, NULL>
-    int put_secondary(int64_t region, IndexInfo& index, SmartRecord record);
+    int put_secondary(int64_t region, IndexInfo& index, SmartRecord record, bool is_rollup_base = false);
     int put_meta_info(const std::string& key, const std::string& value);
-    
     int remove_meta_info(const std::string& key);
     // TODO: update return status
     // Return -2 if key not found
@@ -319,6 +319,20 @@ public:
         _in_process = flag;
     }
 
+    bool is_merge() const {
+        return _is_merge;
+    }
+    void set_is_merge(bool is_merge) {
+        _is_merge = is_merge;
+    }
+
+    bool leader_merge_in_raft() const {
+        return _leader_merge_in_raft;
+    }
+    void set_leader_merge_in_raft(bool leader_merge_in_raft) {
+        _leader_merge_in_raft = leader_merge_in_raft;
+    }
+
     int64_t prepare_time_us() {
         return _prepare_time_us;
     }
@@ -450,10 +464,13 @@ public:
         return _online_ttl_base_expire_time_us;
     }
 
+    void set_watt_stats_version(uint64_t version) {
+        _watt_stats_version = version;
+    }
+
     void set_use_ttl(bool use_ttl) { _use_ttl = use_ttl; }
     bool use_ttl() const { return _use_ttl; }
     bool use_cold_db() const { return _use_cold_db; }
-
     static int get_full_primary_key(
             rocksdb::Slice  index_bytes, 
             rocksdb::Slice  pk_bytes,
@@ -604,13 +621,16 @@ private:
         kv_op->set_ttl_timestamp_us(ttl_timestamp_us);
     }
 
-    void add_kvop_merge(std::string& key, std::string& value) {
+    void add_kvop_merge(std::string& key, std::string& value, uint64_t watt_stats_version) {
         //DB_WARNING("txn:%p, add kvop put key:%s, value:%s", this,
         //           str_to_hex(key).c_str(), str_to_hex(value).c_str());
         pb::KvOp* kv_op = _store_req.add_kv_ops();
         kv_op->set_op_type(pb::OP_MERGE_KV);
         kv_op->set_key(key);
         kv_op->set_value(value);
+        if (watt_stats_version > 0) {
+            _store_req.mutable_extra_req()->set_watt_stats_version(watt_stats_version);
+        }
     }
     
     void add_kvop_delete(std::string& key, bool is_primary_key) {
@@ -671,6 +691,9 @@ private:
     int64_t                         _txn_time_cost = 0;
     std::set<ReverseIndexBase*>     _reverse_set;
     bool                            _use_cold_db = false;
+    uint64_t                        _watt_stats_version = 0;
+    bool                            _is_merge = false;
+    bool                            _leader_merge_in_raft = false; // insert merge into 时 leader是否在状态机中执行，当_is_merge为true时该标记才生效
 };
 
 typedef std::shared_ptr<Transaction> SmartTransaction;

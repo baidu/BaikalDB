@@ -21,12 +21,15 @@
 #include "network_socket.h"
 #include "scalar_fn_call.h"
 #include "parser.h"
+#include "external_filesystem.h"
 
 namespace baikaldb {
 int InformationSchema::init() {
     init_partition_split_info();
     init_region_status();
     init_learner_region_status();
+    init_olap_tables();
+    init_afs_partitions();
     init_invalid_learner_region();
     init_columns();
     init_statistics();
@@ -90,6 +93,7 @@ int InformationSchema::init() {
     init_tablespaces();
     init_user_privileges();
     init_binlog_region_infos();
+    init_db_infos();
     return 0;
 }
 
@@ -164,7 +168,7 @@ void InformationSchema::init_partition_split_info() {
             if (index_ptr->fields.size() < 2) {
                 return records;
             }
-            std::map<std::string, pb::RegionInfo> region_infos;
+            std::vector< pb::RegionInfo> region_infos;
             factory->get_all_region_by_table_id(condition_table_id, &region_infos);
             std::string last_partition_key;
             std::vector<std::string> last_keys;
@@ -181,8 +185,8 @@ void InformationSchema::init_partition_split_info() {
             pb::QueryRequest req;
             pb::QueryResponse res;
             req.set_op_type(pb::QUERY_REGION);
-            for (auto& pair : region_infos) {
-                TableKey start_key(pair.second.start_key());
+            for (auto& region_info : region_infos) {
+                TableKey start_key(region_info.start_key());
                 int pos = 0;
                 partition_key = start_key.decode_start_key_string(type1, pos);
                 if (partition_key != last_partition_key) {
@@ -204,8 +208,8 @@ void InformationSchema::init_partition_split_info() {
                     last_region_ids.emplace_back(last_id);
                 }
                 last_keys.emplace_back(start_key.decode_start_key_string(type2, pos));
-                last_region_ids.emplace_back(pair.second.region_id());
-                last_id = pair.second.region_id();
+                last_region_ids.emplace_back(region_info.region_id());
+                last_id = region_info.region_id();
             }
             if (last_keys.size() > 1) {
                 for (auto id : last_region_ids) {
@@ -298,11 +302,10 @@ void InformationSchema::init_region_status() {
             if (index_ptr == nullptr) {
                 return records;
             }
-            std::map<std::string, pb::RegionInfo> region_infos;
+            std::vector<pb::RegionInfo> region_infos;
             factory->get_all_region_by_table_id(condition_table_id, &region_infos);
             records.reserve(region_infos.size());
-            for (auto& pair : region_infos) {
-                auto& region = pair.second;
+            for (auto& region : region_infos) {
                 TableKey start_key(region.start_key());
                 TableKey end_key(region.end_key());
                 auto record = factory->new_record(table_id);
@@ -466,6 +469,14 @@ void InformationSchema::query_regions_concurrency(std::unordered_map<int64_t, st
     }
 }
 
+/**
+ * @brief 处理 binlogs 中的 region 信息
+ *
+ * 将给定的 binlogs 数据进行处理，从中提取 region 信息，并将结果存储在 result_rows 中。
+ *
+ * @param result_rows 结果行的向量
+ * @param table_id_to_query_info 表格 ID 到查询信息的哈希表
+ */
 void InformationSchema::process_binlogs_region_info(std::vector<std::vector<std::string>>& result_rows, std::unordered_map<int64_t, 
     std::unordered_map<int64_t, std::vector<pb::StoreRes>>>& table_id_to_query_info) {
     for (const auto& region_id_peers_info: table_id_to_query_info) {
@@ -529,6 +540,7 @@ void InformationSchema::init_learner_region_status() {
         {"olap_state", pb::STRING},
         {"external_full_path", pb::STRING},
         {"path_diff", pb::INT64},
+        {"region_size", pb::INT64},
     };
     int64_t table_id = construct_table("REGION_INFO", fields);
     // 定义操作
@@ -682,6 +694,7 @@ void InformationSchema::init_learner_region_status() {
                         }
                         record->set_string(record->get_field_by_name("external_full_path"), files);
                         record->set_int64(record->get_field_by_name("path_diff"), info.path_diff());
+                        record->set_int64(record->get_field_by_name("region_size"), info.region_size());
                         records.emplace_back(record);
                     }
 
@@ -689,6 +702,233 @@ void InformationSchema::init_learner_region_status() {
                 bth.run(func);
             }
             bth.join();  
+            return records;
+    };
+}
+
+/**
+ * @brief 初始化 OLAP 表的函数
+ *
+ * 初始化 OLAP 表，用于存储和管理 OLAP 相关的数据。
+ */
+void InformationSchema::init_olap_tables() {
+    // 定义字段信息
+    FieldVec fields {
+        {"database_name", pb::STRING},
+        {"table_name", pb::STRING},
+        {"time_unit", pb::STRING},
+        {"start", pb::STRING},
+        {"cold", pb::STRING},
+        {"end", pb::STRING},
+        {"isolation", pb::STRING},
+        {"primary_range_partition_type", pb::STRING},
+        {"gen_range_partition_types", pb::STRING},
+        {"switch_table", pb::STRING},
+        {"rollup_hot_range", pb::STRING},
+        {"watt_hot_range", pb::STRING},
+        {"add_column", pb::STRING},
+        {"month2day", pb::STRING},
+        {"month_all_cold", pb::STRING}, // 当month2day为TRUE时，该字段有效
+        {"has_additional", pb::STRING},
+    };
+    int64_t table_id = construct_table("OLAP_TABLES", fields);
+    // 定义操作
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) -> 
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            if (state->client_conn() == nullptr) {
+                return records;
+            }
+            std::string namespace_ = state->client_conn()->user_info->namespace_;
+            std::string table_name;
+            auto* factory = SchemaFactory::get_instance();
+            auto tb_vec = factory->get_table_list(namespace_, state->client_conn()->user_info.get());
+            records.reserve(tb_vec.size());
+            for (const auto& table_info : tb_vec) {
+                std::vector<std::string> items;
+                boost::split(items, table_info->name, boost::is_any_of("."));
+                std::string db = items[0];
+                if (table_info->partition_info.has_dynamic_partition_attr()) {
+                    const auto& dynamic_partition_attr = table_info->partition_info.dynamic_partition_attr();
+                    if (!dynamic_partition_attr.has_enable() || dynamic_partition_attr.enable() == false) {
+                        continue;
+                    }
+
+                    auto record = factory->new_record(table_id);
+                    record->set_string(record->get_field_by_name("database_name"), db);
+                    record->set_string(record->get_field_by_name("table_name"), table_info->short_name);
+                    if (dynamic_partition_attr.has_time_unit()) {
+                        record->set_string(record->get_field_by_name("time_unit"), dynamic_partition_attr.time_unit());
+                    } else {
+                        record->set_string(record->get_field_by_name("time_unit"), "NULL");
+                    }
+                    if (dynamic_partition_attr.has_start()) {
+                        record->set_string(record->get_field_by_name("start"), std::to_string(dynamic_partition_attr.start()));
+                    } else {
+                        record->set_string(record->get_field_by_name("start"), "NULL");
+                    }
+                    if (dynamic_partition_attr.has_cold()) {
+                        record->set_string(record->get_field_by_name("cold"), std::to_string(dynamic_partition_attr.cold()));
+                    } else {
+                        record->set_string(record->get_field_by_name("cold"), "NULL");
+                    }
+                    if (dynamic_partition_attr.has_end()) {
+                        record->set_string(record->get_field_by_name("end"), std::to_string(dynamic_partition_attr.end()));
+                    } else {
+                        record->set_string(record->get_field_by_name("end"), "NULL");
+                    }
+                    if (dynamic_partition_attr.has_isolation()) {
+                        record->set_string(record->get_field_by_name("isolation"), dynamic_partition_attr.isolation());
+                    } else {
+                        record->set_string(record->get_field_by_name("isolation"), "NULL");
+                    }
+                    if (table_info->partition_info.has_primary_range_partition_type()) {
+                        record->set_string(record->get_field_by_name("primary_range_partition_type"), 
+                            pb::RangePartitionType_Name(table_info->partition_info.primary_range_partition_type()));
+                    } else {
+                        record->set_string(record->get_field_by_name("primary_range_partition_type"), "NULL");
+                    }
+                    if (state->client_conn()->user_info->switch_tables.count(table_info->id) > 0) {
+                        record->set_string(record->get_field_by_name("switch_table"), "TRUE");
+                    } else {
+                        record->set_string(record->get_field_by_name("switch_table"), "FALSE");
+                    }
+                    const size_t type_size = table_info->partition_info.gen_range_partition_types().size();
+                    if (type_size > 0) {
+                        std::string types;
+                        for (size_t i = 0; i < type_size; ++i) {
+                            types += pb::RangePartitionType_Name(table_info->partition_info.gen_range_partition_types(i));
+                            types += ",";
+                        }
+                        types.pop_back();
+                        record->set_string(record->get_field_by_name("gen_range_partition_types"), types);
+                    } else {
+                        record->set_string(record->get_field_by_name("gen_range_partition_types"), "NULL");
+                    }
+
+                    // 计算rollup/watt的hot range
+                    if (table_info->is_range_partition) {
+                        RangePartition* partition_ptr = static_cast<RangePartition*>(table_info->partition_ptr.get());
+                        std::map<std::string, std::string> rollup_active_range;
+                        partition_ptr->get_active_range(rollup_active_range, pb::RPT_DEFAULT, "");
+                        std::map<std::string, std::string> watt_active_range;
+                        partition_ptr->get_active_range(watt_active_range, pb::RPT_NEW_StatsEngine, "");
+                        if (rollup_active_range.empty()) {
+                            record->set_string(record->get_field_by_name("rollup_hot_range"), "NULL");
+                        } else {
+                            std::string active_range;
+                            for (const auto& iter : rollup_active_range) {
+                                active_range += "[" + iter.first + ", " + iter.second + ")";
+                            }
+                            record->set_string(record->get_field_by_name("rollup_hot_range"), active_range);
+                        }
+
+                        if (watt_active_range.empty()) {
+                            record->set_string(record->get_field_by_name("watt_hot_range"), "NULL");
+                        } else {
+                            std::string active_range;
+                            for (const auto& iter : watt_active_range) {
+                                active_range += "[" + iter.first + ", " + iter.second + ")";
+                            }
+                            record->set_string(record->get_field_by_name("watt_hot_range"), active_range);
+                        }
+                    } else {
+                        record->set_string(record->get_field_by_name("rollup_hot_range"), "NULL");
+                        record->set_string(record->get_field_by_name("watt_hot_range"), "NULL");
+                    }
+
+                    // 计算是否加过列
+                    int version_field_id = -1;
+                    int max_field_id = -1;
+                    for (const auto& field : table_info->fields) {
+                        if (field.lower_short_name == "__version__") {
+                            version_field_id = field.id;
+                        }
+                        if (field.id > max_field_id) {
+                            max_field_id = field.id;
+                        }
+                    }
+                    if (max_field_id > version_field_id) {
+                        record->set_string(record->get_field_by_name("add_column"), "TRUE");
+                    } else {
+                        record->set_string(record->get_field_by_name("add_column"), "FALSE");
+                    }
+
+                    // 判断是否为月表转天表
+                    if (table_info->is_range_partition) {
+                        bool has_month_partition = false;
+                        bool month_all_cold = true;
+                        RangePartition* partition_ptr = static_cast<RangePartition*>(table_info->partition_ptr.get());
+                        for (const auto& range : partition_ptr->ranges()) {
+                            // p202403 or p202403_RPT_NEW_StatsEngine
+                            if (range.partition_name.size() == 7 || range.partition_name.size() == 27) {
+                                has_month_partition = true;
+                                if (!range.is_cold) {
+                                    month_all_cold = false;
+                                }
+                            }
+                        }
+                        if (partition_ptr->additional_ranges().size() > 0) {
+                            record->set_string(record->get_field_by_name("has_additional"), "TRUE");
+                        } else {
+                            record->set_string(record->get_field_by_name("has_additional"), "FALSE");
+                        }
+                        if (has_month_partition && dynamic_partition_attr.has_time_unit() && dynamic_partition_attr.time_unit() == "DAY") {
+                            record->set_string(record->get_field_by_name("month2day"), "TRUE");
+                        } else {
+                            record->set_string(record->get_field_by_name("month2day"), "FALSE");
+                        }
+                        if (month_all_cold) {
+                            record->set_string(record->get_field_by_name("month_all_cold"), "TRUE");
+                        } else {
+                            record->set_string(record->get_field_by_name("month_all_cold"), "FALSE");
+                        }
+                    } else {
+                        record->set_string(record->get_field_by_name("month2day"), "FALSE");
+                    }
+
+                    records.emplace_back(record);
+                }
+            }
+            return records;
+    };
+}
+
+void InformationSchema::init_afs_partitions() {
+    // 定义字段信息
+    FieldVec fields {
+        {"table_name", pb::STRING},
+        {"table_id", pb::INT64},
+        {"partition", pb::STRING},
+    };
+    int64_t table_id = construct_table("AFS_PARTITIONS", fields);
+    // 定义操作
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) -> 
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            if (state->client_conn() == nullptr) {
+                return records;
+            }
+
+            std::map<int64_t, std::map<std::string, std::set<std::string>>> table_id_name_partitions;
+            int ret = ExtFileSystemGC::get_all_partitions_from_store(table_id_name_partitions);
+            if (ret < 0) {
+                DB_WARNING("get all partitions from store failed");
+                return records;
+            }
+            for (const auto& table_id_name_partitions_pair : table_id_name_partitions) {
+                for (const auto& name_partitions_pair : table_id_name_partitions_pair.second) {
+                    const std::string& table_name = name_partitions_pair.first;
+                    for (const auto& partition : name_partitions_pair.second) {
+                        auto record = SchemaFactory::get_instance()->new_record(table_id);
+                        record->set_string(record->get_field_by_name("table_name"), table_name);
+                        record->set_int64(record->get_field_by_name("table_id"), table_id_name_partitions_pair.first);
+                        record->set_string(record->get_field_by_name("partition"), partition);
+                        records.emplace_back(record);
+                    }
+                }
+            }
+            
             return records;
     };
 }
@@ -1136,7 +1376,7 @@ void InformationSchema::init_schemata() {
                 return records;
             }
             auto* factory = SchemaFactory::get_instance();
-            std::vector<std::string> db_vec =  factory->get_db_list(state->client_conn()->user_info->all_database);
+            std::vector<std::string> db_vec =  factory->get_db_list(state->client_conn()->user_info);
             records.reserve(db_vec.size());
             for (auto& db : db_vec) {
                 auto record = factory->new_record(table_id);
@@ -1174,6 +1414,7 @@ void InformationSchema::init_tables() {
         {"CREATE_OPTIONS", pb::STRING},
         {"TABLE_COMMENT", pb::STRING},
         {"TABLE_ID", pb::INT64},
+        {"BINLOG_IDS", pb::STRING}
     };
     int64_t table_id = construct_table("TABLES", fields);
     // 定义操作
@@ -1196,8 +1437,8 @@ void InformationSchema::init_tables() {
                 record->set_string(record->get_field_by_name("TABLE_CATALOG"), "def");
                 record->set_string(record->get_field_by_name("TABLE_SCHEMA"), db);
                 record->set_string(record->get_field_by_name("TABLE_NAME"), table_info->short_name);
-                record->set_string(record->get_field_by_name("TABLE_TYPE"), "BASE TABLE");
-                record->set_string(record->get_field_by_name("ENGINE"), "InnoDB");
+                record->set_string(record->get_field_by_name("TABLE_TYPE"), table_info->is_view ? "VIEW" : "BASE TABLE");
+                record->set_string(record->get_field_by_name("ENGINE"), "Innodb");
                 record->set_int64(record->get_field_by_name("VERSION"), table_info->version);
                 record->set_string(record->get_field_by_name("ROW_FORMAT"), "Compact");
                 record->set_int64(record->get_field_by_name("TABLE_ROWS"), 0);
@@ -1218,6 +1459,16 @@ void InformationSchema::init_tables() {
                 record->set_string(record->get_field_by_name("CREATE_OPTIONS"), "");
                 record->set_string(record->get_field_by_name("TABLE_COMMENT"), "");
                 record->set_int64(record->get_field_by_name("TABLE_ID"), table_info->id);
+                std::string binlog_ids_str;
+                if (table_info->is_linked) {
+                    for (const auto& [binlog_id, _] : table_info->binlog_ids) {
+                        binlog_ids_str += std::to_string(binlog_id) + ",";
+                    }
+                    if (!binlog_ids_str.empty()) {
+                        binlog_ids_str.pop_back();
+                    }
+                }
+                record->set_string(record->get_field_by_name("BINLOG_IDS"), binlog_ids_str);
                 records.emplace_back(record);
             }
             return records;
@@ -1283,7 +1534,9 @@ void InformationSchema::init_sign_list() {
 
     int64_t blacklist_table_id = construct_table("SIGN_BLACKLIST", fields);
     int64_t forcelearner_table_id = construct_table("SIGN_FORCELEARNER", fields);
+    int64_t rolling_table_id = construct_table("SIGN_ROLLING", fields);
     int64_t forceindex_table_id = construct_table("SIGN_FORCEINDEX", fields);
+    int64_t exec_type_table_id = construct_table("SIGN_EXEC_TYPE", fields);
     //定义操作
     _calls[blacklist_table_id] = [blacklist_table_id](RuntimeState* state,std::vector<ExprNode*>& conditions) -> 
             std::vector <SmartRecord> {
@@ -1320,6 +1573,33 @@ void InformationSchema::init_sign_list() {
         auto func = [&records, &forcelearner_table](const SmartTable& table) -> bool {
             for (auto sign : table->sign_forcelearner) {
                 auto record = SchemaFactory::get_instance()->new_record(*forcelearner_table);
+                record->set_string(record->get_field_by_name("namespace"), table->namespace_);
+                std::string db_name;
+                std::vector<std::string> vec;
+                boost::split(vec, table->name, boost::is_any_of("."));
+                if (!vec.empty()) {
+                    db_name = vec[0];
+                }
+                record->set_string(record->get_field_by_name("database_name"), db_name);
+                record->set_string(record->get_field_by_name("table_name"),table->short_name);
+                record->set_string(record->get_field_by_name("sign"), std::to_string(sign));
+                records.emplace_back(record);
+            }
+            return false;
+        };
+        std::vector<std::string> database_table;
+        SchemaFactory::get_instance()->get_table_by_filter(database_table, func);
+        return records;
+    };
+
+    _calls[rolling_table_id] = [rolling_table_id](RuntimeState* state,std::vector<ExprNode*>& conditions) -> 
+            std::vector <SmartRecord> {
+        std::vector <SmartRecord> records;
+        records.reserve(10);
+        auto rolling_table = SchemaFactory::get_instance()->get_table_info_ptr(rolling_table_id);
+        auto func = [&records, &rolling_table](const SmartTable& table) -> bool {
+            for (auto sign : table->sign_rolling) {
+                auto record = SchemaFactory::get_instance()->new_record(*rolling_table);
                 record->set_string(record->get_field_by_name("namespace"), table->namespace_);
                 std::string db_name;
                 std::vector<std::string> vec;
@@ -1383,6 +1663,40 @@ void InformationSchema::init_sign_list() {
                 }
                 record->set_string(record->get_field_by_name("database_name"), db_name);
                 record->set_string(record->get_field_by_name("table_name"),table->short_name);
+                record->set_string(record->get_field_by_name("sign"), sign_index);
+                records.emplace_back(record);
+            }
+            return false;
+        };
+        std::vector<std::string> database_table;
+        std::vector<std::string> binlog_table;
+        SchemaFactory::get_instance()->get_table_by_filter(database_table, func);
+        return records;
+    };
+
+    _calls[exec_type_table_id] = [exec_type_table_id](RuntimeState* state,std::vector<ExprNode*>& conditions) ->
+            std::vector <SmartRecord> {
+        std::vector <SmartRecord> records;
+        records.reserve(10);
+        auto exec_type_table = SchemaFactory::get_instance()->get_table_info_ptr(exec_type_table_id);
+        auto func = [&records, &exec_type_table](const SmartTable& table) -> bool {
+            for (auto sign_index : table->sign_exec_type) {
+                auto record = SchemaFactory::get_instance()->new_record(*exec_type_table);
+                record->set_string(record->get_field_by_name("namespace"), table->namespace_);
+                std::string db_name;
+                std::vector<std::string> vec;
+                boost::split(vec, table->name, boost::is_any_of("."));
+                if (!vec.empty()) {
+                    db_name = vec[0];
+                }
+                record->set_string(record->get_field_by_name("database_name"), db_name);
+                record->set_string(record->get_field_by_name("table_name"),table->short_name);
+                vec.clear();
+                boost::split(vec, sign_index, boost::is_any_of(":"));
+                if (vec.size() == 2) {
+                    uint64_t exec_type = strtoll(vec[1].c_str(), NULL, 10);
+                    sign_index = vec[0] + ": " + explain_type_to_str(exec_type);
+                }
                 record->set_string(record->get_field_by_name("sign"), sign_index);
                 records.emplace_back(record);
             }
@@ -1482,15 +1796,44 @@ void InformationSchema::init_views() {
         {"CHECK_OPTION", pb::STRING},
         {"IS_UPDATABLE", pb::STRING},
         {"DEFINER", pb::STRING},
-        {"SECURITY_TYPE", pb::INT64},
+        {"SECURITY_TYPE", pb::STRING},
         {"CHARACTER_SET_CLIENT", pb::STRING},
         {"COLLATION_CONNECTION", pb::STRING},
     };
     int64_t table_id = construct_table("VIEWS", fields);
     // 定义操作
-    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) ->
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) -> 
         std::vector<SmartRecord> {
             std::vector<SmartRecord> records;
+            if (state->client_conn() == nullptr) {
+                return records;
+            }
+            std::string namespace_ = state->client_conn()->user_info->namespace_;
+            std::string table_name;
+            auto* factory = SchemaFactory::get_instance();
+            auto tb_vec = factory->get_table_list(namespace_, state->client_conn()->user_info.get());
+            records.reserve(tb_vec.size());
+
+            for (auto& table_info : tb_vec) {
+                if (!table_info->is_view) {
+                    continue;
+                }
+                std::vector<std::string> items;
+                boost::split(items, table_info->name, boost::is_any_of("."));
+                std::string db = items[0];
+                auto record = factory->new_record(table_id);
+                record->set_string(record->get_field_by_name("TABLE_CATALOG"), "def");
+                record->set_string(record->get_field_by_name("TABLE_SCHEMA"), db);
+                record->set_string(record->get_field_by_name("TABLE_NAME"), table_info->short_name);
+                record->set_string(record->get_field_by_name("VIEW_DEFINITION"), table_info->view_select_stmt);
+                record->set_string(record->get_field_by_name("CHECK_OPTION"), "NONE");
+                record->set_string(record->get_field_by_name("IS_UPDATABLE"), "YES");
+                record->set_string(record->get_field_by_name("DEFINER"), "NULL");
+                record->set_string(record->get_field_by_name("SECURITY_TYPE"), "0");
+                record->set_string(record->get_field_by_name("CHARACTER_SET_CLIENT"), "utf8");
+                record->set_string(record->get_field_by_name("COLLATION_CONNECTION"), "utf8_bin");
+                records.emplace_back(record);
+            }
             return records;
     };
 }
@@ -2486,4 +2829,161 @@ void InformationSchema::init_user_privileges() {
             return records;
     };
 }
+
+void InformationSchema::init_db_infos() {
+    FieldVec fields {
+        {"NAMESPACE", pb::STRING},
+        {"DATABASE_NAME", pb::STRING},
+        {"ENGINE", pb::STRING},
+        {"DEFAULT_CHARSET_SET_NAME", pb::STRING},
+        {"AVG_ROW_LENGTH", pb::INT64},
+        {"REPLICA_NUM", pb::INT64},
+        {"REGION_SPLIT_LINES", pb::INT64},
+        {"RESOURCE_TAG", pb::STRING},
+        {"DISTS", pb::STRING},
+        {"MAIN_LOGICAL_ROOM", pb::STRING},
+        {"LEARNER_RESOURCE_TAGS", pb::STRING},
+        {"BINLOG_INFOS", pb::STRING},
+        {"PARTITION_INFO_STR", pb::STRING}
+    };
+    int64_t table_id = construct_table("DB_INFOS", fields);
+    _calls[table_id] = [table_id](RuntimeState* state, std::vector<ExprNode*>& conditions) -> 
+        std::vector<SmartRecord> {
+            std::vector<SmartRecord> records;
+            if (state->client_conn() == nullptr) {
+                return records;
+            }
+            auto* factory = SchemaFactory::get_instance();
+            if (factory == nullptr) {
+                return records;
+            }
+            const std::set<int64_t>& db_id_list = factory->get_db_id_list(state->client_conn()->user_info);
+            for (const auto& db_id : db_id_list) {
+                auto record = factory->new_record(table_id);
+                if (record == nullptr) {
+                    return records;
+                }
+                DatabaseInfo db_info = factory->get_db_info(db_id);
+                if (db_info.id == -1) {
+                    continue;
+                }
+                record->set_string(record->get_field_by_name("NAMESPACE"), db_info.namespace_);
+                record->set_string(record->get_field_by_name("DATABASE_NAME"), db_info.name);
+                if (db_info.has_engine) {
+                    record->set_string(record->get_field_by_name("ENGINE"), pb::Engine_Name(db_info.engine));
+                }
+                if (db_info.has_charset) {
+                    record->set_string(record->get_field_by_name("DEFAULT_CHARSET_SET_NAME"), pb::Charset_Name(db_info.charset));
+                }
+                if (db_info.byte_size_per_record > 0) {
+                    record->set_int64(record->get_field_by_name("AVG_ROW_LENGTH"), db_info.byte_size_per_record);
+                }
+                if (db_info.replica_num > 0) {
+                    record->set_int64(record->get_field_by_name("REPLICA_NUM"), db_info.replica_num);
+                }
+                if (db_info.region_split_lines > 0) {
+                    record->set_int64(record->get_field_by_name("REGION_SPLIT_LINES"), db_info.region_split_lines);
+                }
+                if (!db_info.resource_tag.empty()) {
+                    record->set_string(record->get_field_by_name("RESOURCE_TAG"), db_info.resource_tag);
+                }
+                if (!db_info.main_logical_room.empty()) {
+                    record->set_string(record->get_field_by_name("MAIN_LOGICAL_ROOM"), db_info.main_logical_room);
+                }
+                if (!db_info.partition_info_str.empty()) {
+                    record->set_string(record->get_field_by_name("PARTITION_INFO_STR"), db_info.partition_info_str);
+                }
+                std::string learner_resource_tag_str;
+                if (db_info.learner_resource_tags.size() > 0) {
+                    learner_resource_tag_str += "[";
+                    for (size_t i = 0; i < db_info.learner_resource_tags.size(); ++i) {
+                        learner_resource_tag_str += "\"" + db_info.learner_resource_tags[i] + "\"";
+                        if (i != db_info.learner_resource_tags.size() - 1) {
+                            learner_resource_tag_str += ",";
+                        }
+                    }
+                    learner_resource_tag_str += "]";
+                }
+                if (!learner_resource_tag_str.empty()) {
+                    record->set_string(record->get_field_by_name("LEARNER_RESOURCE_TAGS"), learner_resource_tag_str);
+                }
+                std::string dists_str;
+                if (db_info.dists.size() > 0) {
+                    dists_str += "[";
+                    for (size_t i = 0; i < db_info.dists.size(); ++i) {
+                        dists_str += "{";
+                        if (!db_info.dists[i].resource_tag.empty()) {
+                            dists_str += "\"resource_tag\":\"";
+                            dists_str += db_info.dists[i].resource_tag;
+                            dists_str += "\",";
+                        }
+                        if (!db_info.dists[i].logical_room.empty()) {
+                            dists_str += "\"logical_room\":\"";
+                            dists_str += db_info.dists[i].logical_room;
+                            dists_str += "\",";
+                        }
+                        if (!db_info.dists[i].physical_room.empty()) {
+                            dists_str += "\"physical_room\":\"";
+                            dists_str += db_info.dists[i].physical_room;
+                            dists_str += "\",";
+                        }
+                        dists_str += "\"count\":"; 
+                        dists_str += std::to_string(db_info.dists[i].count);
+                        dists_str += "}";
+                        if (i != db_info.dists.size() - 1) {
+                            dists_str += ",";
+                        }
+                    }
+                    dists_str += "]";
+                }
+                if (!dists_str.empty()) {
+                    record->set_string(record->get_field_by_name("DISTS"), dists_str);
+                }
+                std::string binlog_infos_str;
+                if (db_info.binlog_infos.size() > 0) {
+                    binlog_infos_str += "[";
+                    for (size_t i = 0; i < db_info.binlog_infos.size(); ++i) {
+                        binlog_infos_str += "{";
+                        std::string binlog_infos_inner_str;
+                        if (db_info.binlog_infos[i].has_database()) {
+                            binlog_infos_inner_str += "\"database\":\"";
+                            binlog_infos_inner_str += db_info.binlog_infos[i].database();
+                            binlog_infos_inner_str += "\",";
+                        }
+                        if (db_info.binlog_infos[i].has_table_name()) {
+                            binlog_infos_inner_str += "\"table_name\":\"";
+                            binlog_infos_inner_str += db_info.binlog_infos[i].table_name();
+                            binlog_infos_inner_str += "\",";
+                        }
+                        if (db_info.binlog_infos[i].has_link_field() 
+                                && db_info.binlog_infos[i].link_field().has_field_name()) {
+                            binlog_infos_inner_str += "\"link_field\":{\"field_name\":\"";
+                            binlog_infos_inner_str += db_info.binlog_infos[i].link_field().field_name();
+                            binlog_infos_inner_str += "\"},";
+                        }
+                        if (db_info.binlog_infos[i].has_partition_is_same_hint()) {
+                            binlog_infos_inner_str += "\"partition_is_same_hint\":";
+                            binlog_infos_inner_str += db_info.binlog_infos[i].partition_is_same_hint() ? "true" : "false";
+                            binlog_infos_inner_str += ",";
+                        }
+                        if (!binlog_infos_inner_str.empty()) {
+                            binlog_infos_inner_str.pop_back();
+                        }
+                        binlog_infos_str += binlog_infos_inner_str;
+                        binlog_infos_str += "}";
+                        if (i != db_info.binlog_infos.size() - 1) {
+                            binlog_infos_str += ",";
+                        }
+                    }
+                    binlog_infos_str += "]";
+                }
+                if (!binlog_infos_str.empty()) {
+                    record->set_string(record->get_field_by_name("BINLOG_INFOS"), binlog_infos_str);
+                }
+                records.emplace_back(record);
+            }
+            return records;
+    };
+}
+
 } // namespace baikaldb

@@ -215,6 +215,81 @@ public:
     virtual ExprValue get_value(const ExprValue& value) {
         return _value.cast_to(_col_type);
     }
+    virtual bool can_use_arrow_vector() {
+        return true;
+    }
+
+    virtual int transfer_to_arrow_expression() {
+        switch (_col_type) {
+            case pb::NULL_TYPE: {
+                // A scalar value for NullType. Never valid
+                arrow::NullScalar null_scalar;
+                _arrow_expr = arrow::compute::literal(null_scalar);
+                break;
+            }
+            case pb::BOOL: {
+                _arrow_expr = arrow::compute::literal(_value.cast_to(_col_type).get_numberic<bool>());
+                break;
+            }
+            case pb::INT8: {
+                _arrow_expr = arrow::compute::literal(_value.cast_to(_col_type).get_numberic<int8_t>());
+                break;
+            }
+            case pb::INT16: {
+                _arrow_expr = arrow::compute::literal(_value.cast_to(_col_type).get_numberic<int16_t>());
+                break;
+            }
+            case pb::INT32: 
+            case pb::TIME: {
+                _arrow_expr = arrow::compute::literal(_value.cast_to(_col_type).get_numberic<int32_t>());
+                break;
+            }
+            case pb::INT64: {
+                _arrow_expr = arrow::compute::literal(_value.cast_to(_col_type).get_numberic<int64_t>());
+                break;
+            }
+            case pb::UINT8: {
+                _arrow_expr = arrow::compute::literal(_value.cast_to(_col_type).get_numberic<uint8_t>());
+                break;
+            }
+            case pb::UINT16: {
+                _arrow_expr = arrow::compute::literal(_value.cast_to(_col_type).get_numberic<uint16_t>());
+                break;
+            }
+            case pb::UINT32:
+            case pb::TIMESTAMP:
+            case pb::DATE: {
+                _arrow_expr = arrow::compute::literal(_value.cast_to(_col_type).get_numberic<uint32_t>());
+                break;
+            }
+            case pb::UINT64: 
+            case pb::DATETIME: {
+                _arrow_expr = arrow::compute::literal(_value.cast_to(_col_type).get_numberic<uint64_t>());
+                break;
+            }
+            case pb::FLOAT: {
+                _arrow_expr = arrow::compute::literal(_value.cast_to(_col_type).get_numberic<float>());
+                break;
+            }
+            case pb::DOUBLE: {
+                _arrow_expr = arrow::compute::literal(_value.cast_to(_col_type).get_numberic<double>());
+                break;
+            }
+            case pb::STRING: 
+            case pb::HEX:
+            case pb::HLL:
+            case pb::BITMAP:
+            case pb::TDIGEST: {
+                _arrow_expr = arrow::compute::literal(std::make_shared<arrow::LargeBinaryScalar>(_value.cast_to(_col_type).get_string()));
+                break;
+            }
+            default:
+                return -1;
+        }
+        //DB_WARNING("col_type: %d, value: %s", _col_type, _arrow_expr.ToString().c_str());
+        return 0;
+    }
+
 
 private:
     void value_to_node_type() {

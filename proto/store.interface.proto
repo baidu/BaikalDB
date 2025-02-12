@@ -10,7 +10,6 @@ import "binlog.proto";
 option cc_generic_services = true;
 //option cc_enable_arenas = true;
 
-
 message KvOp {
     required OpType    op_type = 1;
     optional bytes     key     = 2;
@@ -115,20 +114,33 @@ message RegionIndexs {
     optional OlapRegionStat olap_state = 7;
     repeated string    external_full_path = 8;
     optional bool      path_diff = 9;
+    optional int64     region_size = 10;
+};
+
+enum ExecuteType {
+    EXEC_ROW = 0;
+    EXEC_ARROW_ACERO = 1;
 };
 
 message ExtraReq {
-    optional bool use_read_idx = 1;
-    optional int64 sign_latency = 2;
-    optional OlapRegionInfo olap_info = 3;
+    optional bool                    use_read_idx = 1;
+    optional int64                   sign_latency = 2;
+    optional OlapRegionInfo          olap_info = 3;
     optional RegionOfflineBinlogInfo offline_binlog_info = 4;
+    optional uint64 watt_stats_version = 5;
 };
 
 message ExtraRes {
     repeated RegionIndexs infos = 1; 
     optional RegionOfflineBinlogInfo offline_binlog_info = 2;
+    optional bytes vectorized_rows = 3;   // 列存格式数据返回
+    optional bytes vectorized_schema = 4; // 列存格式schema
+    optional int64 wait_cost = 5;         // 限制并发等待时间
+    repeated bytes afs_full_names = 6;    // afs full path
+    optional bool  get_afs_path_succ = 7; // get afs path succ
 };
 
+// 增加新字段时，考虑是否对该字段增删meta标识，对应dblink表场景!!!
 message StoreReq {
     required OpType op_type         = 1;  //对表的操作类型
     repeated TupleDescriptor tuples = 2;
@@ -160,6 +172,8 @@ message StoreReq {
     optional uint64      sql_sign       = 28; // sql 签名
     repeated RegionInfo multi_new_region_infos = 29;
     optional ExtraReq   extra_req       = 30; // 非关键路径上的额外信息可以放在这里，避免该message过度膨胀
+    optional ExecuteType execute_type   = 31;
+    optional bool       is_rollup_base  = 32;
     optional int64    sql_exec_timeout  = 33;
 };
 
@@ -208,6 +222,7 @@ message BinlogQueryInfo {
     optional string region_ip = 7;
 }
 
+// 增加新字段时，考虑是否对该字段增删meta标识，对应dblink表场景!!!
 message StoreRes {
     required ErrCode errcode        = 1;
     optional bytes errmsg           = 2;
@@ -234,8 +249,9 @@ message StoreRes {
     optional int64 last_insert_id = 22;
     optional RegionRaftStat region_raft_stat = 23;
     repeated int64 ttl_timestamp = 24;
-    optional ExtraRes extra_res  = 25; // 非关键路径上的额外信息可以放在这里，避免该message过度膨胀
-    optional BinlogQueryInfo binlog_info     = 26; //存放binlog信息
+    optional ExtraRes extra_res  = 25;          // 非关键路径上的额外信息可以放在这里，避免该message过度膨胀
+    optional BinlogQueryInfo binlog_info = 26;  //存放binlog信息
+    optional ExecuteType execute_type = 27; 
     optional int64  read_disk_size =  28;
 };
 message InitRegion {
@@ -265,8 +281,9 @@ message RegionIds {
     optional int32  compact_type    = 4; //  1:data_cf 2:meta_cf 3:raft_log_cf
     optional bool   clear_all_txns  = 5;
     optional int64  txn_timeout     = 6;
-    optional bool   query_apply_index = 7;
-    repeated int64  userids         = 8;
+    optional bool   query_apply_index  = 7;
+    repeated int64  userids            = 8;
+    optional bool   query_all_afs_file = 9;
 };
 
 message BackUpReq {};
@@ -304,16 +321,25 @@ message HealthCheck {
 };
 
 enum OlapRegionStat {
-    OLAP_ACTIVE       = 0;
-    OLAP_IMMUTABLE    = 1; // region不可写
-    OLAP_FLUSHED      = 2;   // sst写入外部存储系统成功
-    OLAP_TRUNCATED    = 3; // hot ROCKSDB 已经truncate 
+    OLAP_ACTIVE             = 0;
+    OLAP_IMMUTABLE          = 1; // region不可写
+    OLAP_FLUSHED            = 2;   // sst写入外部存储系统成功
+    OLAP_TRUNCATED          = 3; // hot ROCKSDB 已经truncate 
+
+};
+
+message OlapRegionIndexInfo {
+    required int64  index_id      = 1;
+    repeated string external_path = 2;
+    optional OlapRegionStat state = 3;
 };
 
 message OlapRegionInfo {
-    required OlapRegionStat state = 1 [default=OLAP_ACTIVE];
-    optional uint64   state_time = 2;
-    repeated string external_full_path = 3; // state为OLAP_FLUSHED时，记录外部关联路径
+    required OlapRegionStat state                           = 1 [default=OLAP_ACTIVE];
+    optional uint64         state_time                      = 2;
+    repeated string         external_full_path              = 3; // state为OLAP_FLUSHED时，记录外部关联路径
+    repeated OlapRegionIndexInfo olap_index_info_list       = 4; 
+    optional OlapRegionIndexInfo new_olap_index_info        = 5; // 新增索引的index_id, 路径, 和状态
 };
 
 message RegionOfflineBinlogInfo {
