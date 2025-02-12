@@ -36,7 +36,7 @@ int InsertPlanner::plan() {
     insert->set_need_ignore(_insert_stmt->is_ignore);
     insert->set_is_replace(_insert_stmt->is_replace);
     insert->set_is_merge(_insert_stmt->is_merge);
-    if (_ctx->row_ttl_duration > 0) {
+    if (_ctx->row_ttl_duration > 0 || _ctx->row_ttl_duration == -1) {
         insert->set_row_ttl_duration(_ctx->row_ttl_duration);
         DB_DEBUG("row_ttl_duration: %ld", _ctx->row_ttl_duration);
     }

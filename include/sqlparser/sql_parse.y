@@ -485,7 +485,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     VAR_SAMP
     USER_AGG
 
-%token EQ_OP ASSIGN_OP  MOD_OP  GE_OP  GT_OP LE_OP LT_OP NE_OP AND_OP OR_OP NOT_OP LS_OP RS_OP CHINESE_DOT 
+%token EQ_OP ASSIGN_OP  MOD_OP  GE_OP  GT_OP LE_OP LT_OP NE_OP AND_OP OR_OP NOT_OP LS_OP RS_OP CHINESE_DOT JS_OP JS_OP1
 %token <string> IDENT 
 %token <expr> STRING_LIT INTEGER_LIT DECIMAL_LIT PLACE_HOLDER_LIT
 
@@ -776,7 +776,8 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
 %left EQ_OP NE_OP GE_OP GT_OP LE_OP LT_OP IS LIKE IN 
 %left '|'
 %left '&'
-%left LS_OP RS_OP
+%left JS_OP1
+%left LS_OP RS_OP JS_OP
 %left '+' '-'
 %left '*' '/' MOD_OP  MOD
 %left '^'
@@ -1911,6 +1912,38 @@ SelectField:
         SelectField* select_field = new_node(SelectField);
         select_field->expr = $3;
         select_field->as_name = $5;
+        $$ = select_field;
+    }
+    | ColumnName JS_OP STRING_LIT {
+        SelectField* select_field = new_node(SelectField);
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "json_extract1";
+        fun->children.push_back($1, parser->arena);
+        fun->children.push_back($3, parser->arena);
+        select_field->expr = fun;
+        parser::String t1, t2;
+        t1 = "->\"";
+        t2 = "\"";
+        select_field->org_name = ((ColumnName*) $1)->name;
+        select_field->org_name.append("->\"", parser->arena);
+        select_field->org_name.append(((LiteralExpr*)$3)->_u.str_val.c_str(), parser->arena);
+        select_field->org_name.append("\"", parser->arena);
+        $$ = select_field;
+    }
+    | ColumnName JS_OP1 STRING_LIT {
+        SelectField* select_field = new_node(SelectField);
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "json_extract";
+        fun->children.push_back($1, parser->arena);
+        fun->children.push_back($3, parser->arena);
+        select_field->expr = fun;
+        parser::String t1, t2;
+        t1 = "->\"";
+        t2 = "\"";
+        select_field->org_name = ((ColumnName*) $1)->name;
+        select_field->org_name.append("->\"", parser->arena);
+        select_field->org_name.append(((LiteralExpr*)$3)->_u.str_val.c_str(), parser->arena);
+        select_field->org_name.append("\"", parser->arena);
         $$ = select_field;
     }
     ;

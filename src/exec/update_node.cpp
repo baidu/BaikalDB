@@ -29,6 +29,8 @@ int UpdateNode::init(const pb::PlanNode& node) {
     }
     _table_id =  node.derive_node().update_node().table_id();
     _global_index_id = _table_id;
+    _row_ttl_duration = node.derive_node().update_node().row_ttl_duration();
+    DB_DEBUG("_row_ttl_duration:%ld", _row_ttl_duration);
     _primary_slots.clear();
     _primary_slots.reserve(node.derive_node().update_node().primary_slots_size());
     for (auto& slot : node.derive_node().update_node().primary_slots()) {

@@ -136,6 +136,7 @@ public:
 
     // optimize or node to in node
     static void  or_node_optimize(ExprNode** expr_node);
+    static bool like_node_optimize(ExprNode** root, std::vector<ExprNode*>& new_exprs);
     bool has_same_children();
     bool is_vaild_or_optimize_tree(int32_t level, std::unordered_set<int32_t>* tuple_set);
     static int change_or_node_to_in(ExprNode** expr_node);

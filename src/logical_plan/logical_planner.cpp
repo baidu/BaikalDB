@@ -549,49 +549,25 @@ int LogicalPlanner::generate_sql_sign(QueryContext* ctx, parser::StmtNode* stmt)
                     pb::ScanNode* scan = derive->mutable_scan_node();
                     int64_t table_id = scan->table_id();
                     if (table_index_map.count(table_id) > 0) {
-                       for (auto& index_name: table_index_map[table_id]) {
-                           int64_t index_id = 0;
-                           auto ret = _factory->get_index_id(table_id, index_name, index_id);
-                           if (ret != 0) {
-                               DB_WARNING("index_name: %s in table:%s not exist", index_name.c_str(),
-                                          _factory->get_table_info_ptr(table_id)->name.c_str());
-                               continue;
-                           }
-                           scan->add_force_indexes(index_id);
-                       }
-                    }
-                }
-            }
-        }
-    }
-
-    if (!ctx->sign_forceindex.empty()) {
-        if (ctx->sign_forceindex.count(stat_info->sign) > 0) {
-            auto& table_index_map = ctx->sign_forceindex[stat_info->sign];
-            for (int i = 0; i < ctx->plan.nodes_size(); i++) {
-                auto node = ctx->plan.mutable_nodes(i);
-                if (node->node_type() != pb::SCAN_NODE) {
-                    continue;
-                }
-                pb::DerivePlanNode* derive = node->mutable_derive_node();
-                pb::ScanNode* scan = derive->mutable_scan_node();
-                int64_t table_id = scan->table_id();
-                if (table_index_map.count(table_id) > 0) {
-                    for (auto& index_name: table_index_map[table_id]) {
-                        int64_t index_id = 0;
-                        auto ret = _factory->get_index_id(table_id, index_name, index_id);
-                        if (ret != 0) {
-                            DB_WARNING("index_name: %s in table:%s not exist", index_name.c_str(),
-                                        _factory->get_table_info_ptr(table_id)->name.c_str());
-                            continue;
+                        for (auto& index_name: table_index_map[table_id]) {
+                            int64_t index_id = 0;
+                            auto ret = _factory->get_index_id(table_id, index_name, index_id);
+                            if (ret != 0) {
+                                DB_WARNING("index_name: %s in table:%s not exist", index_name.c_str(),
+                                           _factory->get_table_info_ptr(table_id)->name.c_str());
+                                continue;
+                            }
+                            auto indexInfoPtr = _factory->get_index_info_ptr(index_id);
+                            if (indexInfoPtr == nullptr || indexInfoPtr->state != pb::IS_PUBLIC || indexInfoPtr->index_hint_status != pb::IHS_NORMAL) {
+                                continue;
+                            }
+                            scan->add_force_indexes(index_id);
                         }
-                        scan->add_force_indexes(index_id);
                     }
                 }
             }
         }
     }
-
     return 0;
 }
 
@@ -652,13 +628,10 @@ int LogicalPlanner::gen_subquery_plan(parser::DmlNode* subquery, SmartPlanTableC
         }
     }
     _cur_sub_ctx->expr_params.row_filed_number = planner->select_names().size();
-    int ret = _cur_sub_ctx->create_plan_tree();
-    if (ret < 0) {
-        DB_WARNING("Failed to pb_plan to execnode");
-        return -1;
-    }
     _ctx->set_kill_ctx(_cur_sub_ctx);
     auto stat_info = &(_cur_sub_ctx->stat_info);
+
+    int ret = 0;
     if (!_ctx->is_with && !_ctx->is_create_view) {
         ret = generate_sql_sign(_cur_sub_ctx.get(), subquery);
         if (ret < 0) {
@@ -667,6 +640,11 @@ int LogicalPlanner::gen_subquery_plan(parser::DmlNode* subquery, SmartPlanTableC
     }
     auto& client_conn = _ctx->client_conn;
     client_conn->insert_subquery_sign(stat_info->sign);
+    ret = _cur_sub_ctx->create_plan_tree();
+    if (ret < 0) {
+        DB_WARNING("Failed to pb_plan to execnode");
+        return -1;
+    }
     return 0;
 }
 
@@ -845,6 +823,7 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
                 }
             }
         }
+
         _ctx->sign_blacklist.insert(tbl_ptr->sign_blacklist.begin(), tbl_ptr->sign_blacklist.end());
         _ctx->sign_forcelearner.insert(tbl_ptr->sign_forcelearner.begin(), tbl_ptr->sign_forcelearner.end());
         _ctx->sign_rolling.insert(tbl_ptr->sign_rolling.begin(), tbl_ptr->sign_rolling.end());
@@ -869,6 +848,7 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
             uint64_t exec_type = strtoull(vec[1].c_str(), nullptr, 10);
             _ctx->sign_exec_type[sign_num] = to_sign_exec_type(exec_type);
         }
+
 
         // 通用降级路由
         // 复杂sql(join和子查询)不降级
@@ -959,6 +939,22 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
         _partition_names.clear();
     }
     _ctx->stat_info.table_id = tableid;
+    auto tbl_ptr = _factory->get_table_info_ptr(tableid);
+    _ctx->sign_blacklist.insert(tbl_ptr->sign_blacklist.begin(), tbl_ptr->sign_blacklist.end());
+    _ctx->sign_forcelearner.insert(tbl_ptr->sign_forcelearner.begin(), tbl_ptr->sign_forcelearner.end());
+    for (auto& sign_index : tbl_ptr->sign_forceindex) {
+        std::vector<std::string> vec;
+        boost::split(vec, sign_index, boost::is_any_of(":"));
+        if (vec.size() != 2) {
+            continue;
+        }
+        uint64_t sign_num = strtoull(vec[0].c_str(), nullptr, 10);
+        auto& table_index_map = _ctx->sign_forceindex[sign_num];
+        auto& force_index_set = table_index_map[tableid];
+        force_index_set.insert(vec[1]);
+    }
+
+
     ScanTupleInfo* tuple_info = get_scan_tuple(alias_full_name, tableid);
     _ctx->current_tuple_ids.emplace(tuple_info->tuple_id);
     _ctx->current_table_tuple_ids.emplace(tuple_info->tuple_id);
@@ -1309,6 +1305,10 @@ int LogicalPlanner::create_join_node_from_terminator(const std::string db,
             DB_WARNING("index_name: %s in table:%s not exist",
                         index_name.c_str(), alias_full_name.c_str());
             return -1;
+        }
+        auto indexInfoPtr = _factory->get_index_info_ptr(index_id);
+        if (indexInfoPtr == nullptr || indexInfoPtr->state != pb::IS_PUBLIC || indexInfoPtr->index_hint_status != pb::IHS_NORMAL) {
+            continue;
         }
         (*join_root_ptr)->force_indexes.insert(index_id);
     }
@@ -3465,6 +3465,7 @@ int LogicalPlanner::create_sort_node() {
         sort->add_is_null_first(_order_ascs[idx]);
     }
     sort->set_tuple_id(_order_tuple_id);
+
     return 0;
 }
 int LogicalPlanner::create_join_and_scan_nodes(JoinMemTmp* join_root, ApplyMemTmp* apply_root) {
@@ -3591,10 +3592,18 @@ int LogicalPlanner::need_dml_txn(const int64_t table_id) {
 }
 
 void LogicalPlanner::set_dml_txn_state(int64_t table_id) {
-    if (_ctx->is_prepared || _ctx->is_explain) {
+    if (_ctx->is_explain) {
         return;
     }
     auto client = _ctx->client_conn;
+    //is_gloabl_ddl 打开时，该连接处理全局二级索引增量数据，不需要处理binlog。
+    if (!_ctx->no_binlog && _factory->has_open_binlog(table_id) && !client->is_index_ddl) {
+        client->open_binlog = true;
+        _ctx->open_binlog = true;
+    }
+    if (_ctx->is_prepared) {
+        return;
+    }
     if (client->txn_id == 0) {
         DB_DEBUG("enable_2pc %d global index %d, binlog %d", 
             _ctx->enable_2pc, _factory->has_global_index(table_id), _factory->has_open_binlog(table_id));
@@ -3602,11 +3611,6 @@ void LogicalPlanner::set_dml_txn_state(int64_t table_id) {
             client->on_begin();
             DB_DEBUG("get txn %ld", client->txn_id);
             client->seq_id = 0;
-            //is_gloabl_ddl 打开时，该连接处理全局二级索引增量数据，不需要处理binlog。
-            if (!_ctx->no_binlog && _factory->has_open_binlog(table_id) && !client->is_index_ddl) {
-                client->open_binlog = true;
-                _ctx->open_binlog = true;
-            }
         } else {
             client->txn_id = 0;
             client->seq_id = 0;
@@ -3614,10 +3618,6 @@ void LogicalPlanner::set_dml_txn_state(int64_t table_id) {
         //DB_WARNING("DEBUG client->txn_id:%ld client->seq_id: %d", client->txn_id, client->seq_id);
         _ctx->get_runtime_state()->set_single_sql_autocommit(true);
     } else {
-        if (!_ctx->no_binlog && _factory->has_open_binlog(table_id) && !client->is_index_ddl) {
-            client->open_binlog = true;
-            _ctx->open_binlog = true;
-        }
         //DB_WARNING("DEBUG client->txn_id:%ld client->seq_id: %d", client->txn_id, client->seq_id);
         _ctx->get_runtime_state()->set_single_sql_autocommit(false);
     }
@@ -3748,6 +3748,9 @@ int LogicalPlanner::fill_placeholders(
 }
 
 int LogicalPlanner::set_dml_local_index_binlog(const int64_t table_id) {
+    if (table_id == -1) {
+	return 0;
+    }
     if (_ctx->open_binlog && !_factory->has_global_index(table_id)) {
         // plan的第二个节点为dml节点
         if (_ctx->plan.nodes_size() < 2) {

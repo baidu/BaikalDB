@@ -54,6 +54,9 @@ public:
         for (auto expr : _slot_order_exprs) {
             ExprNode::create_pb_expr(sort_node->add_slot_order_exprs(), expr);
         }
+        if (_limit != -1) {
+            pb_node->set_limit(_limit);
+        }
     }
     
     void transfer_fetcher_pb(pb::FetcherNode* pb_fetcher) {

@@ -422,6 +422,17 @@ public:
     int64_t get_cost_time() {
         return time_cost.get_time();
     }
+    void prepare_reset() {
+        time_cost.reset();
+        region_count = 0;
+        _num_increase_rows = 0;
+        _num_affected_rows = 0;
+        _num_returned_rows = 0;
+        _num_scan_rows = 0;
+        _num_filter_rows = 0;
+        _read_disk_size = 0;
+        _is_cancelled = false;
+    }
     bool is_timeout() {
         return _sql_exec_timeout > 0 && time_cost.get_time()  > _sql_exec_timeout * 1000L;
     }
@@ -479,6 +490,9 @@ public:
     int                 range_count_limit = 0;
     int64_t           _sql_exec_timeout = -1;
     bool              _is_ddl_work = false;
+
+    bool              must_have_one = false;
+
 
     // for acero vectorize
     pb::ExecuteType     execute_type = pb::EXEC_ROW;

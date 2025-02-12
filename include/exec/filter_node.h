@@ -116,7 +116,9 @@ public:
             e->reset(state);
         }
     }
+
     int arrow_steal_conjuncts(std::vector<arrow::compute::Expression>& conjuncts, int64_t& limit);
+
 private:
     bool need_copy(MemRow* row);
 private:

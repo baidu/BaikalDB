@@ -12,16 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#pragma once
-
-#include "query_context.h"
+#include "user_info.h"
 
 namespace baikaldb {
-class JoinReorder {
-public:
-    int analyze(QueryContext* ctx);
-    int reorder(QueryContext* ctx, ExecNode* node);
-};
+DEFINE_int32(query_quota_per_user, 3000, "default user query quota by 1 second");
+BRPC_VALIDATE_GFLAG(query_quota_per_user, brpc::PassValidate);
+
+bool UserInfo::is_exceed_quota() {
+    if (query_cost.get_time() > 1000000) {
+        query_cost.reset();
+        query_count = 0;
+        return false;
+    }
+    int32_t quota = query_quota;
+    if (quota == 0) {
+        quota = FLAGS_query_quota_per_user;
+    }
+    return query_count++ > quota;
 }
 
-/* vim: set ts=4 sw=4 sts=4 tw=100 */
+} // namespace baikaldb

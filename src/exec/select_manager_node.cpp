@@ -214,6 +214,14 @@ int SelectManagerNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos)
         *eos = true;
         _num_rows_returned = _limit;
         return 0;
+    } else if (*eos == true) {
+        if (state->must_have_one && _num_rows_returned == 0) {
+            // 生成null返回 
+            std::unique_ptr<MemRow> row = state->mem_row_desc()->fetch_mem_row();
+            batch->move_row(std::move(row));
+            _num_rows_returned = 1;
+            return 0;
+        }
     }
     return 0;
 }

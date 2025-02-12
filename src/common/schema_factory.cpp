@@ -614,7 +614,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
             field_info.default_expr_value.cast_to(field_info.type);
         }
         if (field_info.type == pb::STRING || field_info.type == pb::HLL
-            || field_info.type == pb::BITMAP || field_info.type == pb::TDIGEST) {
+            || field_info.type == pb::BITMAP || field_info.type == pb::TDIGEST || field_info.type == pb::JSON) {
             field_info.size = -1;
         } else {
             field_info.size = get_num_size(field_info.type);

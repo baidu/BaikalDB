@@ -24,7 +24,6 @@
 
 namespace baikaldb {
 DEFINE_int32(max_connections_per_user, 4000, "default user max connections");
-DEFINE_int32(query_quota_per_user, 3000, "default user query quota by 1 second");
 DEFINE_string(log_plat_name, "test", "plat name for print log, distinguish monitor");
 DEFINE_int64(baikal_max_allowed_packet, 268435456LL, "The largest possible packet : 256M");
 DEFINE_int32(query_cache_timeout_s, 10, "query cache timeout(s)");
@@ -387,7 +386,7 @@ void StateMachine::_print_query_time(SmartSocket client) {
                     field_range_type, err_count, stat_info->sign, subquery_signs);
         }
 
-        if (op_type == pb::OP_SELECT) {
+        if (op_type == pb::OP_SELECT || op_type == pb::OP_UNION) {
             select_time_cost << stat_info->total_time;
             std::unique_lock<std::mutex> lock(_mutex);
             if (select_by_users.find(client->username) == select_by_users.end()) {
@@ -628,10 +627,10 @@ int StateMachine::_auth_read(SmartSocket sock) {
         //use default max_connection
         sock->user_info->max_connection = FLAGS_max_connections_per_user;
     }
-    if (sock->user_info->query_quota == 0) {
-        //use default query_quota
-        sock->user_info->query_quota = FLAGS_query_quota_per_user;
-    }
+    // if (sock->user_info->query_quota == 0) {
+    //     //use default query_quota
+    //     sock->user_info->query_quota = FLAGS_query_quota_per_user;
+    // }
     // Get password.
     if ((unsigned int)(sock->packet_len + PACKET_HEADER_LEN) < off + 1) {
         DB_FATAL_CLIENT(sock, "packet_len=%d + 4 <= off=%d + 1",

@@ -142,6 +142,10 @@ int UpdatePlanner::create_update_node(pb::PlanNode* update_node) {
         auto& slot = get_scan_ref_slot(try_to_lower(_current_tables[0]), table_id, field.id, field.type);
         update->add_primary_slots()->CopyFrom(slot);
     }
+    if (_ctx->row_ttl_duration > 0 || _ctx->row_ttl_duration == -1) {
+        update->set_row_ttl_duration(_ctx->row_ttl_duration);
+        DB_DEBUG("row_ttl_duration: %ld", _ctx->row_ttl_duration);
+    }
     return 0;
 }
 

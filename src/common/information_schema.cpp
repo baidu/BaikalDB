@@ -1677,7 +1677,7 @@ void InformationSchema::init_tables() {
                 record->set_value(record->get_field_by_name("CREATE_TIME"), ct.cast_to(pb::DATETIME));
                 record->set_string(record->get_field_by_name("TABLE_COLLATION"), coll);
                 record->set_string(record->get_field_by_name("CREATE_OPTIONS"), "");
-                record->set_string(record->get_field_by_name("TABLE_COMMENT"), "");
+                record->set_string(record->get_field_by_name("TABLE_COMMENT"), table_info->comment);
                 record->set_int64(record->get_field_by_name("TABLE_ID"), table_info->id);
                 std::string binlog_ids_str;
                 if (table_info->is_linked) {

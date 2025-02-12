@@ -321,6 +321,7 @@ void stripslashes(std::string& str, bool is_gbk) {
     size_t fast = 0;
     bool has_slash = false;
     static std::unordered_map<char, char> trans_map = {
+        {'0', '\x00'},
         {'\\', '\\'},
         {'\"', '\"'},
         {'\'', '\''},
@@ -473,6 +474,23 @@ void update_schema_conf_common(const std::string& table_name, const pb::SchemaCo
         DB_WARNING("%s schema conf UPDATE TO : %s", table_name.c_str(), schema_conf.ShortDebugString().c_str());
 }
 
+int primitive_type_bytes_len(pb::PrimitiveType type) {
+    static std::unordered_map<int32_t, int32_t> _mysql_pb_type_bytes_count = {
+        { pb::INT8, 1},
+        { pb::INT16, 2},
+        { pb::INT32, 3},
+        { pb::INT64, 4},
+        { pb::UINT8, 1},
+        { pb::UINT16, 2},
+        { pb::UINT32, 3},
+        { pb::UINT64, 4}
+    };
+    if (_mysql_pb_type_bytes_count.count(type) == 0) {
+        return 0xFFFF;
+    }
+    return _mysql_pb_type_bytes_count[type];
+}
+
 int primitive_to_proto_type(pb::PrimitiveType type) {
     using google::protobuf::FieldDescriptorProto;
     static std::unordered_map<int32_t, int32_t> _mysql_pb_type_mapping = {
@@ -495,6 +513,7 @@ int primitive_to_proto_type(pb::PrimitiveType type) {
         { pb::BOOL,         FieldDescriptorProto::TYPE_BOOL},
         { pb::BITMAP,       FieldDescriptorProto::TYPE_BYTES},
         { pb::TDIGEST,      FieldDescriptorProto::TYPE_BYTES},
+        { pb::JSON,         FieldDescriptorProto::TYPE_BYTES},
         { pb::NULL_TYPE,    FieldDescriptorProto::TYPE_BOOL}
     };
     if (_mysql_pb_type_mapping.count(type) == 0) {

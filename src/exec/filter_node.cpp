@@ -348,8 +348,8 @@ int FilterNode::expr_optimize(QueryContext* ctx) {
         DB_WARNING("ExecNode::optimize fail, ret:%d", ret);
         return ret;
     }
-    // sign => pred
-    std::map<int64_t, SlotPredicate> pred_map;
+    
+    std::vector<ExprNode*> like2range;
     for (auto& expr : _conjuncts) {
         //类型推导
         ret = expr->expr_optimize();
@@ -358,7 +358,18 @@ int FilterNode::expr_optimize(QueryContext* ctx) {
             return ret;
         }
         ExprNode::or_node_optimize(&expr);
-
+        bool t = ExprNode::like_node_optimize(&expr, like2range);
+        if (t) {
+            _has_optimized = true;
+        }
+    }
+    for (auto expr : like2range) {
+        _conjuncts.push_back(expr);
+    }
+    
+    // sign => pred
+    std::map<int64_t, SlotPredicate> pred_map;
+    for (auto& expr : _conjuncts) {
         //非bool型表达式判断
         if (expr->col_type() != pb::BOOL) {
             ExprNode::_s_non_boolean_sql_cnts << 1;
@@ -454,7 +465,7 @@ int FilterNode::expr_optimize(QueryContext* ctx) {
         bool all_const = true;
         for (uint32_t i = 1; i < expr->children_size(); i++) { 
             // place holder被替换会导致下一次exec参数对不上
-            if (!expr->children(i)->is_constant() || expr->children(i)->has_place_holder()) {
+            if (!expr->children(i)->is_constant()) {
                 all_const = false;
                 break;
             }
@@ -503,6 +514,7 @@ int FilterNode::expr_optimize(QueryContext* ctx) {
         if (cut_preds.count(expr) == 1) {
             ExprNode::destroy_tree(expr);
             iter = _conjuncts.erase(iter);
+            _has_optimized = true;
             continue;
         }
         if (expr->is_constant()) {
@@ -731,7 +743,8 @@ int FilterNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
             state->memory_limit_release(state->num_scan_rows(), row->used_size());
         }
         if (reached_limit()) {
-            DB_WARNING_STATE(state, "reach limit size:%lu", batch->size());
+            // DB_WARNING_STATE(state, "reach limit size:%lu", batch->size());
+            DB_DEBUG("reach limit size:%lu, logid: %lu", batch->size(), state->log_id());
             *eos = true;
             return 0;
         }

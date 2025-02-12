@@ -193,11 +193,12 @@ int SetKVPlanner::set_user_variable(const std::string& key, parser::ExprNode* ex
         DB_WARNING("expr open fail:%d", ret);
         return ret;
     }
+    bool is_constant = var_expr->is_constant();
     ExprValue value = var_expr->get_value(nullptr);
     var_expr->close();
     ExprNode::destroy_tree(var_expr);
 
-    if (var_expr->is_constant()) {
+    if (is_constant) {
         var_expr = new Literal(value);
         pb::ExprNode pb_node;
         var_expr->transfer_pb(&pb_node);

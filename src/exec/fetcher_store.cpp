@@ -371,6 +371,7 @@ void OnRPCDone::select_addr() {
             if (peer_index < sorted_peers.size()) {
                 _addr = sorted_peers[peer_index];
                 DB_WARNING("choose peer %s, index: %ld", _addr.c_str(), peer_index);
+                FetcherStore::choose_other_if_dead(_info, _addr);
             }
         }
         _request.set_select_without_leader(true);
@@ -1078,15 +1079,21 @@ void FetcherStore::choose_other_if_dead(pb::RegionInfo& info, std::string& addr)
     }
 
     std::vector<std::string> normal_peers;
+    std::vector<std::string> other_peers;
     for (auto& peer: info.peers()) {
         auto status = schema_factory->get_instance_status(peer);
         if (status.status == pb::NORMAL) {
             normal_peers.push_back(peer);
+        } else if (status.status != pb::DEAD) {
+            other_peers.push_back(peer);
         }
     }
     if (normal_peers.size() > 0) {
         uint32_t i = butil::fast_rand() % normal_peers.size();
         addr = normal_peers[i];
+    } else if(other_peers.size() > 0) {
+        uint32_t i = butil::fast_rand() % other_peers.size();
+        addr = other_peers[i];
     } else {
         DB_DEBUG("all peer faulty, %ld", info.region_id());
     }
@@ -1143,16 +1150,16 @@ ErrorType FetcherStore::process_binlog_start(RuntimeState* state, pb::OpType op_
                     need_send_rollback = false;
                     return;
                 }
-                write_binlog_param.txn_id = state->txn_id;
-                write_binlog_param.log_id = log_id;
-                write_binlog_param.primary_region_id = client_conn->primary_region_id;
-                write_binlog_param.global_conn_id = client_conn->get_global_conn_id();
-                write_binlog_param.username = client_conn->user_info->username;
-                write_binlog_param.ip = client_conn->ip;
-                write_binlog_param.client_conn = client_conn;
-                write_binlog_param.fetcher_store = this;
                 binlog_ctx->set_start_ts(timestamp);
             }
+            write_binlog_param.txn_id = state->txn_id;
+            write_binlog_param.log_id = log_id;
+            write_binlog_param.primary_region_id = client_conn->primary_region_id;
+            write_binlog_param.global_conn_id = client_conn->get_global_conn_id();
+            write_binlog_param.username = client_conn->user_info->username;
+            write_binlog_param.ip = client_conn->ip;
+            write_binlog_param.client_conn = client_conn;
+            write_binlog_param.fetcher_store = this;
             write_binlog_param.op_type = op_type;
             auto ret = binlog_ctx->write_binlog(&write_binlog_param);
             if (ret != E_OK) {

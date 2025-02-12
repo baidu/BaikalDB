@@ -447,6 +447,8 @@ VAR_SAMP { un_reserved_keyword(yylval, yyscanner, parser); return VAR_SAMP; }
 \|\| { return OR; }
 \<\< { return LS_OP; }
 \>\> { return RS_OP; }
+\-\> { return JS_OP; }
+\-\>\> { return JS_OP1; }
 
 [0-9]+ {
     //integer

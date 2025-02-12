@@ -65,6 +65,8 @@ private:
     int parse_limit();
 
     int subquery_rewrite();
+    
+    int minmax_remove();
   
     bool is_full_export();
 

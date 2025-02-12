@@ -302,7 +302,9 @@ public:
                     sample_sorter.insert_row(batch->get_row().get());
                 }
                 batch->reset();
-                _batch_vector.push_back(batch);
+                if (batch->size() > 0) {
+                    _batch_vector.push_back(batch);
+                }
             } while (!eos);
 
             sample_sorter.insert_done();

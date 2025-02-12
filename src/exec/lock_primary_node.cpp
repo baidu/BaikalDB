@@ -223,6 +223,7 @@ int LockPrimaryNode::open(RuntimeState* state) {
         case pb::LOCK_GET_DML: {
             for (auto& record : delete_records) {
                 //DB_WARNING_STATE(state,"record:%s", record->debug_string().c_str());
+
                 std::unique_ptr<MemRow> row = nullptr;
                 if (_conjuncts.size() > 0 && state->mem_row_desc() != nullptr) {
                     row = state->mem_row_desc()->fetch_mem_row();

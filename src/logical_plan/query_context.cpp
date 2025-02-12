@@ -29,6 +29,13 @@ int QueryContext::create_plan_tree() {
     return ExecNode::create_tree(plan, &root);
 }
 
+int QueryContext::destroy_plan_tree() {
+    need_destroy_tree = false;
+    ExecNode::destroy_tree(root);
+    root = nullptr;
+    return 0;
+}
+
 void QueryContext::update_ctx_stat_info(RuntimeState* state, int64_t query_total_time) {
     stat_info.num_returned_rows += state->num_returned_rows();
     stat_info.num_affected_rows += state->num_affected_rows();
@@ -107,6 +114,14 @@ int QueryContext::copy_query_context(QueryContext* p_query_ctx) {
     sign_forcelearner.insert(p_query_ctx->sign_forcelearner.begin(), p_query_ctx->sign_forcelearner.end());
     sign_rolling.insert(p_query_ctx->sign_rolling.begin(), p_query_ctx->sign_rolling.end());
     sign_forceindex.insert(p_query_ctx->sign_forceindex.begin(), p_query_ctx->sign_forceindex.end());
+
+    has_derived_table = p_query_ctx->has_derived_table;
+    derived_table_ctx_mapping.insert(p_query_ctx->derived_table_ctx_mapping.begin(),
+                                           p_query_ctx->derived_table_ctx_mapping.end());
+    slot_column_mapping.insert(p_query_ctx->slot_column_mapping.begin(),
+                                     p_query_ctx->slot_column_mapping.end());
+
+
     sign_exec_type.insert(p_query_ctx->sign_exec_type.begin(), p_query_ctx->sign_exec_type.end());
     table_can_use_arrow_vectorize = p_query_ctx->table_can_use_arrow_vectorize;
     return 0;

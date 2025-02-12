@@ -18,6 +18,7 @@
 #include "insert_planner.h"
 #include "delete_planner.h"
 #include "update_planner.h"
+#include "union_planner.h"
 #include "transaction_planner.h"
 #include "exec_node.h"
 #include "packet_node.h"
@@ -172,7 +173,10 @@ int PreparePlanner::stmt_prepare(const std::string& stmt_name, const std::string
     prepare_ctx->client_conn = client;
     prepare_ctx->get_runtime_state()->set_client_conn(client);
     prepare_ctx->sql = stmt_sql;
+    prepare_ctx->is_full_export = false;
+
     prepare_ctx->charset = _ctx->charset;
+
 
     std::unique_ptr<LogicalPlanner> planner;
     switch (prepare_ctx->stmt_type) {
@@ -188,6 +192,9 @@ int PreparePlanner::stmt_prepare(const std::string& stmt_name, const std::string
         break;
     case parser::NT_DELETE:
         planner.reset(new DeletePlanner(prepare_ctx.get()));
+        break;
+    case parser::NT_UNION:
+        planner.reset(new UnionPlanner(prepare_ctx.get()));
         break;
     default:
         DB_WARNING("un-supported prepare command type: %d", prepare_ctx->stmt_type);
@@ -216,6 +223,9 @@ int PreparePlanner::stmt_prepare(const std::string& stmt_name, const std::string
         return -1;
     }
     prepare_ctx->root->find_place_holder(prepare_ctx->placeholders);
+    for (auto sub_query_ctx : prepare_ctx->sub_query_plans) {
+        sub_query_ctx->root->find_place_holder(prepare_ctx->placeholders);
+    }
     /*
     // 包括类型推导与常量表达式计算
     ret = ExprOptimize().analyze(prepare_ctx.get());
@@ -242,16 +252,34 @@ int PreparePlanner::stmt_execute(const std::string& stmt_name, std::vector<pb::E
     }
 
     std::shared_ptr<QueryContext> prepare_ctx = iter->second;
+    prepare_ctx->get_runtime_state()->prepare_reset();
+    _ctx->stat_info.family = prepare_ctx->stat_info.family;
+    _ctx->stat_info.table = prepare_ctx->stat_info.table;
+    _ctx->stat_info.sample_sql << prepare_ctx->stat_info.sample_sql.str();
+    _ctx->stat_info.sign = prepare_ctx->stat_info.sign;
+    _ctx->is_full_export = false;
+    _ctx->debug_region_id = prepare_ctx->debug_region_id;
+    _ctx->execute_global_flow = prepare_ctx->execute_global_flow;
+    if (params.size() != prepare_ctx->placeholders.size()) {
+        _ctx->stat_info.error_code = ER_WRONG_ARGUMENTS;
+        _ctx->stat_info.error_msg << "Incorrect arguments to EXECUTE: " 
+                                  << params.size() << ", " 
+                                  << prepare_ctx->placeholders.size();
+        return -1;
+    }
     // ttl沿用prepare的注释
     DB_DEBUG("row_ttl_duration %ld", prepare_ctx->row_ttl_duration);
     _ctx->row_ttl_duration = prepare_ctx->row_ttl_duration;
     _ctx->copy_query_context(prepare_ctx.get());
 
     auto* p_placeholders = &prepare_ctx->placeholders;
-    if (!prepare_ctx->is_select) {
-        // TODO dml的plan复用
+
+    // TODO dml的plan复用
+    if (!prepare_ctx->is_select || prepare_ctx->sub_query_plans.size() > 0 || (prepare_ctx->root != nullptr && prepare_ctx->root->has_optimized())) {
         // enable_2pc=true or table has global index need generate txn_id
-        set_dml_txn_state(prepare_ctx->prepared_table_id);
+        if (!prepare_ctx->is_select && prepare_ctx->prepared_table_id != -1) {
+            set_dml_txn_state(prepare_ctx->prepared_table_id);
+        }
         _ctx->plan.CopyFrom(prepare_ctx->plan);
         int ret = set_dml_local_index_binlog(prepare_ctx->prepared_table_id);
         if (ret < 0) {
@@ -264,6 +292,17 @@ int PreparePlanner::stmt_execute(const std::string& stmt_name, std::vector<pb::E
             return -1;
         }
         _ctx->root->find_place_holder(_ctx->placeholders);
+        for (auto sub_query_ctx : prepare_ctx->sub_query_plans) {
+            // stmt_prepare的plan()函数里已经生成过一次了，此处需要先释放，再生成
+            sub_query_ctx->destroy_plan_tree();
+            int ret = sub_query_ctx->create_plan_tree();
+            if (ret < 0) {
+                DB_WARNING("Failed to pb_plan to execnode");
+                return -1;
+            }
+            _ctx->add_sub_ctx(sub_query_ctx);
+            sub_query_ctx->root->find_place_holder(_ctx->placeholders);
+        }
         p_placeholders = &_ctx->placeholders;
     }
     if (p_placeholders == nullptr) {

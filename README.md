@@ -22,6 +22,8 @@ baidu/BaikalDB is licensed under the Apache License 2.0
 * Thanks our friend team -- The Baidu TafDB team, who provide the space efficient snapshot scheme based on braft.
 * Last but not least, we give special thanks to the authors of all libraries that BaikalDB depends on, without whom BaikalDB could not have been developed and built so easily.
 
+![Comate PowerSource Initiative Logo](https://comate.baidu.com/images/powersource/powersource-dark-en-5.png)
+
 ## WeiXin Group
 添加管理员olivaw2077帮忙加群，备注baikaldb
 

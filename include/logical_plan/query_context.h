@@ -194,6 +194,7 @@ public:
         return plan.add_nodes();
     }
     int create_plan_tree();
+    int destroy_plan_tree();
 
     void add_sub_ctx(std::shared_ptr<QueryContext>& ctx) {
         std::unique_lock<bthread::Mutex> lck(_kill_lock);

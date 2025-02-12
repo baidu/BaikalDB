@@ -1477,6 +1477,7 @@ extern void set_snapshot_blacklist(pb::SchemaConf& schema_conf, pb::SchemaConf* 
 extern void update_schema_conf_common(const std::string& table_name, const pb::SchemaConf& schema_conf, pb::SchemaConf* p_conf);
 extern void update_op_version(pb::SchemaConf* p_conf, const std::string& desc);
 extern int primitive_to_proto_type(pb::PrimitiveType type);
+extern int primitive_type_bytes_len(pb::PrimitiveType type);
 extern int get_physical_room(const std::string& ip_and_port_str, std::string& host);
 extern int get_instance_from_bns(int* ret,
                           const std::string& bns_name, 

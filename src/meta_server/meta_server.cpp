@@ -557,6 +557,13 @@ void MetaServer::raft_control(google::protobuf::RpcController* controller,
                               pb::RaftControlResponse* response,
                               google::protobuf::Closure* done) {
     brpc::ClosureGuard done_guard(done);
+    brpc::Controller* cntl =
+        static_cast<brpc::Controller*>(controller);
+    uint64_t log_id = 0;
+    if (cntl->has_log_id()) {
+        log_id = cntl->log_id();
+    }
+    RETURN_IF_NOT_INIT(_init_success, response, log_id);
     if (request->region_id() == 0) {
         _meta_state_machine->raft_control(controller, request, response, done_guard.release()); 
         return;

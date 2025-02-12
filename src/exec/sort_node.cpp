@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "sort_node.h"
+#include "topn_sorter.h"
 #include "runtime_state.h"
 #include "query_context.h"
 #include <arrow/acero/options.h>
@@ -265,7 +266,11 @@ int SortNode::open(RuntimeState* state) {
     _mem_row_desc = state->mem_row_desc();
     _mem_row_compare = std::make_shared<MemRowCompare>(
             _slot_order_exprs, _is_asc, _is_null_first);
-    _sorter = std::make_shared<Sorter>(_mem_row_compare.get());
+    if (_limit == -1) {
+        _sorter = std::make_shared<Sorter>(_mem_row_compare.get());
+    } else {
+        _sorter = std::make_shared<TopNSorter>(_mem_row_compare.get(), _limit);
+    }
 
     bool eos = false;
     int count = 0;
