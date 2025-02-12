@@ -36,6 +36,8 @@ int main(int argc, char* argv[])
 
 namespace baikaldb {
 TEST(test_proto, case_all) {
+    std::vector<int> vv {11,22,33,44};
+    std::cout << "v:" << vv[-1] << vv[10000] << std::endl;
     /*
     std::ofstream fp;
     fp.open("sign", std::ofstream::out);

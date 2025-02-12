@@ -1084,6 +1084,10 @@ void Store::query_region(google::protobuf::RpcController* controller,
                 continue;
             }
 
+            for (int i = 0; i < olap_info.olap_index_info_list_size(); i++) {
+                info->add_olap_index_info_list()->Swap(olap_info.mutable_olap_index_info_list(i));
+            }
+
             uint64_t total_size = 0;
             std::set<std::string> rocks_external_files;
             for (const auto& f : olap_info.external_full_path()) {
@@ -1745,12 +1749,14 @@ void Store::snapshot_thread() {
 }
 
 void Store::txn_clear_thread() {
+    int64_t count = 0;
     while (!_shutdown) {
         traverse_copy_region_map([](const SmartRegion& region) {
             // clear prepared and expired transactions
             region->clear_transactions();
         });
         bthread_usleep_fast_shutdown(FLAGS_transaction_clear_interval_ms * 1000, _shutdown);
+        DB_WARNING("txn_clear_thread, count:%ld", ++count);
 
     }
 }

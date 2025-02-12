@@ -511,7 +511,13 @@ int arrow_concat(std::vector<ExprNode*>& children, pb::Function* fn, const pb::P
     std::vector<arrow::compute::Expression> args;
     for (auto& c : children) { 
         BUILD_ARROW_EXPR_RET(c);
-        args.emplace_back(arrow::compute::call("cast", {c->arrow_expr()}, arrow::compute::CastOptions::Unsafe(arrow::large_binary())));
+        if (is_datetime_specic(c->col_type()) 
+                || is_double(c->col_type())) {
+            ExprValueCastFunctionOptions option(c->col_type());
+            args.emplace_back(arrow::compute::call("expr_value_to_string", {c->arrow_expr()}, std::move(option)));
+        } else {
+            args.emplace_back(arrow::compute::call("cast", {c->arrow_expr()}, arrow::compute::CastOptions::Unsafe(arrow::large_binary())));
+        }
     }
     // 连接符放在最后
     args.emplace_back(arrow::compute::literal(std::make_shared<arrow::LargeBinaryScalar>("")));
@@ -605,44 +611,38 @@ int arrow_cast_to_time(std::vector<ExprNode*>& children, pb::Function* fn, const
  */
 
 //!!!!! BE CAREFUL: 数值型的必须用array span, 字符串用array_data  !!!!!!!
-arrow::Status ExecExprValueToDate(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) {    
+
+template <typename O, typename I>
+struct ExecExprValueToDate {
+using OutputValueCType = typename arrow::TypeTraits<O>::CType;
+static arrow::Status Exec(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) {
+    using InputValueCType = typename arrow::TypeTraits<I>::CType;
+
     ExprValueCastState* state = static_cast<ExprValueCastState*>(ctx->state());
     pb::PrimitiveType type = state->type;
     const arrow::ArraySpan& input = batch[0].array;
     arrow::ArraySpan* out_data = out->array_span_mutable();
-    uint32_t* out_values = out_data->GetValues<uint32_t>(1);
+    OutputValueCType* out_values = out_data->GetValues<OutputValueCType>(1);
     switch (type) {
         case pb::DATETIME: {
-            const uint64_t* in_values = input.GetValues<uint64_t>(1);
-            for (int64_t i = 0; i < input.length; ++i) {
+            const InputValueCType* in_values = input.GetValues<InputValueCType>(1);
+            for (auto i = 0; i < input.length; ++i) {
                 *out_values++ = datetime_to_date(*in_values++);
             }
             break;
         }
         case pb::TIME: {
-            const int32_t* in_values = input.GetValues<int32_t>(1);
-            for (int64_t i = 0; i < input.length; ++i) {
+            const InputValueCType* in_values = input.GetValues<InputValueCType>(1);
+            for (auto i = 0; i < input.length; ++i) {
                 *out_values++ = datetime_to_date(time_to_datetime(*in_values++));
             }
             break;
         }
         case pb::TIMESTAMP: {
-            const uint32_t* in_values = input.GetValues<uint32_t>(1);
-            for (int64_t i = 0; i < input.length; ++i) {
+            const InputValueCType* in_values = input.GetValues<InputValueCType>(1);
+            for (auto i = 0; i < input.length; ++i) {
                 *out_values++ = datetime_to_date(timestamp_to_datetime(*in_values++));
             }
-            break;
-        }
-        case pb::STRING: {
-            arrow::compute::internal::VisitArrayValuesInline<arrow::LargeBinaryType>(
-                input,
-                [&](std::string_view v) {
-                    *out_values++ = datetime_to_date(str_to_datetime(v.data(), v.length()));
-                },
-                [&]() {
-                    // null
-                    *out_values++ = uint32_t{};
-                });
             break;
         }
         default:
@@ -650,45 +650,58 @@ arrow::Status ExecExprValueToDate(arrow::compute::KernelContext* ctx, const arro
     }
     return arrow::Status::OK();
 }
-
-arrow::Status ExecExprValueToTime(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) {   
+static arrow::Status ExecStringInput(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) {
     ExprValueCastState* state = static_cast<ExprValueCastState*>(ctx->state());
     pb::PrimitiveType type = state->type;
     const arrow::ArraySpan& input = batch[0].array;
     arrow::ArraySpan* out_data = out->array_span_mutable();
-    int32_t* out_values = out_data->GetValues<int32_t>(1);
+    OutputValueCType* out_values = out_data->GetValues<OutputValueCType>(1);
+    if (type != pb::STRING) {
+        return arrow::Status::TypeError("not support");
+    }
+    arrow::compute::internal::VisitArrayValuesInline<arrow::LargeBinaryType>(
+        input,
+        [&](std::string_view v) {
+            *out_values++ = datetime_to_date(str_to_datetime(v.data(), v.length()));
+        },
+        [&]() {
+            // null
+            *out_values++ = OutputValueCType{};
+        });
+    return arrow::Status::OK();
+}
+};
+
+template <typename O, typename I>
+struct ExecExprValueToTime {
+using OutputValueCType = typename arrow::TypeTraits<O>::CType;
+static arrow::Status Exec(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) { 
+    using InputValueCType = typename arrow::TypeTraits<I>::CType;
+    ExprValueCastState* state = static_cast<ExprValueCastState*>(ctx->state());
+    pb::PrimitiveType type = state->type;
+    const arrow::ArraySpan& input = batch[0].array;
+    arrow::ArraySpan* out_data = out->array_span_mutable();
+    OutputValueCType* out_values = out_data->GetValues<OutputValueCType>(1);
     switch (type) {
         case pb::DATETIME: {
-            const uint64_t* in_values = input.GetValues<uint64_t>(1);
-            for (int64_t i = 0; i < input.length; ++i) {
+            const InputValueCType* in_values = input.GetValues<InputValueCType>(1);
+            for (auto i = 0; i < input.length; ++i) {
                 *out_values++ = datetime_to_time(*in_values++);
             }
             break;
         }
         case pb::DATE: {
-            const int32_t* in_values = input.GetValues<int32_t>(1);
-            for (int64_t i = 0; i < input.length; ++i) {
+            const InputValueCType* in_values = input.GetValues<InputValueCType>(1);
+            for (auto i = 0; i < input.length; ++i) {
                 *out_values++ = datetime_to_time(date_to_datetime(*in_values++));
             }
             break;
         }
         case pb::TIMESTAMP: {
-            const uint32_t* in_values = input.GetValues<uint32_t>(1);
-            for (int64_t i = 0; i < input.length; ++i) {
+            const InputValueCType* in_values = input.GetValues<InputValueCType>(1);
+            for (auto i = 0; i < input.length; ++i) {
                 *out_values++ = datetime_to_time(timestamp_to_datetime(*in_values++));
             }
-            break;
-        }
-        case pb::STRING: {
-            arrow::compute::internal::VisitArrayValuesInline<arrow::LargeBinaryType>(
-                input,
-                [&](std::string_view v) {
-                    *out_values++ = datetime_to_time(str_to_datetime(v.data(), v.length()));
-                },
-                [&]() {
-                    // null
-                    *out_values++ = int32_t{};
-                });
             break;
         }
         default:
@@ -696,45 +709,58 @@ arrow::Status ExecExprValueToTime(arrow::compute::KernelContext* ctx, const arro
     }
     return arrow::Status::OK();
 }
-
-arrow::Status ExecExprValueToDateTime(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) {    
+static arrow::Status ExecStringInput(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) { 
     ExprValueCastState* state = static_cast<ExprValueCastState*>(ctx->state());
     pb::PrimitiveType type = state->type;
     const arrow::ArraySpan& input = batch[0].array;
     arrow::ArraySpan* out_data = out->array_span_mutable();
-    uint64_t* out_values = out_data->GetValues<uint64_t>(1);
+    OutputValueCType* out_values = out_data->GetValues<OutputValueCType>(1);
+    if (type != pb::STRING) {
+        return arrow::Status::TypeError("not support");
+    }
+    arrow::compute::internal::VisitArrayValuesInline<arrow::LargeBinaryType>(
+        input,
+        [&](std::string_view v) {
+            *out_values++ = datetime_to_time(str_to_datetime(v.data(), v.length()));
+        },
+        [&]() {
+            // null
+            *out_values++ = OutputValueCType{};
+        });
+    return arrow::Status::OK();
+}
+};
+
+template <typename O, typename I>
+struct ExecExprValueToDateTime {
+using OutputValueCType = typename arrow::TypeTraits<O>::CType;
+static arrow::Status Exec(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) {
+    using InputValueCType = typename arrow::TypeTraits<I>::CType;
+    ExprValueCastState* state = static_cast<ExprValueCastState*>(ctx->state());
+    pb::PrimitiveType type = state->type;
+    const arrow::ArraySpan& input = batch[0].array;
+    arrow::ArraySpan* out_data = out->array_span_mutable();
+    OutputValueCType* out_values = out_data->GetValues<OutputValueCType>(1);
     switch (type) {
         case pb::TIME: {
-            const uint64_t* in_values = input.GetValues<uint64_t>(1);
-            for (int64_t i = 0; i < input.length; ++i) {
+            const InputValueCType* in_values = input.GetValues<InputValueCType>(1);
+            for (auto i = 0; i < input.length; ++i) {
                 *out_values++ = time_to_datetime(*in_values++);
             }
             break;
         }
         case pb::DATE: {
-            const int32_t* in_values = input.GetValues<int32_t>(1);
-            for (int64_t i = 0; i < input.length; ++i) {
+            const InputValueCType* in_values = input.GetValues<InputValueCType>(1);
+            for (auto i = 0; i < input.length; ++i) {
                 *out_values++ = date_to_datetime(*in_values++);
             }
             break;
         }
         case pb::TIMESTAMP: {
-            const uint32_t* in_values = input.GetValues<uint32_t>(1);
-            for (int64_t i = 0; i < input.length; ++i) {
+            const InputValueCType* in_values = input.GetValues<InputValueCType>(1);
+            for (auto i = 0; i < input.length; ++i) {
                 *out_values++ = timestamp_to_datetime(*in_values++);
             }
-            break;
-        }
-        case pb::STRING: {
-            arrow::compute::internal::VisitArrayValuesInline<arrow::LargeBinaryType>(
-                input,
-                [&](std::string_view v) {
-                    *out_values++ = str_to_datetime(v.data(), v.length());
-                },
-                [&]() {
-                    // null
-                    *out_values++ = uint64_t{};
-                });
             break;
         }
         default:
@@ -742,45 +768,58 @@ arrow::Status ExecExprValueToDateTime(arrow::compute::KernelContext* ctx, const 
     }
     return arrow::Status::OK();
 }
-
-arrow::Status ExecExprValueToTimeStamp(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) {    
+static arrow::Status ExecStringInput(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) {
     ExprValueCastState* state = static_cast<ExprValueCastState*>(ctx->state());
     pb::PrimitiveType type = state->type;
     const arrow::ArraySpan& input = batch[0].array;
     arrow::ArraySpan* out_data = out->array_span_mutable();
-    uint32_t* out_values = out_data->GetValues<uint32_t>(1);
+    OutputValueCType* out_values = out_data->GetValues<OutputValueCType>(1);
+    if (type != pb::STRING) {
+        return arrow::Status::TypeError("not support");
+    }
+    arrow::compute::internal::VisitArrayValuesInline<arrow::LargeBinaryType>(
+        input,
+        [&](std::string_view v) {
+            *out_values++ = str_to_datetime(v.data(), v.length());
+        },
+        [&]() {
+            // null
+            *out_values++ = OutputValueCType{};
+        });
+    return arrow::Status::OK();
+}
+};
+
+template <typename O, typename I>
+struct ExecExprValueToTimeStamp {
+using OutputValueCType = typename arrow::TypeTraits<O>::CType;
+static arrow::Status Exec(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) { 
+    using InputValueCType = typename arrow::TypeTraits<I>::CType;
+    ExprValueCastState* state = static_cast<ExprValueCastState*>(ctx->state());
+    pb::PrimitiveType type = state->type;
+    const arrow::ArraySpan& input = batch[0].array;
+    arrow::ArraySpan* out_data = out->array_span_mutable();
+    OutputValueCType* out_values = out_data->GetValues<OutputValueCType>(1);
     switch (type) {
         case pb::TIME: {
-            const uint64_t* in_values = input.GetValues<uint64_t>(1);
-            for (int64_t i = 0; i < input.length; ++i) {
+            const InputValueCType* in_values = input.GetValues<InputValueCType>(1);
+            for (auto i = 0; i < input.length; ++i) {
                 *out_values++ = datetime_to_timestamp(time_to_datetime(*in_values++));
             }
             break;
         }
         case pb::DATE: {
-            const int32_t* in_values = input.GetValues<int32_t>(1);
-            for (int64_t i = 0; i < input.length; ++i) {
+            const InputValueCType* in_values = input.GetValues<InputValueCType>(1);
+            for (auto i = 0; i < input.length; ++i) {
                 *out_values++ = datetime_to_timestamp(date_to_datetime(*in_values++));
             }
             break;
         }
         case pb::DATETIME: {
-            const uint32_t* in_values = input.GetValues<uint32_t>(1);
-            for (int64_t i = 0; i < input.length; ++i) {
-                *out_values++ = datetime_to_timestamp(timestamp_to_datetime(*in_values++));
+            const InputValueCType* in_values = input.GetValues<InputValueCType>(1);
+            for (auto i = 0; i < input.length; ++i) {
+                *out_values++ = datetime_to_timestamp(*in_values++);
             }
-            break;
-        }
-        case pb::STRING: {
-            arrow::compute::internal::VisitArrayValuesInline<arrow::LargeBinaryType>(
-                input,
-                [&](std::string_view v) {
-                    *out_values++ = datetime_to_timestamp(str_to_datetime(v.data(), v.length()));
-                },
-                [&]() {
-                    // null
-                    *out_values++ = uint32_t{};
-                });
             break;
         }
         default:
@@ -788,20 +827,44 @@ arrow::Status ExecExprValueToTimeStamp(arrow::compute::KernelContext* ctx, const
     }
     return arrow::Status::OK();
 }
-
-template <typename I>
-arrow::Status ExecExprValueToString(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) {    
+static arrow::Status ExecStringInput(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) { 
     ExprValueCastState* state = static_cast<ExprValueCastState*>(ctx->state());
     pb::PrimitiveType type = state->type;
     const arrow::ArraySpan& input = batch[0].array;
-    arrow::LargeBinaryBuilder builder(arrow::large_binary(), ctx->memory_pool());
+    arrow::ArraySpan* out_data = out->array_span_mutable();
+    OutputValueCType* out_values = out_data->GetValues<OutputValueCType>(1);
+    if (type != pb::STRING) {
+        return arrow::Status::TypeError("not support");
+    }
+    arrow::compute::internal::VisitArrayValuesInline<arrow::LargeBinaryType>(
+        input,
+        [&](std::string_view v) {
+            *out_values++ = datetime_to_timestamp(str_to_datetime(v.data(), v.length()));
+        },
+        [&]() {
+            // null
+            *out_values++ = OutputValueCType{};
+        });
+    return arrow::Status::OK();
+}
+};
+
+template <typename O, typename I>
+arrow::Status ExecExprValueToString(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) {    
+    using InputValueCType = typename arrow::TypeTraits<I>::CType;
+    using BuilderType = typename arrow::TypeTraits<O>::BuilderType;
+
+    ExprValueCastState* state = static_cast<ExprValueCastState*>(ctx->state());
+    pb::PrimitiveType type = state->type;
+    const arrow::ArraySpan& input = batch[0].array;
+    BuilderType builder;
     switch (type) {
         case pb::FLOAT: {
             arrow::VisitArraySpanInline<I>(
                 input,
-                [&](float v) {
+                [&](InputValueCType v) {
                     char tmp_buf[24] = {0};
-                    snprintf(tmp_buf, sizeof(tmp_buf), "%.6g", v);
+                    snprintf(tmp_buf, sizeof(tmp_buf), "%.6g", (double)v);
                     return builder.Append(std::string(tmp_buf));
                 },
                 [&]() { return builder.AppendNull(); });
@@ -810,9 +873,9 @@ arrow::Status ExecExprValueToString(arrow::compute::KernelContext* ctx, const ar
         case pb::DOUBLE: {
             arrow::VisitArraySpanInline<I>(
                 input,
-                [&](double v) {
+                [&](InputValueCType v) {
                     char tmp_buf[24] = {0};
-                    snprintf(tmp_buf, sizeof(tmp_buf), "%.12g", v);
+                    snprintf(tmp_buf, sizeof(tmp_buf), "%.12g", (double)v);
                     return builder.Append(std::string(tmp_buf));
                 },
                 [&]() { return builder.AppendNull(); });
@@ -821,7 +884,7 @@ arrow::Status ExecExprValueToString(arrow::compute::KernelContext* ctx, const ar
         case pb::DATETIME: {
             arrow::VisitArraySpanInline<I>(
                 input,
-                [&](uint64_t v) {
+                [&](InputValueCType v) {
                     return builder.Append(datetime_to_str(v));
                 },
                 [&]() { return builder.AppendNull(); });
@@ -830,7 +893,7 @@ arrow::Status ExecExprValueToString(arrow::compute::KernelContext* ctx, const ar
         case pb::TIME: {
             arrow::VisitArraySpanInline<I>(
                 input,
-                [&](int32_t v) {
+                [&](InputValueCType v) {
                     return builder.Append(time_to_str(v));
                 },
                 [&]() { return builder.AppendNull(); });
@@ -839,7 +902,7 @@ arrow::Status ExecExprValueToString(arrow::compute::KernelContext* ctx, const ar
         case pb::TIMESTAMP: {
             arrow::VisitArraySpanInline<I>(
                 input,
-                [&](uint32_t v) {
+                [&](InputValueCType v) {
                     return builder.Append(timestamp_to_str(v));
                 },
                 [&]() { return builder.AppendNull(); });
@@ -848,7 +911,7 @@ arrow::Status ExecExprValueToString(arrow::compute::KernelContext* ctx, const ar
         case pb::DATE: {
             arrow::VisitArraySpanInline<I>(
                 input,
-                [&](uint32_t v) {
+                [&](InputValueCType v) {
                     return builder.Append(date_to_str(v));
                 },
                 [&]() { return builder.AppendNull(); });
@@ -889,15 +952,21 @@ arrow::Status ArrowFunctionManager::RegisterAllDefinedFunction() {
         auto expr_value_to_string_func = std::make_shared<arrow::compute::ScalarFunction>("expr_value_to_string", arrow::compute::Arity::Unary(),
                                                     /*doc=*/arrow::compute::FunctionDoc::Empty());
         // Time -> string
-        arrow::compute::ScalarKernel k_time_to_string({arrow::int32()}, arrow::large_binary(), ExecExprValueToString<arrow::Int32Type>, InitExprValueCast); 
+        arrow::compute::ScalarKernel k_time_to_string({arrow::int32()}, arrow::large_binary(), 
+                                                ExecExprValueToString<arrow::LargeBinaryType, arrow::Int32Type>, InitExprValueCast); 
         // TIMESTAMP/DATE -> string
-        arrow::compute::ScalarKernel k_timestamp_date_to_string({arrow::uint32()}, arrow::large_binary(), ExecExprValueToString<arrow::UInt32Type>, InitExprValueCast);
+        arrow::compute::ScalarKernel k_timestamp_date_to_string({arrow::uint32()}, arrow::large_binary(), 
+                                                ExecExprValueToString<arrow::LargeBinaryType, arrow::UInt32Type>, InitExprValueCast);
         // DATETIME -> string 
-        arrow::compute::ScalarKernel k_datetime_to_string({arrow::uint64()}, arrow::large_binary(), ExecExprValueToString<arrow::UInt64Type>, InitExprValueCast);
+        arrow::compute::ScalarKernel k_datetime_to_string({arrow::uint64()}, arrow::large_binary(), 
+                                                ExecExprValueToString<arrow::LargeBinaryType, arrow::UInt64Type>, InitExprValueCast);
         // float -> string, 精度统一
-        arrow::compute::ScalarKernel k_float_to_string({arrow::float32()}, arrow::large_binary(), ExecExprValueToString<arrow::FloatType>, InitExprValueCast);
+        arrow::compute::ScalarKernel k_float_to_string({arrow::float32()}, arrow::large_binary(), 
+                                                ExecExprValueToString<arrow::LargeBinaryType, arrow::FloatType>, InitExprValueCast);
         // double -> string, 精度统一
-        arrow::compute::ScalarKernel k_double_to_string({arrow::float64()}, arrow::large_binary(), ExecExprValueToString<arrow::DoubleType>, InitExprValueCast);
+        arrow::compute::ScalarKernel k_double_to_string({arrow::float64()}, arrow::large_binary(), 
+                                                ExecExprValueToString<arrow::LargeBinaryType, arrow::DoubleType>, InitExprValueCast);
+
         ARROW_RETURN_NOT_OK(expr_value_to_string_func->AddKernel(k_time_to_string));
         ARROW_RETURN_NOT_OK(expr_value_to_string_func->AddKernel(k_timestamp_date_to_string));
         ARROW_RETURN_NOT_OK(expr_value_to_string_func->AddKernel(k_datetime_to_string));
@@ -912,10 +981,15 @@ arrow::Status ArrowFunctionManager::RegisterAllDefinedFunction() {
     {
         auto expr_value_to_date_func = std::make_shared<arrow::compute::ScalarFunction>("expr_value_to_date", arrow::compute::Arity::Unary(),
                                                     /*doc=*/arrow::compute::FunctionDoc::Empty());
-        arrow::compute::ScalarKernel k_string_to_date({arrow::large_binary()}, arrow::uint32(), ExecExprValueToDate, InitExprValueCast);
-        arrow::compute::ScalarKernel k_timestamp_to_date({arrow::uint32()}, arrow::uint32(), ExecExprValueToDate, InitExprValueCast);
-        arrow::compute::ScalarKernel k_time_to_date({arrow::int32()}, arrow::uint32(), ExecExprValueToDate, InitExprValueCast);
-        arrow::compute::ScalarKernel k_datetime_to_date({arrow::uint64()}, arrow::uint32(), ExecExprValueToDate, InitExprValueCast);
+        arrow::compute::ScalarKernel k_string_to_date({arrow::large_binary()}, arrow::uint32(), 
+                                                ExecExprValueToDate<arrow::UInt32Type, arrow::LargeBinaryType>::ExecStringInput, InitExprValueCast);
+        arrow::compute::ScalarKernel k_timestamp_to_date({arrow::uint32()}, arrow::uint32(), 
+                                                ExecExprValueToDate<arrow::UInt32Type, arrow::UInt32Type>::Exec, InitExprValueCast);
+        arrow::compute::ScalarKernel k_time_to_date({arrow::int32()}, arrow::uint32(), 
+                                                ExecExprValueToDate<arrow::UInt32Type, arrow::Int32Type>::Exec, InitExprValueCast);
+        arrow::compute::ScalarKernel k_datetime_to_date({arrow::uint64()}, arrow::uint32(), 
+                                                ExecExprValueToDate<arrow::UInt32Type, arrow::UInt64Type>::Exec, InitExprValueCast);
+
         ARROW_RETURN_NOT_OK(expr_value_to_date_func->AddKernel(k_string_to_date));
         ARROW_RETURN_NOT_OK(expr_value_to_date_func->AddKernel(k_timestamp_to_date));
         ARROW_RETURN_NOT_OK(expr_value_to_date_func->AddKernel(k_time_to_date));
@@ -929,9 +1003,13 @@ arrow::Status ArrowFunctionManager::RegisterAllDefinedFunction() {
     {
         auto expr_value_to_datetime_func = std::make_shared<arrow::compute::ScalarFunction>("expr_value_to_datetime", arrow::compute::Arity::Unary(),
                                                     /*doc=*/arrow::compute::FunctionDoc::Empty());
-        arrow::compute::ScalarKernel k_string_to_datetime({arrow::large_binary()}, arrow::uint64(), ExecExprValueToDateTime, InitExprValueCast);
-        arrow::compute::ScalarKernel k_timestamp_date_to_datetime({arrow::uint32()}, arrow::uint64(), ExecExprValueToDateTime, InitExprValueCast);
-        arrow::compute::ScalarKernel k_time_to_datetime({arrow::int32()}, arrow::uint64(), ExecExprValueToDateTime, InitExprValueCast);
+        arrow::compute::ScalarKernel k_string_to_datetime({arrow::large_binary()}, arrow::uint64(), 
+                                                ExecExprValueToDateTime<arrow::UInt64Type, arrow::LargeBinaryType>::ExecStringInput, InitExprValueCast);
+        arrow::compute::ScalarKernel k_timestamp_date_to_datetime({arrow::uint32()}, arrow::uint64(), 
+                                                ExecExprValueToDateTime<arrow::UInt64Type, arrow::UInt32Type>::Exec, InitExprValueCast);
+        arrow::compute::ScalarKernel k_time_to_datetime({arrow::int32()}, arrow::uint64(), 
+                                                ExecExprValueToDateTime<arrow::UInt64Type, arrow::Int32Type>::Exec, InitExprValueCast);
+
         ARROW_RETURN_NOT_OK(expr_value_to_datetime_func->AddKernel(k_string_to_datetime));
         ARROW_RETURN_NOT_OK(expr_value_to_datetime_func->AddKernel(k_timestamp_date_to_datetime));
         ARROW_RETURN_NOT_OK(expr_value_to_datetime_func->AddKernel(k_time_to_datetime));
@@ -944,9 +1022,13 @@ arrow::Status ArrowFunctionManager::RegisterAllDefinedFunction() {
     {
         auto expr_value_to_time_func = std::make_shared<arrow::compute::ScalarFunction>("expr_value_to_time", arrow::compute::Arity::Unary(),
                                                     /*doc=*/arrow::compute::FunctionDoc::Empty());
-        arrow::compute::ScalarKernel k_string_to_time({arrow::large_binary()}, arrow::int32(), ExecExprValueToTime, InitExprValueCast);
-        arrow::compute::ScalarKernel k_timestamp_date_to_time({arrow::uint32()}, arrow::int32(), ExecExprValueToTime, InitExprValueCast);
-        arrow::compute::ScalarKernel k_datetime_to_time({arrow::uint64()}, arrow::int32(), ExecExprValueToTime, InitExprValueCast);
+        arrow::compute::ScalarKernel k_string_to_time({arrow::large_binary()}, arrow::int32(), 
+                                                ExecExprValueToTime<arrow::Int32Type, arrow::LargeBinaryType>::ExecStringInput, InitExprValueCast);
+        arrow::compute::ScalarKernel k_timestamp_date_to_time({arrow::uint32()}, arrow::int32(), 
+                                                ExecExprValueToTime<arrow::Int32Type, arrow::UInt32Type>::Exec, InitExprValueCast);
+        arrow::compute::ScalarKernel k_datetime_to_time({arrow::uint64()}, arrow::int32(), 
+                                                ExecExprValueToTime<arrow::Int32Type, arrow::UInt64Type>::Exec, InitExprValueCast);
+                                                
         ARROW_RETURN_NOT_OK(expr_value_to_time_func->AddKernel(k_string_to_time));
         ARROW_RETURN_NOT_OK(expr_value_to_time_func->AddKernel(k_timestamp_date_to_time));
         ARROW_RETURN_NOT_OK(expr_value_to_time_func->AddKernel(k_datetime_to_time));
@@ -959,10 +1041,14 @@ arrow::Status ArrowFunctionManager::RegisterAllDefinedFunction() {
     {
         auto expr_value_to_timestamp_func = std::make_shared<arrow::compute::ScalarFunction>("expr_value_to_timestamp", arrow::compute::Arity::Unary(),
                                                     /*doc=*/arrow::compute::FunctionDoc::Empty());
-        arrow::compute::ScalarKernel k_string_to_timestamp({arrow::large_binary()}, arrow::uint32(), ExecExprValueToTimeStamp, InitExprValueCast);
-        arrow::compute::ScalarKernel k_date_to_timestamp({arrow::uint32()}, arrow::uint32(), ExecExprValueToTimeStamp, InitExprValueCast);
-        arrow::compute::ScalarKernel k_datetime_to_timestamp({arrow::uint64()}, arrow::uint32(), ExecExprValueToTimeStamp, InitExprValueCast);
-        arrow::compute::ScalarKernel k_time_to_timestamp({arrow::int32()}, arrow::uint32(), ExecExprValueToTimeStamp, InitExprValueCast);
+        arrow::compute::ScalarKernel k_string_to_timestamp({arrow::large_binary()}, arrow::uint32(), 
+                                                ExecExprValueToTimeStamp<arrow::UInt32Type, arrow::LargeBinaryType>::ExecStringInput, InitExprValueCast);
+        arrow::compute::ScalarKernel k_date_to_timestamp({arrow::uint32()}, arrow::uint32(), 
+                                                ExecExprValueToTimeStamp<arrow::UInt32Type, arrow::UInt32Type>::Exec, InitExprValueCast);
+        arrow::compute::ScalarKernel k_datetime_to_timestamp({arrow::uint64()}, arrow::uint32(), 
+                                                ExecExprValueToTimeStamp<arrow::UInt32Type, arrow::UInt64Type>::Exec, InitExprValueCast);
+        arrow::compute::ScalarKernel k_time_to_timestamp({arrow::int32()}, arrow::uint32(), 
+                                                ExecExprValueToTimeStamp<arrow::UInt32Type, arrow::Int32Type>::Exec, InitExprValueCast);
         ARROW_RETURN_NOT_OK(expr_value_to_timestamp_func->AddKernel(k_string_to_timestamp));
         ARROW_RETURN_NOT_OK(expr_value_to_timestamp_func->AddKernel(k_date_to_timestamp));
         ARROW_RETURN_NOT_OK(expr_value_to_timestamp_func->AddKernel(k_datetime_to_timestamp));

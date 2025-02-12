@@ -57,6 +57,10 @@ int JoinNode::init(const pb::PlanNode& node) {
 int JoinNode::predicate_pushdown(std::vector<ExprNode*>& input_exprs) {
     //DB_WARNING("node:%ld is pushdown", this);
     convert_to_inner_join(input_exprs);
+    if (_join_type == pb::FULL_JOIN) {
+        return 0;
+    }
+
     std::vector<ExprNode*> outer_push_exprs;
     std::vector<ExprNode*> inner_push_exprs;
     std::vector<ExprNode*> correlate_exprs;
@@ -156,6 +160,40 @@ void JoinNode::convert_to_inner_join(std::vector<ExprNode*>& input_exprs) {
         ((JoinNode*)_outer_node)->convert_to_inner_join(full_exprs);
     }
     if (_join_type == pb::INNER_JOIN) {
+        return;
+    }
+    if (_join_type == pb::FULL_JOIN) {
+        bool outer_has_not_null_expr = false;
+        bool inner_has_not_null_expr = false;
+        for (auto& expr : input_exprs) {
+            bool is_expr_contains_null_function = expr->contains_null_function();
+            bool is_outer_contains_expr = outer_contains_expr(expr);
+            bool is_inner_contains_expr = inner_contains_expr(expr);
+            if (is_outer_contains_expr && !is_expr_contains_null_function) {
+                outer_has_not_null_expr = true;
+            } else if (is_inner_contains_expr && !is_expr_contains_null_function) {
+                inner_has_not_null_expr = true;
+            } else if (!is_outer_contains_expr 
+                        && !is_inner_contains_expr
+                        && contains_expr(expr) 
+                        && !is_expr_contains_null_function 
+                        && !expr->contains_special_operator(pb::OR_PREDICATE)) {
+                inner_has_not_null_expr = true;
+                outer_has_not_null_expr = true;
+                break;
+            }
+        }
+        if (outer_has_not_null_expr && inner_has_not_null_expr) {
+            set_join_type(pb::INNER_JOIN);
+        } else if (outer_has_not_null_expr) {
+            set_join_type(pb::LEFT_JOIN);
+        } else if (inner_has_not_null_expr) {
+            set_join_type(pb::RIGHT_JOIN);
+            _outer_node = _children[1];
+            _inner_node = _children[0];
+            _outer_tuple_ids = _right_tuple_ids;
+            _inner_tuple_ids = _left_tuple_ids;
+        }
         return;
     }
     
@@ -364,7 +402,9 @@ int JoinNode::build_arrow_declaration(RuntimeState* state) {
         case pb::ANTI_SEMI_JOIN:
             join_type = arrow::acero::JoinType::LEFT_ANTI;
             break;
-        case pb::NULL_JOIN:
+        case pb::FULL_JOIN:
+            join_type = arrow::acero::JoinType::FULL_OUTER;
+            break;
         default:
             DB_FATAL_STATE(state, "UNSATISFIED JOIN TYPE:%d", _join_type);
             return -1;
@@ -427,6 +467,9 @@ int JoinNode::hash_join(RuntimeState* state) {
                 return -1;
             }
         }
+    }
+    if (_join_type == pb::FULL_JOIN) {
+        return no_index_hash_join(state);
     }
     if (state->execute_type == pb::EXEC_ARROW_ACERO 
             && (!_use_index_join || state->sign_exec_type == SignExecType::SIGN_EXEC_ARROW_FORCE_NO_INDEX_JOIN)) {
@@ -726,6 +769,7 @@ int JoinNode::get_next_for_hash_outer_join(RuntimeState* state, RowBatch* batch,
                     DB_WARNING("construct result batch fail");
                     return ret;
                 }
+                // match=false会补null行
                 ++_num_rows_returned;
             }
         } else {
@@ -793,7 +837,9 @@ int JoinNode::get_next_for_hash_inner_join(RuntimeState* state, RowBatch* batch,
                     DB_WARNING("construct result batch fail");
                     return ret;
                 }
-                ++_num_rows_returned;
+                if (matched) {
+                    ++_num_rows_returned;
+                }
             }
         }
         _result_row_index = 0;
@@ -872,7 +918,9 @@ int JoinNode::get_next_for_loop_hash_inner_join(RuntimeState* state, RowBatch* b
                     DB_WARNING("construct result batch fail");
                     return ret;
                 }
-                ++_num_rows_returned;
+                if (matched) {
+                    ++_num_rows_returned;
+                }
             }
         }
         _result_row_index = 0;

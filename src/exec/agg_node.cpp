@@ -106,6 +106,9 @@ bool AggNode::can_use_arrow_vector() {
         if (!expr->can_use_arrow_vector()) {
             return false;
         }
+        if (expr->col_type() == pb::DOUBLE || expr->col_type() == pb::FLOAT) {
+            return false;
+        }
         if (!expr->is_slot_ref()) {
             continue;
         }

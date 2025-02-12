@@ -178,6 +178,43 @@ ExecNode* ExecNode::get_node(const pb::PlanNodeType node_type) {
     }
 }
 
+ExecNode* ExecNode::get_node_pass_subquery(const pb::PlanNodeType node_type) {
+    if (_node_type == node_type) {
+        return this;
+    }
+    if (_node_type == pb::DUAL_SCAN_NODE) {
+        DualScanNode* dual_scan_node = static_cast<DualScanNode*>(this);
+        ExecNode* sub_query_node = dual_scan_node->sub_query_node();
+        if (sub_query_node == nullptr) {
+            return nullptr;
+        }
+        return sub_query_node->get_node_pass_subquery(node_type);
+    }
+    for (auto c : _children) {
+        ExecNode* node = c->get_node_pass_subquery(node_type);
+        if (node != nullptr) {
+            return node;
+        }
+    }
+    return nullptr;
+}
+
+void ExecNode::get_node_pass_subquery(const pb::PlanNodeType node_type, std::vector<ExecNode*>& exec_nodes) {
+    if (_node_type == node_type) {
+        exec_nodes.emplace_back(this);
+    }
+    if (_node_type == pb::DUAL_SCAN_NODE) {
+        DualScanNode* dual_scan_node = static_cast<DualScanNode*>(this);
+        ExecNode* sub_query_node = dual_scan_node->sub_query_node();
+        if (sub_query_node != nullptr) {
+            sub_query_node->get_node_pass_subquery(node_type, exec_nodes);
+        }
+    }
+    for (auto c : _children) {
+        c->get_node_pass_subquery(node_type, exec_nodes);
+    }
+}
+
 bool ExecNode::need_seperate() {
     switch (_node_type) {
         case pb::INSERT_NODE:

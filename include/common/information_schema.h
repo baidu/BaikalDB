@@ -51,6 +51,7 @@ private:
     void init_partition_split_info();
     void init_region_status();
     void init_learner_region_status();
+    void init_region_rollup_status();
     void init_olap_tables();
     void init_afs_partitions();
     void init_invalid_learner_region();

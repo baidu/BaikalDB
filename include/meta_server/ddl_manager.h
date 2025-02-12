@@ -195,7 +195,11 @@ public:
             for (auto iter = task_store_map.begin(); iter != task_store_map.end();) {
                 if (iter->first.find(task_prefix) == 0) {
                     DB_NOTICE("store_check DBManger clear task: %s", iter->first.c_str());
-                    store_ddlwork_cnt_map.erase(iter->first);
+                    std::string& ip = iter->second;
+                    store_ddlwork_cnt_map[ip]--;
+                    if (store_ddlwork_cnt_map[ip] <= 0) {
+                        store_ddlwork_cnt_map.erase(ip);
+                    }
                     iter = task_store_map.erase(iter);
                 } else {
                     iter++;

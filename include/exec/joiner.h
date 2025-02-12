@@ -105,6 +105,9 @@ public:
         return true;
     }
     bool is_use_index_join() {
+        if (_join_type == pb::FULL_JOIN) {
+            return false;
+        }
         return _use_index_join;
     }
     void adjudge_join_type();

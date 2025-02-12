@@ -128,6 +128,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     FORCE
     FOREIGN
     FROM
+    FULL
     FULLTEXT
     GENERATED
     GRANT
@@ -1587,6 +1588,9 @@ JoinType:
     }
     | RIGHT {
         $$ = JT_RIGHT_JOIN;
+    }
+    | FULL {
+        $$ = JT_FULL_JOIN;
     }
     ;
 OuterOpt:

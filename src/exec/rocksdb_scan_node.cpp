@@ -1154,8 +1154,9 @@ int RocksdbScanNode::index_ddl_work(RuntimeState* state, MemRow* row) {
     }
     if (_ddl_index_info->type == pb::I_ROLLUP) {
         for (auto& field_info : _table_info->fields) {
-            if (pri_field_ids.count(field_info.id) == 0) 
-            _field_ids[field_info.id] = &field_info;
+            if (pri_field_ids.count(field_info.id) == 0) {
+                _field_ids[field_info.id] = &field_info;
+            }
         }
     }
     

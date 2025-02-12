@@ -1247,6 +1247,7 @@ NetworkServer::~NetworkServer() {
     _agg_sql_bth.join();
     _health_check_bth.join();
     _ext_fs_gc_bth.join();
+    _conn_bvars_update_bth.join();
     if (_epoll_info != NULL) {
         delete _epoll_info;
         _epoll_info = NULL;

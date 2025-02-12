@@ -48,7 +48,8 @@ std::map<parser::JoinType, pb::JoinType> LogicalPlanner::join_type_mapping {
         { parser::JT_NONE, pb::NULL_JOIN},    
         { parser::JT_INNER_JOIN, pb::INNER_JOIN},
         { parser::JT_LEFT_JOIN, pb::LEFT_JOIN},
-        { parser::JT_RIGHT_JOIN, pb::RIGHT_JOIN}
+        { parser::JT_RIGHT_JOIN, pb::RIGHT_JOIN},
+        { parser::JT_FULL_JOIN, pb::FULL_JOIN}
     };
 
 int LogicalPlanner::create_n_ary_predicate(const parser::FuncExpr* func_item, 

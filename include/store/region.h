@@ -1252,6 +1252,8 @@ public:
     int sync_olap_index_info(const pb::OlapRegionInfo& old_olap_info, 
                         pb::OlapRegionStat state, 
                         std::map<int64_t, std::vector<std::string> > new_index_ext_paths_mapping);
+    void do_cold_index_ddl_work(const pb::OlapRegionInfo& olap_info);
+    int doing_cold_data_rollup(int64_t index_id);
     // int copy_files(const std::vector<rocksdb::LiveFileMetaData>& sst_files, std::vector<std::string>& external_files);
     // int copy_file(const std::string& local_file, std::string& external_file);
     int get_cold_sst(std::set<std::string>& sst_relative_filename);

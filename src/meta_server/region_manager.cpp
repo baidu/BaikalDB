@@ -2443,8 +2443,13 @@ void RegionManager::check_peer_count(int64_t region_id,
         if (remove_peer.empty() && !peer_not_in_replica_dist.empty()) {
             int64_t rand = butil::fast_rand() % peer_not_in_replica_dist.size();
             remove_peer = peer_not_in_replica_dist[rand];
+            if (is_binlog_region && !binlog_peer_can_delete(remove_peer, region_id)) {
+                DB_WARNING("table_id: %ld, region_id: %ld, want remove peer: %s for not in replicaDist. but region without enough binlog data, skip",
+                        table_id, region_id, remove_peer.c_str());
+                return;
+            }
             DB_WARNING("table_id: %ld, region_id: %ld, remove peer: %s, because of not in replicaDist.",
-                       table_id, region_id, remove_peer.c_str());
+                    table_id, region_id, remove_peer.c_str());
         }
         // 按照用户指定的副本分布来做remove_peer
         int64_t max_peer_count = 0;

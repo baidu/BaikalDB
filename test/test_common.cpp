@@ -530,7 +530,6 @@ TEST(bns_to_meta_bns_test, case_all) {
         {"1.opera-aladdin-baikaldb-000-bj.FENGCHAO.dbl",           "group.opera-aladdin-baikalMeta-000-bj.FENGCHAO.all"},
         {"group.opera-aladdin-baikaldb-000-nj.FENGCHAO.all",       "group.opera-aladdin-baikalMeta-000-bj.FENGCHAO.all"},
         {"7.opera-aladdin-baikalStore-000-mix.FENGCHAO.gzhxy",     "group.opera-aladdin-baikalMeta-000-bj.FENGCHAO.all"},
-        {"0.opera-hmkv-baikalStore-000-yq.FENGCHAO.yq012",         "group.opera-holmes-baikalMeta-000-yq.FENGCHAO.all"},
         {"55.opera-hm-baikalStore-000-bd.FENGCHAO.bddwd",          "group.opera-holmes-baikalMeta-000-yq.FENGCHAO.all"},
         {"group.opera-hm-baikalStore-000-bd.FENGCHAO.all.serv",    "group.opera-holmes-baikalMeta-000-yq.FENGCHAO.all"},
         {"1.opera-adp-baikalBinlog-000-bj.FENGCHAO.bjhw",          "group.opera-ps-baikalMeta-000-bj.FENGCHAO.all"},

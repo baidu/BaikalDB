@@ -107,14 +107,6 @@ struct ExprValueCastState : public arrow::compute::KernelState {
     explicit ExprValueCastState(pb::PrimitiveType type) : type(type) {}
 };
 
-template<typename M>
-arrow::Status ExecExprValueToString(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out);
-
-arrow::Status ExecExprValueToDate(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out);
-arrow::Status ExecExprValueToTime(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out);
-arrow::Status ExecExprValueToDateTime(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out);
-arrow::Status ExecExprValueToTimeStamp(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out);
-
 class ArrowFunctionManager : public ObjectManager<
                         ArrowExprBuildFun, 
                         ArrowFunctionManager> {

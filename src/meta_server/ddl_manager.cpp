@@ -30,8 +30,8 @@ DEFINE_int32(max_region_num_ratio, 2, "max region number ratio");
 DEFINE_int32(max_ddl_retry_time, 30, "max ddl retry time");
 DECLARE_int32(baikal_heartbeat_interval_us);
 DEFINE_bool(all_rollup_region_need_execute, false, "all rollup region need execute");
-DEFINE_int32(store_max_concurrent_ratio, 5, "store max concurrent ratio");
 DEFINE_int32(single_store_max_ddlwork_num, 3, "store max ddlwork num");
+DEFINE_bool(cold_data_rollup_done, true, "cold data rollup done");
 
 std::string construct_ddl_work_key(const std::string& identify, const std::initializer_list<int64_t>& ids) {
     std::string ddl_key;
@@ -277,20 +277,6 @@ int DBManager::execute_task(MemRegionDdlWork& work) {
         return -1;
     }
 
-    // table_id找到对应store集群实例个数
-    std::string resource_tag;
-    auto ret = TableManager::get_instance()->get_resource_tag(work.region_info.table_id(), resource_tag);
-    if (ret < 0) {
-        DB_WARNING("table id: %ld not exist", work.region_info.table_id());
-        return -1;
-    }
-    int64_t total_instance_count = ClusterManager::get_instance()->get_instance_count(resource_tag);
-    if (all_task_count_by_table_id > total_instance_count * FLAGS_store_max_concurrent_ratio) {
-        DB_NOTICE("table %s ddl task count %d reach max concurrency %ld", table_id_prefix.c_str(),
-            all_task_count_by_table_id, total_instance_count * FLAGS_store_max_concurrent_ratio);
-        return -1;
-    }
-
     //选择address执行
     auto& region_ddl_info = work.region_info;
     work.update_timestamp = butil::gettimeofday_us();
@@ -299,12 +285,12 @@ int DBManager::execute_task(MemRegionDdlWork& work) {
         auto task_id = std::to_string(region_ddl_info.table_id()) + "_" + std::to_string(region_ddl_info.region_id());
         // 一个store同一时间只能执行single_store_max_ddlwork_num个ddl任务
         SmartRegionInfo region_info = RegionManager::get_instance()->get_region_info(region_ddl_info.region_id());
-        {
+        if (region_info != nullptr && work.region_info.op_type() != pb::OP_MODIFY_FIELD) {
             BAIDU_SCOPED_LOCK(_task_store_mutex);
             if (store_ddlwork_cnt_map[region_info->leader()] >= FLAGS_single_store_max_ddlwork_num) {
                 DB_NOTICE("store_check address_%s is doing %d ddl_work", 
                     region_info->leader().c_str(), store_ddlwork_cnt_map[region_info->leader()]);
-                return -1;
+                return -2;
             } else {
                 store_ddlwork_cnt_map[region_info->leader()]++;
                 task_store_map[task_id] = region_info->leader();
@@ -455,7 +441,7 @@ int DBManager::restore_task(const pb::RegionDdlWork& region_ddl_info) {
         db_task_map.doing_task_map[task_id] = work;
         {
             SmartRegionInfo region_info = RegionManager::get_instance()->get_region_info(region_ddl_info.region_id());
-            {
+            if (region_info != nullptr) {
                 BAIDU_SCOPED_LOCK(this->_task_store_mutex);
                 store_ddlwork_cnt_map[region_info->leader()]++;
                 task_store_map[task_id] = region_info->leader();
@@ -1036,6 +1022,28 @@ int DDLManager::add_index_ddlwork(pb::DdlWorkInfo& ddl_work) {
                             DB_NOTICE("table_id: %ld, region_id: %ld, partition %ld not exist, region ddl work done", table_id, region_work.region_info.region_id(), region_work.region_info.partition());
                             return true;
                         }
+                    
+                        // 百+集群只有OLAP_ACTIVE状态, 需要下发任务
+                        if (FLAGS_cold_data_rollup_done) {
+                            pb::SchemaInfo table_schema_pb;
+                            int ret = TableManager::get_instance()->get_table_info(table_id, table_schema_pb);
+                            if (ret != 0) {
+                                DB_WARNING("get table info failed, table id: %ld", table_id);
+                                return true;
+                            }
+                            if (table_schema_pb.has_partition_info()) {
+                                const pb::PartitionInfo& partition_info_pb = table_schema_pb.partition_info();
+                                for (auto it = partition_info_pb.range_partition_infos().rbegin(); it != partition_info_pb.range_partition_infos().rend(); ++it) {
+                                if (it->partition_id() == region_work.region_info.partition()) {
+                                    if (it->is_cold()) {
+                                        region_work.region_info.set_status(pb::DdlWorkDone);
+                                        DB_NOTICE("table_id: %ld, region_id: %ld, partition %ld is cold, region ddl work done", table_id, region_work.region_info.region_id(), region_work.region_info.partition());
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     }
 
                     // 1. 判断region是不是符合日期, 为了方便测试, 测试集群不做判断
@@ -1095,7 +1103,8 @@ bool DDLManager::execute_or_retry_task(bool& done, bool& rollback, int64_t table
     if (region_work.region_info.status() == pb::DdlWorkIdle) {
         done = false;
         DB_NOTICE("execute task_%s %s", task_id.c_str(), region_work.region_info.ShortDebugString().c_str());
-        if (DBManager::get_instance()->execute_task(region_work) == 0) {
+        int ret = DBManager::get_instance()->execute_task(region_work);
+        if (ret == 0) {
             //提交任务成功，设置状态为DOING.
             region_work.region_info.set_status(pb::DdlWorkDoing);
             if (increase_doing_work_number(table_id) > region_size * FLAGS_max_region_num_ratio) {
@@ -1107,6 +1116,9 @@ bool DDLManager::execute_or_retry_task(bool& done, bool& rollback, int64_t table
                 DB_NOTICE("table_%ld launch task next round.", table_id);
                 return false;
             }
+        } else if (ret == -2) {
+            // 单个store任务满, 尝试下一个region_work
+            return true;
         } else {
             DB_NOTICE("table_%ld not enough baikaldb to execute.", table_id);
             return false;
@@ -1166,7 +1178,7 @@ int DDLManager::is_region_work_need_executor(MemRegionDdlWork& region_work, int6
         SAFE_DELETE(p_right_node);
     });
     TableManager::get_instance()->get_partition_range_info(table_id, region_work.region_info.partition(), partition_range);
-    if (!partition_range.has_left_value()) {
+    if (partition_range.left_value().nodes_size() == 0 || partition_range.right_value().nodes_size() == 0) {
         DB_FATAL("table_id: %ld, region_id: %ld, partition %ld has no range info", table_id, region_work.region_info.region_id(), region_work.region_info.partition());
         return -2;
     }
@@ -1252,7 +1264,8 @@ int DDLManager::add_column_ddlwork(pb::DdlWorkInfo& ddl_work) {
         if (region_work.region_info.status() == pb::DdlWorkIdle) {
             done = false;
             DB_NOTICE("execute task_%s %s", task_id.c_str(), region_work.region_info.ShortDebugString().c_str());
-            if (DBManager::get_instance()->execute_task(region_work) == 0) {
+            int ret = DBManager::get_instance()->execute_task(region_work);
+            if (ret == 0) {
                 //提交任务成功，设置状态为DOING.
                 region_work.region_info.set_status(pb::DdlWorkDoing);
                 if (increase_doing_work_number(table_id) > region_size * FLAGS_max_region_num_ratio) {
@@ -1264,6 +1277,9 @@ int DDLManager::add_column_ddlwork(pb::DdlWorkInfo& ddl_work) {
                     DB_NOTICE("table_%ld launch task next round.", table_id);
                     return false;
                 }
+            } else if (ret == -2) {
+                // 单个store任务满, 尝试下一个region_work
+                return true;
             } else {
                 DB_NOTICE("table_%ld not enough baikaldb to execute.", table_id);
                 return false;

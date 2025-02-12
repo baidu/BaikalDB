@@ -1307,7 +1307,9 @@ int FetcherStore::run_not_set_state(RuntimeState* state,
                     client_conn->state = STATE_ERROR;
                     return -1;
                 } else {
-                    return 0;
+                    // 让其他region也能执行rollback
+                    error = E_OK;
+                    break;
                 }
             }
             if (error != E_OK) {

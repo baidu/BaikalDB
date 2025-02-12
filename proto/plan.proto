@@ -183,6 +183,7 @@ enum JoinType {
     INNER_JOIN          = 3;
     SEMI_JOIN           = 4;
     ANTI_SEMI_JOIN      = 5;
+    FULL_JOIN           = 6;
 };
 
 message JoinNode {

@@ -238,6 +238,17 @@ private:
         TimeCost empty_time_cost;             // FaissIndex为空的时长
         std::atomic<int64_t> ref_cnt {0};     // 引用计数，用于删除空FaissIndex
 
+        ~FaissIndex() {
+            if (index != nullptr) {
+                delete index;
+                index = nullptr;
+            }
+            if (flat_index != nullptr) {
+                delete flat_index;
+                flat_index = nullptr;
+            }
+        }
+
         void inc_ref() {
             ++ref_cnt;
         }

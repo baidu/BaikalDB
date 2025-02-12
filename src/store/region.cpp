@@ -1777,6 +1777,11 @@ void Region::query(google::protobuf::RpcController* controller,
             }
 
             pb::OpType op_type = request->op_type();
+            if (op_type == pb::OP_SELECT_FOR_UPDATE && _olap_state.load() != pb::OLAP_ACTIVE) {
+                // 已经转冷, 让定时线程自己做索引
+                response->set_errcode(pb::SUCCESS);
+                return;
+            }
             if (is_cold_data_op_type(op_type) && _olap_state.load() != pb::OLAP_ACTIVE) {
                 response->set_errcode(pb::UNSUPPORT_REQ_TYPE);
                 response->set_errmsg("immutable olap not support write");
@@ -7506,7 +7511,10 @@ int Region::exec_rollup_region_finish_request(const pb::StoreReq& request,
         DB_FATAL("rollup_region_init_index: %ld is not expect", _rollup_region_init_index);
         return -1;
     }
-    
+    ON_SCOPE_EXIT([this]() {
+        _rollup_region_init_index = -1;
+        _meta_writer->update_rollup_region_init_index(_region_id, -1);
+    });
     MutTableKey begin_log_data_key;
     begin_log_data_key.append_i64(_region_id).append_u8(MyRaftLogStorage::LOG_DATA_IDENTIFY).append_i64(unappiled_begin_index);
     MutTableKey end_log_data_key;
@@ -7554,16 +7562,13 @@ int Region::exec_rollup_region_finish_request(const pb::StoreReq& request,
         }
         // 保证幂等
         if (olap_info.has_new_olap_index_info()) {
-            if (olap_info.new_olap_index_info().index_id() == ddl_index_id) {
-                return 0;
-            } else {
-                DB_WARNING("region_id: %ld, index_id: %ld is flushing cold", _region_id, olap_info.new_olap_index_info().index_id());
-                return -1;
-            }
+            DB_FATAL("region_id: %ld, index_id: %ld is flushing cold", _region_id, olap_info.new_olap_index_info().index_id());
+            return -1;
         }
         for (auto& olap_index_info : olap_info.olap_index_info_list()) {
             if (olap_index_info.index_id() == ddl_index_id) {
-                return 0;
+                DB_FATAL("region_id: %ld, index_id: %ld is flushed", _region_id, olap_info.new_olap_index_info().index_id());
+                return -1;
             }
         }
         
@@ -7580,7 +7585,6 @@ int Region::exec_rollup_region_finish_request(const pb::StoreReq& request,
         _meta_writer->write_olap_info(_region_id, olap_info);
     }
     _meta_writer->clear_unapplied_begin_index(_region_id);
-    _rollup_region_init_index = -1;
 
     return 0;
 }
@@ -8076,6 +8080,15 @@ int Region::delete_hot_local_rocksdb(int64_t table_id, int64_t index_id) {
             status.code(), status.ToString().c_str(), _region_id, table_id, index_id);
         return -1;
     }
+
+    pb::OlapRegionInfo olap_info;
+    int ret = _meta_writer->read_olap_info(_region_id, olap_info);
+    if (ret < 0) {
+        DB_FATAL("region_id: %ld read olap info failed", _region_id);
+        return -1;
+    }
+    olap_info.clear_new_olap_index_info();
+    _meta_writer->write_olap_info(_region_id, olap_info);
     return 0;
 }
 

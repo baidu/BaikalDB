@@ -54,6 +54,15 @@ public:
         }
         return true;
     }
+    
+    bool is_empty_filter() {
+        //只有scan_node做索引条件的时候会用_pruned_conjuncts
+        if (_children.size() > 0 && _children[0]->node_type() == pb::SCAN_NODE) {
+            return _pruned_conjuncts.empty();
+        } else {
+            return _conjuncts.empty();
+        }
+    }
 
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);

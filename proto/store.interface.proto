@@ -105,16 +105,17 @@ message BatchStoreRes {
 };
 
 message RegionIndexs {
-    optional int64     region_id    = 1;
-    optional int64     version      = 2;
-    optional int64     apply_index  = 3;
-    optional string    status       = 4;
-    optional string    resource_tag = 5;
-    optional int64     table_id     = 6;
-    optional OlapRegionStat olap_state = 7;
-    repeated string    external_full_path = 8;
-    optional bool      path_diff = 9;
-    optional int64     region_size = 10;
+    optional int64     region_id                      = 1;
+    optional int64     version                        = 2;
+    optional int64     apply_index                    = 3;
+    optional string    status                         = 4;
+    optional string    resource_tag                   = 5;
+    optional int64     table_id                       = 6;
+    optional OlapRegionStat olap_state                = 7;
+    repeated string    external_full_path             = 8;
+    optional bool      path_diff                      = 9;
+    optional int64     region_size                    = 10;
+    repeated OlapRegionIndexInfo olap_index_info_list = 11; 
 };
 
 enum ExecuteType {

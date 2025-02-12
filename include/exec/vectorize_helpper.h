@@ -290,11 +290,12 @@ public:
             out->reset();
             return arrow::Status::OK();
         }
-        for (; _row_idx < _rows->size(); ++_row_idx) {
+        for (; _row_idx < _rows->size(); ) {
             if (_chunk->add_row(_tuples, _rows->at(_row_idx))) {
                 DB_FATAL_STATE(_state, "add row to chunk failed");
                 return arrow::Status::IOError("add row to chunk failed");
             }
+            ++_row_idx;
             if (_chunk->is_full()) {
                 if (0 != _chunk->finish_and_make_record_batch(out)) {
                     return arrow::Status::IOError("make record batch failed");

@@ -147,6 +147,17 @@ int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
             subquery->root->create_trace();
         }
     }
+
+    bool must_vectorize = false;
+    std::vector<ExecNode*> joins;
+    ctx->root->get_node_pass_subquery(pb::JOIN_NODE, joins);
+    for (auto& join : joins) {
+        if (static_cast<JoinNode*>(join)->join_type() == pb::FULL_JOIN) {
+            must_vectorize = true;
+            break;
+        }
+    }
+
     // 按照sign指定
     if (!ctx->table_can_use_arrow_vectorize) {
         state.sign_exec_type = SignExecType::SIGN_EXEC_ROW;
@@ -162,8 +173,9 @@ int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
     if (ctx->sql_exec_type_defined != SignExecType::SIGN_EXEC_NOT_SET) {
         state.sign_exec_type = ctx->sql_exec_type_defined;
     }
-    if ((FLAGS_use_arrow_vector && state.sign_exec_type != SignExecType::SIGN_EXEC_ROW)
-            && (ctx->explain_type == EXPLAIN_NULL || ctx->explain_type == SHOW_TRACE)) {
+    if (must_vectorize || 
+        ((FLAGS_use_arrow_vector && state.sign_exec_type != SignExecType::SIGN_EXEC_ROW)
+            && (ctx->explain_type == EXPLAIN_NULL || ctx->explain_type == SHOW_TRACE))) {
         if (ctx->root->can_use_arrow_vector()) {
             state.execute_type = pb::EXEC_ARROW_ACERO;
             ExecNode* join = ctx->root->get_node(pb::JOIN_NODE);
@@ -172,6 +184,12 @@ int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
             state.is_simple_select = (join == nullptr);
             state.vectorlized_parallel_execution = (join != nullptr || agg != nullptr || sort != nullptr);
         } else {
+            if (must_vectorize) {
+                // todo 返回not support
+                ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+                ctx->stat_info.error_msg << "FULL JOIN only support in vectorize mode.";
+                return -1;
+            }
             state.execute_type = pb::EXEC_ROW;
         }
     }

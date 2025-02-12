@@ -541,7 +541,7 @@ int DMLNode::get_lock_row(RuntimeState* state, SmartRecord record, std::string* 
         return ret;
     }
     if (row != nullptr && _tuple_desc != nullptr
-        && (_node_type == pb::DELETE_NODE || _node_type == pb::UPDATE_NODE)) {
+        && (_node_type == pb::DELETE_NODE || _node_type == pb::UPDATE_NODE || _node_type == pb::LOCK_PRIMARY_NODE)) {
         for (auto slot : _tuple_desc->slots()) {
             auto field = record->get_field_by_tag(slot.field_id());
             row->set_value(slot.tuple_id(), slot.slot_id(),

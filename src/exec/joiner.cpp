@@ -633,6 +633,7 @@ int Joiner::construct_result_batch(RowBatch* batch,
                 batch->move_row(std::move(row));
             }
         } else if (_use_hash_map && _compare_type != pb::CMP_ALL) {
+            // nested_loop不会走这里
             return construct_null_result_batch(batch, outer_mem_row);
         }
         break;

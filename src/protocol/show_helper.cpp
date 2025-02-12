@@ -1063,7 +1063,8 @@ bool ShowHelper::_show_create_table(const SmartSocket& client, const std::vector
                 {pb::REDIS, "Redis"},
                 {pb::ROCKSDB_CSTORE, "Rocksdb_cstore"},
                 {pb::BINLOG, "Binlog"},
-                {pb::INFORMATION_SCHEMA, "MEMORY"}
+                {pb::INFORMATION_SCHEMA, "MEMORY"},
+                {pb::DBLINK, "Dblink"}
         };
         oss << ") ENGINE=" << engine_map[info.engine];
         if (info.engine != pb::DBLINK) {
@@ -1163,8 +1164,26 @@ bool ShowHelper::_show_create_table(const SmartSocket& client, const std::vector
             }
             oss << "}";
         }
+        if (info.engine == pb::DBLINK) {
+            oss << ", \"dblink_info\": {";
+            oss << "\"type\":\"" << pb::DBLinkType_Name(info.dblink_info.type()) << "\"";
+            oss << ",\"meta_name\":\"" << info.dblink_info.meta_name() << "\"";
+            oss << ",\"namespace_name\":\"" << info.dblink_info.namespace_name() << "\"";
+            oss << ",\"database_name\":\"" << info.dblink_info.database_name() << "\"";
+            oss << ",\"table_name\":\"" << info.dblink_info.table_name() << "\"";
+            oss << "}";
+        }
+        if (info.is_linked) {
+            std::string binlog_ids_str;
+            for (const auto& [binlog_id, _] : info.binlog_ids) {
+                binlog_ids_str += std::to_string(binlog_id) + ",";
+            }
+            if (!binlog_ids_str.empty()) {
+                binlog_ids_str.pop_back();
+            }
+            oss << ", \"binlog_ids\":[" << binlog_ids_str << "]";
+        }
         oss << "}'";
-
         if (info.partition_ptr != nullptr) {
             oss << info.partition_ptr->to_str();
         }

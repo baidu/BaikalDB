@@ -48,6 +48,7 @@ enum JoinType {
     JT_INNER_JOIN = 1,
     JT_LEFT_JOIN = 2,
     JT_RIGHT_JOIN = 3,
+    JT_FULL_JOIN = 4,
 };
 
 struct IndexHint : public Node {

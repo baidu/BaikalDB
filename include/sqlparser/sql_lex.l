@@ -89,6 +89,7 @@ FOR { return FOR; }
 FORCE { return FORCE; }
 FOREIGN { return FOREIGN; }
 FROM { return FROM; }
+FULL { return FULL; }
 FULLTEXT { return FULLTEXT; }
 GENERATED { return GENERATED; }
 GRANT { return GRANT; }

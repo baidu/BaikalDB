@@ -39,7 +39,6 @@ inline bool is_dml_op_type(const pb::OpType& op_type) {
 inline bool is_cold_data_op_type(const pb::OpType& op_type) {
         if (op_type != pb::OP_SELECT 
              && op_type != pb::OP_TRUNCATE_TABLE
-             && op_type != pb::OP_SELECT_FOR_UPDATE
              && op_type != pb::OP_ROLLUP_REGION_INIT
              && op_type != pb::OP_ROLLUP_REGION_FINISH
              && op_type != pb::OP_ROLLUP_REGION_FAILED) {
@@ -104,6 +103,8 @@ public:
     virtual void get_all_dual_scan_node(std::vector<ExecNode*>& exec_nodes);
     void get_node(const pb::PlanNodeType node_type, std::vector<ExecNode*>& exec_nodes);
     ExecNode* get_node(const pb::PlanNodeType node_type);
+    ExecNode* get_node_pass_subquery(const pb::PlanNodeType node_type);
+    void get_node_pass_subquery(const pb::PlanNodeType node_type, std::vector<ExecNode*>& exec_nodes);
     ExecNode* get_parent() {
         return _parent;
     }
