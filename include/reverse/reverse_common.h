@@ -14,7 +14,6 @@
 
 #pragma once
 #include "reverse_arrow.h"
-#include <iconv.h>
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
@@ -41,23 +40,6 @@ typedef std::shared_ptr<google::protobuf::Message> MessageSP;
 typedef std::pair<std::string, std::string> KeyRange;
 extern std::atomic_long g_statistic_insert_key_num;
 extern std::atomic_long g_statistic_delete_key_num;
-
-class Iconv {
-public:
-    Iconv() : _cd_utf8_to_gbk(iconv_open("gb18030", "utf-8")), _cd_gbk_to_utf8(iconv_open("utf-8", "gb18030")) {}
-    ~Iconv() {
-        iconv_close(_cd_utf8_to_gbk);
-        iconv_close(_cd_gbk_to_utf8);
-    }
-
-    int utf8_to_gbk(const char* psrc, const size_t nsrc, std::string& dst);
-    int gbk_to_utf8(const char* psrc, const size_t nsrc, std::string& dst);
-
-private:
-    iconv_t _cd_utf8_to_gbk;
-    iconv_t _cd_gbk_to_utf8;
-};
-static thread_local Iconv iconv_tls;
 
 #ifdef BAIDU_INTERNAL
 extern drpc::NLPCClient* wordrank_client;

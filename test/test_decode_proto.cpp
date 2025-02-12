@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include "common.h"
 #include "proto/test_decode.pb.h"
+#include "proto/meta.interface.pb.h"
 #include "tuple_record.h"
 #include "mut_table_key.h"
 #include <bthread_unstable.h>
@@ -233,6 +234,52 @@ void test_optional_to_repeated() {
 }
 
 int main(int argc, char** argv) {
+    using namespace baikaldb;
+    TimeCost tm2;
+    {
+    pb::CreateTableResponse res;
+    for (int i = 0; i < 10000; i++) {
+        pb::RegionInfo region;
+        region.set_region_id(1);
+        region.set_leader("127.0.0.1:pap-bd1");
+        region.add_peers("127.0.0.1:pap-bd1");
+        region.add_peers("127.0.0.1:pap-bd2");
+        region.add_peers("127.0.0.1:offline-bd1");
+        region.set_start_key("127.0.0.1:offline-bd1");
+        region.set_end_key("128.0.0.1:offline-bd1");
+        region.set_version(1);
+        region.set_conf_version(1);
+        region.set_replica_num(3);
+        region.set_used_size(0);
+        region.set_log_index(0);
+        region.set_status(pb::IDLE);
+        region.set_can_add_peer(false);
+        region.set_parent(0);
+        region.set_timestamp(time(NULL));
+        *res.add_region_infos() = region;
+    }
+    tm2.reset();
+    }
+    DB_WARNING("time cost1: %ld", tm2.get_time());
+    {
+    pb::CreateTableResponse res;
+    for (int i = 0; i < 10000; i++) {
+        pb::RegionInfo region;
+        region.set_region_id(1);
+        region.set_version(1);
+        region.set_conf_version(1);
+        region.set_replica_num(3);
+        region.set_used_size(0);
+        region.set_log_index(0);
+        region.set_status(pb::IDLE);
+        region.set_can_add_peer(false);
+        region.set_parent(0);
+        region.set_timestamp(time(NULL));
+        *res.add_region_infos() = region;
+    }
+    tm2.reset();
+    }
+    DB_WARNING("time cost2: %ld", tm2.get_time());
     //baidu::rpc::StartDummyServerAt(8800);
     DB_WARNING("thread num:%d", bthread::FLAGS_bthread_concurrency);
     test_optional_to_repeated();

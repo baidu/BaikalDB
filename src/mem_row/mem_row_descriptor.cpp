@@ -40,7 +40,7 @@ int32_t MemRowDescriptor::init(std::vector<pb::TupleDescriptor>& tuple_desc) {
         tuple_proto->set_name("tuple_" + std::to_string(tuple_id));
         tuples.push_back(tuple_id);
 
-        //DB_WARNING("desc:%s", tuple.ShortDebugString().c_str());
+        // DB_WARNING("desc:%s", tuple.ShortDebugString().c_str());
         int slot_cnt = tuple.slots_size();
         for (int idx = 0; idx < slot_cnt; ++idx) {
             const pb::SlotDescriptor& slot = tuple.slots(idx);
@@ -49,7 +49,7 @@ int32_t MemRowDescriptor::init(std::vector<pb::TupleDescriptor>& tuple_desc) {
             field->set_name("slot_" + std::to_string(slot_id));
             auto pb_type = primitive_to_proto_type(slot.slot_type());
             if (pb_type == -1) {
-                DB_WARNING("un-supported mysql type: %d", slot.slot_type());
+                DB_WARNING("un-supported mysql type: %d, tuple:%d, slot:%d", slot.slot_type(), tuple_id, slot_id);
                 return -1;
             }
             field->set_type((FieldDescriptorProto::Type)pb_type);

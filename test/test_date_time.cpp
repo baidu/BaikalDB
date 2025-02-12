@@ -292,4 +292,115 @@ TEST(test_hour_date, case_all) {
     EXPECT_EQ(date(construct_datetime_expr_value("99999-06-28 22:35:40")).get_string(), "0000-00-00"); // 异常输入
 }
 
+TEST(test_date_add_sub, case_all) {
+    time_t ts;
+
+    // YEAR
+    ts = datetime_to_timestamp(str_to_datetime("2024-02-29 19:28:44"));
+    date_add_interval(ts, -1, TimeUnit::YEAR);
+    EXPECT_EQ(timestamp_to_str(ts), "2023-02-28 19:28:44");
+
+    ts = datetime_to_timestamp(str_to_datetime("2024-02-29 19:28:44"));
+    date_add_interval(ts, 1, TimeUnit::YEAR);
+    EXPECT_EQ(timestamp_to_str(ts), "2025-02-28 19:28:44");
+
+    ts = datetime_to_timestamp(str_to_datetime("2024-03-29 19:28:44"));
+    date_add_interval(ts, 1, TimeUnit::YEAR);
+    EXPECT_EQ(timestamp_to_str(ts), "2025-03-29 19:28:44");
+
+    // MONTH
+    ts = datetime_to_timestamp(str_to_datetime("2023-03-31 19:28:44"));
+    date_add_interval(ts, -1, TimeUnit::MONTH);
+    EXPECT_EQ(timestamp_to_str(ts), "2023-02-28 19:28:44");
+
+    ts = datetime_to_timestamp(str_to_datetime("2024-03-31 19:28:44"));
+    date_add_interval(ts, -1, TimeUnit::MONTH);
+    EXPECT_EQ(timestamp_to_str(ts), "2024-02-29 19:28:44");
+
+    ts = datetime_to_timestamp(str_to_datetime("2024-05-31 19:28:44"));
+    date_add_interval(ts, -1, TimeUnit::MONTH);
+    EXPECT_EQ(timestamp_to_str(ts), "2024-04-30 19:28:44");
+
+    ts = datetime_to_timestamp(str_to_datetime("2024-05-31 19:28:44"));
+    date_add_interval(ts, 1, TimeUnit::MONTH);
+    EXPECT_EQ(timestamp_to_str(ts), "2024-06-30 19:28:44");
+
+    ts = datetime_to_timestamp(str_to_datetime("2024-03-31 19:28:44"));
+    date_add_interval(ts, -25, TimeUnit::MONTH);
+    EXPECT_EQ(timestamp_to_str(ts), "2022-02-28 19:28:44");
+
+    ts = datetime_to_timestamp(str_to_datetime("2024-03-31 19:28:44"));
+    date_add_interval(ts, -49, TimeUnit::MONTH);
+    EXPECT_EQ(timestamp_to_str(ts), "2020-02-29 19:28:44");
+
+    ts = datetime_to_timestamp(str_to_datetime("2024-03-31 19:28:44"));
+    date_add_interval(ts, 23, TimeUnit::MONTH);
+    EXPECT_EQ(timestamp_to_str(ts), "2026-02-28 19:28:44");
+
+    ts = datetime_to_timestamp(str_to_datetime("2024-03-31 19:28:44"));
+    date_add_interval(ts, 47, TimeUnit::MONTH);
+    EXPECT_EQ(timestamp_to_str(ts), "2028-02-29 19:28:44");
+
+    // DAY
+    ts = datetime_to_timestamp(str_to_datetime("2023-03-31 19:28:44"));
+    date_add_interval(ts, -1, TimeUnit::DAY);
+    EXPECT_EQ(timestamp_to_str(ts), "2023-03-30 19:28:44");
+
+    ts = datetime_to_timestamp(str_to_datetime("2023-03-31 19:28:44"));
+    date_add_interval(ts, 1, TimeUnit::DAY);
+    EXPECT_EQ(timestamp_to_str(ts), "2023-04-01 19:28:44");
+
+    ts = datetime_to_timestamp(str_to_datetime("2023-03-01 19:28:44"));
+    date_add_interval(ts, -1, TimeUnit::DAY);
+    EXPECT_EQ(timestamp_to_str(ts), "2023-02-28 19:28:44");
+
+    ts = datetime_to_timestamp(str_to_datetime("2024-03-01 19:28:44"));
+    date_add_interval(ts, -1, TimeUnit::DAY);
+    EXPECT_EQ(timestamp_to_str(ts), "2024-02-29 19:28:44");
+
+    // HOUR
+    ts = datetime_to_timestamp(str_to_datetime("2024-03-01 01:28:44"));
+    date_add_interval(ts, -1, TimeUnit::HOUR);
+    EXPECT_EQ(timestamp_to_str(ts), "2024-03-01 00:28:44");
+
+    ts = datetime_to_timestamp(str_to_datetime("2024-03-01 01:28:44"));
+    date_add_interval(ts, -2, TimeUnit::HOUR);
+    EXPECT_EQ(timestamp_to_str(ts), "2024-02-29 23:28:44");
+
+    ts = datetime_to_timestamp(str_to_datetime("2023-03-01 01:28:44"));
+    date_add_interval(ts, -2, TimeUnit::HOUR);
+    EXPECT_EQ(timestamp_to_str(ts), "2023-02-28 23:28:44");
+
+    // MINUTE
+    ts = datetime_to_timestamp(str_to_datetime("2023-03-01 01:28:44"));
+    date_add_interval(ts, -20, TimeUnit::MINUTE);
+    EXPECT_EQ(timestamp_to_str(ts), "2023-03-01 01:08:44");
+
+    ts = datetime_to_timestamp(str_to_datetime("2023-03-01 01:28:44"));
+    date_add_interval(ts, -30, TimeUnit::MINUTE);
+    EXPECT_EQ(timestamp_to_str(ts), "2023-03-01 00:58:44");
+
+    // SECOND
+    ts = datetime_to_timestamp(str_to_datetime("2023-03-01 01:28:44"));
+    date_add_interval(ts, -40, TimeUnit::SECOND);
+    EXPECT_EQ(timestamp_to_str(ts), "2023-03-01 01:28:04");
+
+    ts = datetime_to_timestamp(str_to_datetime("2023-03-01 01:28:44"));
+    date_add_interval(ts, -50, TimeUnit::SECOND);
+    EXPECT_EQ(timestamp_to_str(ts), "2023-03-01 01:27:54");
+
+    // date_sub_interval
+    time_t add_ts = datetime_to_timestamp(str_to_datetime("2023-03-01 01:28:44"));
+    time_t sub_ts = datetime_to_timestamp(str_to_datetime("2023-03-01 01:28:44"));
+    date_add_interval(add_ts, -100, TimeUnit::MONTH);
+    date_sub_interval(sub_ts,  100, TimeUnit::MONTH);
+    EXPECT_EQ(add_ts, sub_ts);
+}
+
+TEST(test_snapshot_timestamp, case_all) {
+    EXPECT_EQ(timestamp_to_str(snapshot_to_timestamp(35472024070100)), "2024-07-01 00:00:00");
+    EXPECT_EQ(timestamp_to_str(snapshot_to_timestamp(35471970010100)), "0000-00-00 00:00:00");
+    EXPECT_EQ(timestamp_to_str(snapshot_to_timestamp(35470000010100)), "0000-00-00 00:00:00");
+    EXPECT_EQ(timestamp_to_str(snapshot_to_timestamp(35471971010100)), "1971-01-01 00:00:00");
+}
 }  // namespace baikal

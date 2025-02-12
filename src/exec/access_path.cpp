@@ -119,7 +119,7 @@ bool AccessPath::check_sort_use_index(Property& sort_property) {
 struct RecordRange {
     MutTableKey left_key;
     MutTableKey right_key;
-    int64_t partition_id = -1;
+    std::unordered_set<int64_t> partition_ids;
 };
 // 现在只支持CNF，DNF怎么做?
 // 普通索引按照range匹配，匹配到EQ可以往下走，匹配到RANGE、LIKE_PREFIX停止
@@ -146,7 +146,6 @@ void AccessPath::calc_normal(Property& sort_property) {
                 && range.left.size() == 1 && range.right.size() == 1) {
             get_date_in_values(range.left[0], range.left_open, range.right[0], range.right_open, range.eq_in_values);
             range.type = IN;
-            // will fall throught to case IN to handle
             // 可能会导致seek压力大
         } 
         switch (range.type) {
@@ -235,14 +234,6 @@ void AccessPath::calc_normal(Property& sort_property) {
                 field_break = true;
                 break;
             case IN:
-                ++eq_count;
-                ++field_cnt;
-                hit_index_field_ids.insert(field.id);
-                _left_field_cnt = field_cnt;
-                _right_field_cnt = field_cnt;
-                _left_open = false;
-                _right_open = false;
-                _in_pred = true;
                 if (range.is_row_expr && in_row_expr_map.count(*range.conditions.begin()) == 1) {
                     // in_row_expr的非首个字段不组合展开,按offset填充,例如(a, b) in ((1,2))的b
                     // flat fill other row_expr field value exclude the first.
@@ -269,6 +260,14 @@ void AccessPath::calc_normal(Property& sort_property) {
                     }
                     in_records_size = range.eq_in_values.size() * in_records_size;
                 }
+                ++eq_count;
+                ++field_cnt;
+                hit_index_field_ids.insert(field.id);
+                _left_field_cnt = field_cnt;
+                _right_field_cnt = field_cnt;
+                _left_open = false;
+                _right_open = false;
+                _in_pred = true;
                 if (range.is_row_expr) {
                     if (all_in_index(range.left_row_field_ids, hit_index_field_ids) &&
                             in_row_expr_map[*range.conditions.begin()].second == range.left_row_field_ids.size()) {
@@ -328,14 +327,15 @@ void AccessPath::get_date_in_values(const ExprValue& left, bool left_open, const
 }
 
 // 填充索引的range
-void AccessPath::calc_index_range(int64_t partition_field_id, const std::map<std::string, int64_t>& expr_partition_map) {
+void AccessPath::calc_index_range(
+        int64_t partition_field_id, const std::map<std::string, std::unordered_set<int64_t>>& expr_partition_map) {
     if (index_type == pb::I_FULLTEXT || index_type == pb::I_VECTOR) {
         return;
     }
     MutTableKey left_key;
     MutTableKey right_key;
-    int64_t partition_id = -1;
-    if (index_type == pb::I_KEY || index_type == pb::I_UNIQ) {
+    std::unordered_set<int64_t> partition_ids;
+    if (index_type == pb::I_KEY || index_type == pb::I_UNIQ || index_type == pb::I_ROLLUP) {
         uint8_t null_flag = 0;
         left_key.append_u8(null_flag);
         right_key.append_u8(null_flag);
@@ -347,7 +347,7 @@ void AccessPath::calc_index_range(int64_t partition_field_id, const std::map<std
     int field_cnt = 0;
     for (auto& field : index_info_ptr->fields) {
         auto iter = field_range_map->find(field.id);
-        field_cnt ++;
+        field_cnt++;
         if (field_cnt > hit_index_field_ids.size()) {
             break;
         }
@@ -382,6 +382,7 @@ void AccessPath::calc_index_range(int64_t partition_field_id, const std::map<std
                 } else {
                     range_func(left_key, right_key);
                 }
+                field_cnt = hit_index_field_ids.size(); // row_expr需要退出，修复 (a,b) > (1,1) and b in (2,3)
                 break;
             }
             case EQ:
@@ -394,6 +395,8 @@ void AccessPath::calc_index_range(int64_t partition_field_id, const std::map<std
                     } else {
                         for (auto& rg : in_records) {
                             rg.left_key.append_string_prefix(range.eq_in_values[0].get_string());
+                            rg.right_key = rg.left_key;
+                            rg.right_key.append_string_prefix(range.eq_in_values[0].get_string());
                         }
                     }
                 } else {
@@ -401,7 +404,7 @@ void AccessPath::calc_index_range(int64_t partition_field_id, const std::map<std
                         if (range.type == EQ && field.id == partition_field_id) {
                             auto iter = expr_partition_map.find(range.eq_in_values[0].get_string());
                             if (iter != expr_partition_map.end()) {
-                                partition_id = iter->second;
+                                partition_ids = iter->second;
                             }
                         }
                         left_key.append_value(range.eq_in_values[0].cast_to(field.type));
@@ -411,7 +414,7 @@ void AccessPath::calc_index_range(int64_t partition_field_id, const std::map<std
                             if (range.type == EQ && field.id == partition_field_id) {
                                 auto iter = expr_partition_map.find(range.eq_in_values[0].get_string());
                                 if (iter != expr_partition_map.end()) {
-                                    rg.partition_id = iter->second;
+                                    rg.partition_ids = iter->second;
                                 }
                             }
                             rg.left_key.append_value(range.eq_in_values[0].cast_to(field.type));
@@ -432,7 +435,7 @@ void AccessPath::calc_index_range(int64_t partition_field_id, const std::map<std
                             if (field.id == partition_field_id) {
                                 auto iter = expr_partition_map.find(range.eq_in_values[vi].get_string());
                                 if (iter != expr_partition_map.end()) {
-                                    rg.partition_id = iter->second;
+                                    rg.partition_ids = iter->second;
                                 }
                             }
                             rg.left_key.append_value(range.eq_in_values[vi].cast_to(field.type));
@@ -466,10 +469,11 @@ void AccessPath::calc_index_range(int64_t partition_field_id, const std::map<std
                         // 为保持前面已处理字段步长稳定性, 当前字段需要写在外层循环与in_records进行展开.
                         for (auto record : in_records) {
                             RecordRange rg;
+                            rg.partition_ids = record.partition_ids;
                             if (field.id == partition_field_id) {
                                 auto iter = expr_partition_map.find(value.get_string());
                                 if (iter != expr_partition_map.end()) {
-                                    rg.partition_id = iter->second;
+                                    rg.partition_ids = iter->second;
                                 }
                             }
                             rg.left_key = record.left_key;
@@ -517,8 +521,10 @@ void AccessPath::calc_index_range(int64_t partition_field_id, const std::map<std
                 && !_like_prefix) {
                 rg.left_key.set_full(true);
             }
-            if (rg.partition_id != -1) {
-                range->set_partition_id(rg.partition_id);
+            for (const auto& partition_id : rg.partition_ids) {
+                if (partition_id != -1) {
+                    range->add_partition_ids(partition_id);
+                }
             }
             range->set_left_key(rg.left_key.data());
             range->set_left_full(rg.left_key.get_full());
@@ -554,8 +560,10 @@ void AccessPath::calc_index_range(int64_t partition_field_id, const std::map<std
             && !_like_prefix) {
             right_key.set_full(true);
         }
-        if (partition_id != -1) {
-            range->set_partition_id(partition_id);
+        for (const auto& partition_id : partition_ids) {
+            if (partition_id != -1) {
+                range->add_partition_ids(partition_id);
+            }
         }
         range->set_left_key(left_key.data());
         range->set_left_full(left_key.get_full());
@@ -571,6 +579,25 @@ void AccessPath::calc_index_range(int64_t partition_field_id, const std::map<std
 
 void AccessPath::calc_fulltext(Property& sort_property) {
     int32_t field_id = index_info_ptr->fields[0].id;
+    std::vector<ExprValue>* first_field_expr_values = nullptr;
+    if (index_type == pb::I_VECTOR && index_info_ptr->fields.size() == 2) {
+        // 第二个字段是向量字段
+        field_id = index_info_ptr->fields[1].id;
+        // 判断第一个字段是否为等值判断
+        int32_t first_field_id = index_info_ptr->fields[0].id;
+        auto iter = field_range_map->find(first_field_id);
+        if (iter == field_range_map->end()) {
+            return;
+        }
+        FieldRange& range = iter->second;
+        if (range.type != EQ) {
+            // 暂不支持IN条件
+            return;
+        }
+        hit_index_field_ids.emplace(first_field_id);
+        need_cut_index_range_condition.insert(range.conditions.begin(), range.conditions.end());
+        first_field_expr_values = &range.eq_in_values;
+    }
     auto iter = field_range_map->find(field_id);
     if (iter == field_range_map->end()) {
         return;
@@ -633,6 +660,11 @@ void AccessPath::calc_fulltext(Property& sort_property) {
                 range->set_match_mode(pb::M_BOOLEAN);
             }
             range->set_topk(sort_property.expected_cnt);
+            if (first_field_expr_values != nullptr && !first_field_expr_values->empty()) {
+                ExprValue& expr_value = *(first_field_expr_values->begin());
+                uint64_t separate_value = expr_value.cast_to(pb::UINT64).get_numberic<uint64_t>();
+                range->set_separate_value(separate_value);
+            }
         }
     } else {
         pos_index.set_index_id(index_id);
@@ -671,13 +703,19 @@ double AccessPath::calc_field_selectivity(int32_t field_id, FieldRange& range) {
         case LIKE_EQ: 
         case IN: {
             double in_selectivity = 0.0;
+            ExprValueFlatSet eq_in_values_set;
+            eq_in_values_set.init(ajust_flat_size(range.eq_in_values.size()));
             for (auto& value : range.eq_in_values) {
+                if (eq_in_values_set.seek(value) != nullptr) {
+                    continue;
+                }
                 in_selectivity += SchemaFactory::get_instance()->get_cmsketch_ratio(table_id, field_id, value);
+                eq_in_values_set.insert(value);
             }
             return in_selectivity;
-        }
+                 }
         default:
-            break;
+                 break;
     }
     return 1.0;
 }

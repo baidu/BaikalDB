@@ -33,6 +33,8 @@ using parser::ColumnName;
 using parser::TableName;
 using parser::PriorityEnum;
 using parser::CreateTableStmt;
+using parser::CreateViewStmt;
+using parser::CommonTableExpr;
 
 using namespace parser;
 #include "sql_lex.flex.h"
@@ -126,6 +128,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     FORCE
     FOREIGN
     FROM
+    FULL
     FULLTEXT
     GENERATED
     GRANT
@@ -385,6 +388,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     REPEATABLE
     REPLICATION
     ROLLBACK
+    ROLLUP
     ROUTINE
     ROW
     ROW_COUNT
@@ -548,12 +552,15 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     SubSelect
     IsolationLevel
     SeparatorOpt
+    CommonTableExpr
 
 %type <item> 
     ColumnNameListOpt 
     ColumnNameList 
     IndexColumnList
+    ViewFieldList 
     TableName
+    ViewName
     AssignmentList 
     ByList 
     IndexHintListOpt 
@@ -564,15 +571,18 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     WhenClause
     Fields
     Lines
+    WithClause
+    WithList
 
 %type <item> 
+    TableElementListOpt
     TableElementList 
     TableElement 
     ColumnDef 
     ColumnOptionList 
     ColumnOption 
     Constraint 
-    ConstraintElem 
+    ConstraintElem
     Type 
     NumericType 
     StringType 
@@ -652,6 +662,8 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     SelectStmtFromDual
     SelectStmtFromTable
     SelectStmt
+    ViewSelectStmt
+    SelectStmtWithClause
     UnionSelect
     UnionClauseList
     UnionStmt
@@ -664,7 +676,9 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
 
 %type <stmt> 
     CreateTableStmt
+    CreateViewStmt
     DropTableStmt
+    DropViewStmt
     RestoreTableStmt
     CreateDatabaseStmt
     DropDatabaseStmt
@@ -674,6 +688,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     SetStmt
     VarAssignList
     AlterTableStmt
+    AlterViewStmt
     NewPrepareStmt
     ExecPrepareStmt
     DeallocPrepareStmt
@@ -700,6 +715,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     JoinType
     IfNotExists
     IfExists
+    OrReplace
     IntegerType
     BooleanType
     FixedPointType
@@ -778,7 +794,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
 // Parse Entrance
 MultiStmt:
     Statement {
-         parser->result.push_back($1);
+        parser->result.push_back($1);
     }
     | MultiStmt ';' Statement {
         parser->result.push_back($3);
@@ -795,9 +811,11 @@ Statement:
     | DeleteStmt
     | TruncateStmt
     | CreateTableStmt
+    | CreateViewStmt
     | SelectStmt
     | UnionStmt
     | DropTableStmt
+    | DropViewStmt
     | RestoreTableStmt
     | CreateDatabaseStmt
     | DropDatabaseStmt
@@ -807,6 +825,7 @@ Statement:
     | SetStmt
     | ShowStmt
     | AlterTableStmt
+    | AlterViewStmt
     | NewPrepareStmt
     | ExecPrepareStmt
     | DeallocPrepareStmt
@@ -821,6 +840,7 @@ Statement:
     | AlterUserStmt
     | GrantStmt
     | RevokeStmt
+    | SelectStmtWithClause
     ;
 
 InsertStmt:
@@ -1151,6 +1171,10 @@ TableName:
     } 
     ;
 
+ViewName:
+    TableName
+    ;
+
 TableNameList:
     TableName {
         Node* list = new_node(Node);
@@ -1309,18 +1333,38 @@ TableFactor:
         table_source->as_name = $4;
         $$ = table_source;
     }
+    | '(' WithClause SelectStmt ')' TableAsName {
+        TableSource* table_source = new_node(TableSource);
+        SelectStmt* select = (SelectStmt*)$3;
+        select->with = (WithClause*)$2;
+        select->is_in_braces = true;
+        table_source->derived_table = select;
+        table_source->as_name = $5;
+        $$ = table_source;
+    }
+    | '(' WithClause UnionStmt ')' TableAsName {
+        TableSource* table_source = new_node(TableSource);
+        UnionStmt* union_stmt = (UnionStmt*)$3;
+        for (int i = 0; i < union_stmt->select_stmts.size(); ++i) {
+            union_stmt->select_stmts[i]->with = (parser::WithClause*)$2;
+        }
+        union_stmt->is_in_braces = true;
+        table_source->derived_table = union_stmt;
+        table_source->as_name = $5;
+        $$ = table_source;
+    }
     | '(' TableRefs ')' {
         $$ = $2; 
     }
     ;
 
 PartitionNameListOpt:
-	{
-		$$ = nullptr;
-	}
+    {
+        $$ = nullptr;
+    }
     | PARTITION '(' PartitionNameList ')' {
-		$$ = $3;
-	}
+        $$ = $3;
+    }
     ;
 PartitionNameList:
     AllIdent {
@@ -1545,6 +1589,9 @@ JoinType:
     }
     | RIGHT {
         $$ = JT_RIGHT_JOIN;
+    }
+    | FULL {
+        $$ = JT_FULL_JOIN;
     }
     ;
 OuterOpt:
@@ -1937,6 +1984,22 @@ SubSelect:
     }
     | '(' SubSelect ')' {
         $$ = $2;
+    }
+    | '(' WithClause SelectStmt ')' {
+        SubqueryExpr* sub_query = new_node(SubqueryExpr);
+        SelectStmt* select = (SelectStmt*)$3;
+        select->with = (WithClause*)$2;
+        sub_query->query_stmt = select;
+        $$ = sub_query;
+    }
+    | '(' WithClause UnionStmt ')' {
+        SubqueryExpr* sub_query = new_node(SubqueryExpr);
+        UnionStmt* union_stmt = (UnionStmt*)$3;
+        for (int i = 0; i < union_stmt->select_stmts.size(); ++i) {
+            union_stmt->select_stmts[i]->with = (parser::WithClause*)$2;
+        }
+        sub_query->query_stmt = union_stmt;
+        $$ = sub_query;
     }
     ;
 
@@ -3089,10 +3152,22 @@ SimpleExpr:
         $$ = $2;
     }
     | NOT SimpleExpr {
-        $$ = FuncExpr::new_unary_op_node(FT_LOGIC_NOT, $2, parser->arena);
+        if ($2->expr_type == parser::ET_EXISTS_SUB_QUERY_EXPR) {
+            ExistsSubqueryExpr* exists_expr = (ExistsSubqueryExpr*)$2;
+            exists_expr->is_not = true;
+            $$ = exists_expr;
+        } else {
+            $$ = FuncExpr::new_unary_op_node(FT_LOGIC_NOT, $2, parser->arena);
+        }
     }
     | NOT_OP SimpleExpr {
-        $$ = FuncExpr::new_unary_op_node(FT_LOGIC_NOT, $2, parser->arena);
+        if ($2->expr_type == parser::ET_EXISTS_SUB_QUERY_EXPR) {
+            ExistsSubqueryExpr* exists_expr = (ExistsSubqueryExpr*)$2;
+            exists_expr->is_not = true;
+            $$ = exists_expr;
+        } else {
+            $$ = FuncExpr::new_unary_op_node(FT_LOGIC_NOT, $2, parser->arena);
+        }
     }
     | MATCH '(' ColumnNameList ')' AGAINST '(' SimpleExpr FulltextSearchModifierOpt ')' {
         RowExpr* row = new_node(RowExpr);
@@ -3191,6 +3266,22 @@ Operators:
     }
     | Expr '-' Expr {
         $$ = FuncExpr::new_binary_op_node(FT_MINUS, $1, $3, parser->arena);
+    }
+    | Expr '+' INTERVAL Expr TimeUnit {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "date_add";
+        fun->children.push_back($1, parser->arena);
+        fun->children.push_back($4, parser->arena);
+        fun->children.push_back($5, parser->arena);
+        $$ = fun;
+    }
+    | Expr '-' INTERVAL Expr TimeUnit {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "date_sub";
+        fun->children.push_back($1, parser->arena);
+        fun->children.push_back($4, parser->arena);
+        fun->children.push_back($5, parser->arena);
+        $$ = fun;
     }
     | Expr '*' Expr {
         $$ = FuncExpr::new_binary_op_node(FT_MULTIPLIES, $1, $3, parser->arena);
@@ -3355,14 +3446,14 @@ InOrNot:
     ;
 AnyOrAll:
     ANY {
-		$$ = parser::CMP_ANY;
-	}
+        $$ = parser::CMP_ANY;
+    }
     | SOME {
-		$$ = parser::CMP_SOME;
-	}
+        $$ = parser::CMP_SOME;
+    }
     | ALL {
-		$$ = parser::CMP_ALL;
-	}
+        $$ = parser::CMP_ALL;
+    }
     ;
 LikeOrNot:
     LIKE {
@@ -3407,7 +3498,7 @@ BetweenOrNot:
 /*create table statement*/
 // TODO: create table xx like xx
 CreateTableStmt:
-    CREATE TABLE IfNotExists TableName '(' TableElementList ')' CreateTableOptionListOpt
+    CREATE TABLE IfNotExists TableName '(' TableElementListOpt ')' CreateTableOptionListOpt
     {
         CreateTableStmt* stmt = new_node(CreateTableStmt);
         stmt->if_not_exist = $3;
@@ -3446,6 +3537,15 @@ IfExists:
         $$ = true;
     }
     ;
+
+TableElementListOpt:
+    {
+        $$ = new_node(Node);
+    }
+    | TableElementList 
+    {
+        $$ = $1;
+    }
 
 TableElementList:
     TableElement
@@ -3603,9 +3703,9 @@ SignedLiteral:
     {
         LiteralExpr* literal = (LiteralExpr*)$2;
         if (literal->literal_type == parser::LT_INT) {
-        	literal->_u.int64_val = 0 - literal->_u.int64_val;
+            literal->_u.int64_val = 0 - literal->_u.int64_val;
         } else {
-        	literal->_u.double_val = 0 - literal->_u.double_val;
+            literal->_u.double_val = 0 - literal->_u.double_val;
         }
         $$ = literal;
     }
@@ -3748,6 +3848,17 @@ ConstraintElem:
             item->columns.push_back((ColumnName*)($7->children[idx]), parser->arena);
         }
         item->index_option = (IndexOption*)$9;
+        $$ = item;
+    }
+    | ROLLUP KeyOrIndexOpt IndexName '(' ColumnNameList ')' IndexOptionList
+    {
+        Constraint* item = new_node(Constraint);
+        item->type = CONSTRAINT_ROLLUP;
+        item->name = $3;
+        for (int idx = 0; idx < $5->children.size(); ++idx) {
+            item->columns.push_back((ColumnName*)($5->children[idx]), parser->arena);
+        }
+        item->index_option = (IndexOption*)$7;
         $$ = item;
     }
     ;
@@ -4699,6 +4810,107 @@ EqOpt:
     | EQ_OP
     ;
 
+CreateViewStmt:
+    CREATE OrReplace VIEW ViewName ViewFieldList AS ViewSelectStmt
+    {
+        CreateViewStmt* stmt = new_node(CreateViewStmt);
+        stmt->or_replace = $2;
+        stmt->view_name = (TableName*)$4;
+        if ($5 != nullptr) {
+            stmt->column_names.reserve($5->children.size(), parser->arena);
+            for (int i = 0; i < $5->children.size(); i++) {
+                ColumnName* column_name = (ColumnName*)$5->children[i];
+                stmt->column_names.push_back(column_name, parser->arena);
+            }
+        }
+        stmt->view_select_stmt = (DmlNode*)$7;
+        $$ = stmt;
+    }
+    ;
+
+OrReplace:
+    /* EMPTY */
+    {
+        $$ = false;
+    }
+    | OR REPLACE
+    {
+        $$ = true;
+    }
+    ;
+
+ViewFieldList:
+    /* Empty */
+    {
+        $$ = nullptr;
+    }
+    | '(' ColumnNameListOpt ')'
+    {
+        $$ = $2;
+    }
+    ;
+
+ViewSelectStmt:
+    SelectStmt
+    | UnionStmt
+    ;
+
+SelectStmtWithClause:
+    WithClause SelectStmt
+    {
+        SelectStmt* select = (SelectStmt*)$2;
+        select->with = (parser::WithClause*)$1;
+        $$ = select;
+    }
+    | WithClause UnionStmt
+    {
+        UnionStmt* union_stmt = (UnionStmt*)$2;
+        for (int i = 0; i < union_stmt->select_stmts.size(); ++i) {
+            union_stmt->select_stmts[i]->with = (parser::WithClause*)$1;
+        }
+        $$ = union_stmt;
+    }
+    ;
+
+WithClause:
+    WITH WithList
+    {
+        $$ = $2;
+    }
+    ;
+
+WithList:
+    WithList ',' CommonTableExpr
+    {
+        WithClause* with_clause =  (WithClause*) $1;
+        with_clause->ctes.push_back((parser::CommonTableExpr*)$3, parser->arena);
+        $$ = with_clause;
+    }
+    | CommonTableExpr
+    {
+        WithClause* with_clause = new_node(WithClause);
+        with_clause->ctes.push_back((parser::CommonTableExpr*)$1, parser->arena);
+        $$ = with_clause;
+    }
+    ;
+
+CommonTableExpr:
+    AllIdent ViewFieldList AS SubSelect
+    {
+        CommonTableExpr* cte = new_node(CommonTableExpr);
+        cte->name = $1;
+        if ($2 != nullptr) {
+            cte->column_names.reserve($2->children.size(), parser->arena);
+            for (int i = 0; i < $2->children.size(); i++) {
+                ColumnName* column_name = (ColumnName*)$2->children[i];
+                cte->column_names.push_back(column_name, parser->arena);
+            }
+        }
+        cte->query_expr = (SubqueryExpr*)$4;
+        $$ = cte;
+    }
+    ;
+
 // Drop Table(s) Statement
 DropTableStmt:
     DROP TableOrTables IfExists TableNameList RestrictOrCascadeOpt
@@ -4720,6 +4932,17 @@ RestrictOrCascadeOpt:
     {}
     | RESTRICT
     | CASCADE
+    ;
+
+// Drop View Statement
+DropViewStmt:
+    DROP VIEW IfExists ViewName RestrictOrCascadeOpt
+    {
+        DropViewStmt* stmt = new_node(DropViewStmt);
+        stmt->if_exist = $3;
+        stmt->view_name = (TableName*)$4;
+        $$ = stmt;
+    }
     ;
 
 // Restore Table(s) Statement
@@ -4772,6 +4995,13 @@ DatabaseOption:
         DatabaseOption* option = new_node(DatabaseOption);
         option->type = DATABASE_OPT_COLLATE;
         option->str_value = $4;
+        $$ = option;
+    }
+    | COMMENT EqOpt STRING_LIT
+    {
+        DatabaseOption* option = new_node(DatabaseOption);
+        option->type = DATABASE_OPT_COMMENT;
+        option->str_value = ((LiteralExpr*)$3)->_u.str_val;
         $$ = option;
     }
     ;
@@ -5029,6 +5259,9 @@ ShowStmt:
         $$ = nullptr;
     }
     | SHOW CREATE TABLE TableName {
+        $$ = nullptr;
+    }
+    | SHOW CREATE VIEW ViewName {
         $$ = nullptr;
     }
     | SHOW CREATE DATABASE DBName {
@@ -5437,6 +5670,23 @@ AlterSpec:
     }
     ;
 
+AlterViewStmt:
+    ALTER VIEW ViewName ViewFieldList AS ViewSelectStmt
+    {
+        AlterViewStmt* stmt = new_node(AlterViewStmt);
+        stmt->view_name = (TableName*)$3;
+        if ($4 != nullptr) {
+            stmt->column_names.reserve($4->children.size(), parser->arena);
+            for (int i = 0; i < $4->children.size(); i++) {
+                ColumnName* column_name = (ColumnName*)$4->children[i];
+                stmt->column_names.push_back(column_name, parser->arena);
+            }
+        }
+        stmt->view_select_stmt = (DmlNode*)$6;
+        $$ = stmt;
+    }
+    ;
+
 // Prepare Statement
 NewPrepareStmt:
     PREPARE AllIdent FROM STRING_LIT
@@ -5730,7 +5980,7 @@ Lines:
         lines->starting = nullptr;
         $$ = lines;
     }
-    |	LINES Starting LinesTerminated
+    |    LINES Starting LinesTerminated
     {
         LinesClause* lines = new_node(LinesClause);
         lines->starting = $2;
@@ -5781,6 +6031,7 @@ LoadDataSetSpecOpt:
 
 ExplainableStmt:
     SelectStmt
+    | UnionStmt 
     | DeleteStmt
     | UpdateStmt
     | InsertStmt

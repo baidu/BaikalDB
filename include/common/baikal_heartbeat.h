@@ -40,9 +40,16 @@ struct SubTableIds {
 
 class BaikalHeartBeat {
 public:
-    static void construct_heart_beat_request(pb::BaikalHeartBeatRequest& request, bool is_backup = false);
-    static void process_heart_beat_response_sync(const pb::BaikalHeartBeatResponse& response);
-    static void process_heart_beat_response(const pb::BaikalHeartBeatResponse& response, bool is_backup = false);
+    // 主Meta使用
+    static void construct_heart_beat_request(
+        pb::BaikalHeartBeatRequest& request, bool is_backup = false);
+    // 非主Meta使用
+    static void construct_heart_beat_request(
+        std::unordered_map<int64_t, pb::BaikalHeartBeatRequest>& meta_request_map);
+    static void process_heart_beat_response_sync(
+        const pb::BaikalHeartBeatResponse& response, const int64_t meta_id = 0);
+    static void process_heart_beat_response(
+        const pb::BaikalHeartBeatResponse& response, bool is_backup = false, const int64_t meta_id = 0);
 };
 
 class BaseBaikalHeartBeat {

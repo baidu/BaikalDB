@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "apply_node.h"
 #include "filter_node.h"
 #include "select_manager_node.h"
 #include "agg_node.h"
@@ -46,16 +47,43 @@ void ExprOptimize::analyze_union(QueryContext* ctx, PacketNode* packet_node) {
             group_exprs[i]->set_col_type(select_projections[i]->col_type());
         }
     }
+    // 条件下推可能生成FilterNode
+    std::vector<ExecNode*> filter_nodes;
+    plan->get_node(pb::TABLE_FILTER_NODE, filter_nodes);
+    plan->get_node(pb::WHERE_FILTER_NODE, filter_nodes);
+    plan->get_node(pb::HAVING_FILTER_NODE, filter_nodes);
+    for (auto* node : filter_nodes) {
+        FilterNode* filter_node = static_cast<FilterNode*>(node);
+        if (filter_node == nullptr) {
+            DB_WARNING("filter_node is nullptr");
+            return;
+        }
+        for (auto* expr : *(filter_node->mutable_conjuncts())) {
+            if (expr == nullptr) {
+                DB_WARNING("expr is nullptr");
+                return;
+            }
+            for (int i = 0; i < select_projections.size(); ++i) {
+                expr->set_slot_col_type(tuple_desc->tuple_id(), i + 1, select_projections[i]->col_type());
+            }
+        }
+    }
 }
 int ExprOptimize::analyze_derived_table(QueryContext* ctx, PacketNode* packet_node) {
     ExecNode* plan = ctx->root;
     std::vector<ExecNode*> join_nodes;
     plan->get_node(pb::JOIN_NODE, join_nodes);
-    SortNode* sort_node = static_cast<SortNode*>(plan->get_node(pb::SORT_NODE));
-    FilterNode* filter_node = static_cast<FilterNode*>(plan->get_node(pb::WHERE_FILTER_NODE));
-    FilterNode* having_node = static_cast<FilterNode*>(plan->get_node(pb::HAVING_FILTER_NODE));
-    AggNode* agg_node = static_cast<AggNode*>(plan->get_node(pb::AGG_NODE));
-    AggNode* merge_agg_node = static_cast<AggNode*>(plan->get_node(pb::MERGE_AGG_NODE));
+    std::vector<ExecNode*> apply_nodes;
+    plan->get_node(pb::APPLY_NODE, apply_nodes);
+    std::vector<ExecNode*> filter_nodes;
+    plan->get_node(pb::TABLE_FILTER_NODE, filter_nodes);
+    plan->get_node(pb::WHERE_FILTER_NODE, filter_nodes);
+    plan->get_node(pb::HAVING_FILTER_NODE, filter_nodes);
+    std::vector<ExecNode*> sort_nodes;
+    plan->get_node(pb::SORT_NODE, sort_nodes);
+    std::vector<ExecNode*> agg_nodes;
+    plan->get_node(pb::AGG_NODE, agg_nodes);
+    plan->get_node(pb::MERGE_AGG_NODE, agg_nodes);
     std::vector<ExprNode*>& outer_projections = packet_node->mutable_projections();
     for (auto& iter : ctx->derived_table_ctx_mapping) {
         auto& subquery_ctx = iter.second;
@@ -69,7 +97,7 @@ int ExprOptimize::analyze_derived_table(QueryContext* ctx, PacketNode* packet_no
             int32_t outer_slot_id = iter.first;
             int32_t inter_column_id = iter.second;
             if (inter_column_id >= (int)select_projections.size()) {
-                DB_WARNING("plan ilegal");
+                DB_WARNING("plan illegal");
                 return -1;
             } 
             pb::PrimitiveType type = select_projections[inter_column_id]->col_type();
@@ -78,7 +106,8 @@ int ExprOptimize::analyze_derived_table(QueryContext* ctx, PacketNode* packet_no
             }
             auto slot = tuple_desc->mutable_slots(outer_slot_id - 1);
             slot->set_slot_type(type);
-            if (sort_node != nullptr) {
+            for (auto s : sort_nodes) {
+                auto* sort_node = static_cast<SortNode*>(s);
                 for (auto expr : *(sort_node->mutable_order_exprs())) {
                     expr->set_slot_col_type(tuple_id, outer_slot_id, type);
                 }
@@ -86,17 +115,14 @@ int ExprOptimize::analyze_derived_table(QueryContext* ctx, PacketNode* packet_no
                     expr->set_slot_col_type(tuple_id, outer_slot_id, type);
                 }
             }
-            if (filter_node != nullptr) {
-                for (auto expr : *(filter_node->mutable_conjuncts())) {
+            for (auto table_filter : filter_nodes) {
+                FilterNode* table_filter_node = static_cast<FilterNode*>(table_filter); 
+                for (auto expr : *(table_filter_node->mutable_conjuncts())) {
                     expr->set_slot_col_type(tuple_id, outer_slot_id, type);
                 }
             }
-            if (having_node != nullptr) {
-                for (auto expr : *(having_node->mutable_conjuncts())) {
-                    expr->set_slot_col_type(tuple_id, outer_slot_id, type);
-                }
-            }
-            if (agg_node != nullptr) {
+            for (auto a : agg_nodes) {
+                auto agg_node = static_cast<AggNode*>(a);
                 for (auto expr : *(agg_node->mutable_group_exprs())) {
                     expr->set_slot_col_type(tuple_id, outer_slot_id, type);
                 }
@@ -104,17 +130,15 @@ int ExprOptimize::analyze_derived_table(QueryContext* ctx, PacketNode* packet_no
                     expr->set_slot_col_type(tuple_id, outer_slot_id, type);
                 }
             }
-            if (merge_agg_node != nullptr) {
-                for (auto expr : *(merge_agg_node->mutable_group_exprs())) {
-                    expr->set_slot_col_type(tuple_id, outer_slot_id, type);
-                }
-                for (auto expr : *(merge_agg_node->mutable_agg_fn_calls())) {
-                    expr->set_slot_col_type(tuple_id, outer_slot_id, type);
-                }
-            }
             for (auto join_node : join_nodes) {
                 JoinNode* join = static_cast<JoinNode*>(join_node); 
                 for (auto expr : *(join->mutable_conjuncts())) {
+                    expr->set_slot_col_type(tuple_id, outer_slot_id, type);
+                }
+            }
+            for (auto apply_node : apply_nodes) {
+                ApplyNode* apply = static_cast<ApplyNode*>(apply_node); 
+                for (auto expr : *(apply->mutable_conjuncts())) {
                     expr->set_slot_col_type(tuple_id, outer_slot_id, type);
                 }
             }

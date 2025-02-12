@@ -15,6 +15,10 @@
 #include "predicate.h"
 #include "parser.h"
 #include <boost/algorithm/string.hpp>
+#include <arrow/compute/api_scalar.h>
+#include <arrow/api.h> 
+#include <arrow/compute/cast.h>
+#include "arrow_function.h"
 
 namespace baikaldb {
 
@@ -44,8 +48,8 @@ ExprValue InPredicate::make_key(ExprNode* e, MemRow* row) {
         if (v.is_null()) {
             return ExprValue::Null();
         }
-        ret.str_val += v.cast_to(_row_expr_types[j]).get_string();
-        ret.str_val.append(1, '\0');
+        ret.str_val += v.cast_to(_row_expr_types[j]).get_int_string();
+        ret.str_val.append(1, '\0');        
     }
     return ret;
 }
@@ -184,6 +188,116 @@ ExprValue InPredicate::get_value(MemRow* row) {
     return _has_null ? ExprValue::Null() : ExprValue::False();
 }
 
+int InPredicate::transfer_to_arrow_expression() {
+    if (_children[0]->transfer_to_arrow_expression() != 0) {
+        DB_FATAL("in predicate column transfer error");
+        return -1;
+    }
+
+    arrow::compute::Expression expr;
+    if (_is_row_expr) {
+        // (a,b,c) -> (cast(a, string())) binary_join(\0) (cast(b, string())) binary_join(\0) (cast(c, string()))
+        // 可以优化成join
+        ExprNode* fields = _children[0];
+        std::vector<arrow::compute::Expression> args;
+        std::string separator;
+        separator.append(1, '\0');
+        arrow::Datum separator_datum = std::make_shared<arrow::LargeBinaryScalar>(separator);
+        for (size_t j = 0; j < _col_size; j++) { 
+            if (children(0)->children(j)->col_type() == pb::UINT64
+                    || children(1)->children(j)->col_type() == pb::UINT64) {
+                // unsigned int64需要先转成int64列
+                arrow::compute::Expression cast_int64_first = arrow::compute::call("cast", {fields->children(j)->arrow_expr()}, 
+                                                        arrow::compute::CastOptions::Unsafe(arrow::int64()));
+                fields->children(j)->set_arrow_expr(cast_int64_first);
+            }
+            arrow::compute::Expression cast_expr = arrow::compute::call("cast", {fields->children(j)->arrow_expr()}, 
+                                                            arrow::compute::CastOptions::Unsafe(arrow::large_binary()));
+            args.emplace_back(cast_expr);
+            args.emplace_back(arrow::compute::literal(separator_datum)); 
+        }
+        // 连接符放在最后
+        args.emplace_back(arrow::compute::literal(std::make_shared<arrow::LargeBinaryScalar>("")));
+        /// A null in any input results in a null in the output. binary_join_element_wise要求args类型都一样, large_binary
+        std::shared_ptr<arrow::compute::JoinOptions> option = std::make_shared<arrow::compute::JoinOptions>();
+        expr = arrow::compute::call("binary_join_element_wise", args, option);
+    } else {
+        expr = _children[0]->arrow_expr();
+    }
+
+    std::shared_ptr<arrow::Array> array;
+    if (_int_set.size() > 0) {
+        if (is_uint(_children[0]->col_type())) {
+            auto builder = std::make_shared<arrow::UInt64Builder>();
+            for (const auto& v : _int_set) {
+                // int64_t -> uint64_t
+                ExprValue value;
+                value._u.int64_val = v;
+                value.type = pb::INT64;
+                auto s = builder->Append(value.cast_to(pb::UINT64).get_numberic<uint64_t>());
+                if (!s.ok()) {
+                    DB_FATAL("append uint64 array error: %s", s.ToString().c_str());
+                    return -1;
+                }
+            }
+            auto s = builder->Finish(&array);
+            if (!s.ok()) {
+                DB_FATAL("build int64 array error: %s", s.ToString().c_str());
+                return -1;
+            }
+        } else {
+            auto builder = std::make_shared<arrow::Int64Builder>();
+            for (const auto& v : _int_set) {
+                auto s = builder->Append(v);
+                if (!s.ok()) {
+                    DB_FATAL("append int64 array error: %s", s.ToString().c_str());
+                    return -1;
+                }
+            }
+            auto s = builder->Finish(&array);
+            if (!s.ok()) {
+                DB_FATAL("build int64 array error: %s", s.ToString().c_str());
+                return -1;
+            }
+        }
+    } else if (_double_set.size() > 0) {
+        auto builder = std::make_shared<arrow::DoubleBuilder>();
+        for (const auto& v : _double_set) {
+            auto s = builder->Append(v);
+            if (!s.ok()) {
+                DB_FATAL("append double array error: %s", s.ToString().c_str());
+                return -1;
+            }
+        }
+        auto s = builder->Finish(&array);
+        if (!s.ok()) {
+            DB_FATAL("build int64 array error: %s", s.ToString().c_str());
+            return -1;
+        }
+    } else if (_str_set.size() > 0) {
+        auto builder = std::make_shared<arrow::LargeBinaryBuilder>();
+        for (const auto& v : _str_set) {
+            auto s = builder->Append(v);
+            if (!s.ok()) {
+                DB_FATAL("append string array error: %s", s.ToString().c_str());
+                return -1;
+            }
+        }
+        auto s = builder->Finish(&array); 
+        if (!s.ok()) {
+            DB_FATAL("build string array error: %s", s.ToString().c_str());
+            return -1;
+        }
+    } else {
+        DB_FATAL("no in values");
+        return -1;
+    }
+    arrow::Datum value_set(array);
+    arrow::compute::SetLookupOptions in_args{value_set, /*skip_nulls*/true};
+    _arrow_expr = arrow::compute::call("is_in", {expr}, in_args);
+    return 0;
+}
+
 void LikePredicate::reset_pattern(MemRow* row) {
     _pattern = children(1)->get_value(row).get_string();
 }
@@ -239,6 +353,7 @@ int LikePredicate::open_by_pattern() {
 }
 
 void LikePredicate::reset_regex(MemRow* row) {
+    _regex_pattern.clear();
     std::string like_pattern = children(1)->get_value(row).get_string();
     if (_fn.fn_op() == parser::FT_EXACT_LIKE) {
         covent_exact_pattern(like_pattern);
@@ -396,7 +511,7 @@ bool LikePredicate::like_one(const std::string& target, const std::string& patte
             if (like_ret) {
                 ret = *like_ret;
             } else {
-                DB_WARNING("GBK like failed target[%s], pattern[%s]", target.c_str(), _pattern.c_str());
+                DB_DEBUG("GBK like failed target[%s], pattern[%s]", target.c_str(), _pattern.c_str());
                 like_ret = like<Binary>(target, pattern);
                 if (like_ret) {
                     ret = *like_ret;
@@ -413,7 +528,7 @@ bool LikePredicate::like_one(const std::string& target, const std::string& patte
                 break;
             }
         }
-        DB_WARNING("UTF8 like failed target[%s], pattern[%s]", target.c_str(), _pattern.c_str());
+        DB_DEBUG("UTF8 like failed target[%s], pattern[%s]", target.c_str(), _pattern.c_str());
     default:
         {
             auto like_ret = like<Binary>(target, pattern);
@@ -444,6 +559,39 @@ ExprValue LikePredicate::get_value_by_pattern(MemRow* row) {
         }
     }
     return ret;
+}
+
+bool LikePredicate::can_use_arrow_vector() {
+    if (!FLAGS_like_predicate_use_re2) {
+        return false;
+    }
+    std::unordered_set<int32_t> slot_ids;
+    children(1)->get_all_slot_ids(slot_ids);
+    if (slot_ids.size() > 0) {
+        return false;
+    }
+    for (auto& c : _children) {
+        if (!c->can_use_arrow_vector()) {
+            return false;
+        }
+    }
+    return true;
+};
+
+int LikePredicate::transfer_to_arrow_expression() {
+    std::vector<arrow::compute::Expression> args;
+    if (_children[0]->transfer_to_arrow_expression() != 0) {
+        DB_FATAL("in predicate column transfer error");
+        return -1;
+    }
+    if (is_string(_children[0]->col_type())) {
+        args.emplace_back(_children[0]->arrow_expr());
+    } else {
+        args.emplace_back(arrow::compute::call("cast", {_children[0]->arrow_expr()}, arrow::compute::CastOptions::Unsafe(arrow::large_binary()))); 
+    }
+    arrow::compute::MatchSubstringOptions opt(children(1)->get_value(nullptr).get_string(), /*ignore_case*/false);
+    _arrow_expr = arrow::compute::call("match_like", args, std::move(opt));
+    return 0;
 }
 
 void RegexpPredicate::reset_regex(MemRow* row) {
@@ -496,6 +644,36 @@ ExprValue RegexpPredicate::get_value(MemRow* row) {
         ret._u.bool_val = false;
     }
     return ret;
+}
+
+bool RegexpPredicate::can_use_arrow_vector() {
+    std::unordered_set<int32_t> slot_ids;
+    children(1)->get_all_slot_ids(slot_ids);
+    if (slot_ids.size() > 0) {
+        return false;
+    }
+    for (auto& c : _children) {
+        if (!c->can_use_arrow_vector()) {
+            return false;
+        }
+    }
+    return true;
+};
+
+int RegexpPredicate::transfer_to_arrow_expression() {
+    std::vector<arrow::compute::Expression> args;
+    if (_children[0]->transfer_to_arrow_expression() != 0) {
+        DB_FATAL("regex predicate column transfer error");
+        return -1;
+    }
+    if (is_string(_children[0]->col_type())) {
+        args.emplace_back(_children[0]->arrow_expr());
+    } else {
+        args.emplace_back(arrow::compute::call("cast", {_children[0]->arrow_expr()}, arrow::compute::CastOptions::Unsafe(arrow::large_binary()))); 
+    }
+    arrow::compute::MatchSubstringOptions opt(children(1)->get_value(nullptr).get_string(), /*ignore_case*/false);
+    _arrow_expr = arrow::compute::call("match_substring_regex", args, std::move(opt));
+    return 0;
 }
 
 size_t LikePredicate::UTF8Charset::get_char_size(size_t idx) {

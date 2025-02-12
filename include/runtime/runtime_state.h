@@ -34,6 +34,7 @@
 #include "statistics.h"
 #include "memory_profile.h"
 //#include "region_resource.h"
+#include <arrow/acero/exec_plan.h>
 
 using google::protobuf::RepeatedPtrField;
 
@@ -395,6 +396,19 @@ public:
     int64_t primary_region_id() const {
         return _primary_region_id;
     }
+
+    bool is_from_subquery() {
+        return _is_from_subquery;
+    }
+
+    bool is_union_subquery() {
+        return _is_union_subquery;
+    }
+
+    QueryContext* ctx() {
+        return _ctx;
+    }
+
     int memory_limit_exceeded(int64_t rows_to_check, int64_t bytes);
     int memory_limit_release(int64_t rows_to_check, int64_t bytes);
     int memory_limit_release_all();
@@ -430,6 +444,11 @@ public:
         _is_ddl_work = is_ddl_work;
     }
 
+    int reset_tuple_descs_and_mem_row_descriptor(const std::vector<pb::TupleDescriptor>& tuple_descs);
+
+    void append_acero_declaration(const arrow::acero::Declaration& dec) {
+        acero_declarations.emplace_back(std::move(dec));
+    }
 public:
     uint64_t          txn_id = 0;
     int32_t           seq_id = 0;
@@ -443,6 +462,7 @@ public:
     std::function<void(RuntimeState* state, SmartTransaction txn)> raft_func;
     bool              need_txn_limit = false;
     pb::ErrCode       err_code = pb::SUCCESS;
+    bool              is_explain = false;
     ExplainType       explain_type = EXPLAIN_NULL;
     std::shared_ptr<CMsketch> cmsketch = nullptr;
     int64_t          last_insert_id = INT64_MIN; //存储baikalStore last_insert_id(expr)更新的字段
@@ -463,13 +483,32 @@ public:
 
     uint64_t          sign = 0;
     bool              need_use_read_index = false;
+    bool              need_read_rolling = false;
     // for re
     int                 keypoint_range = 100 * 10000;
     int                 partition_threshold = 10000;
     int                 range_count_limit = 0;
     int64_t           _sql_exec_timeout = -1;
     bool              _is_ddl_work = false;
+
     bool              must_have_one = false;
+
+
+    // for acero vectorize
+    pb::ExecuteType     execute_type = pb::EXEC_ROW;
+    bool                vectorlized_parallel_execution = true; 
+    std::vector<arrow::acero::Declaration>  acero_declarations;
+    SignExecType sign_exec_type = SignExecType::SIGN_EXEC_NOT_SET;
+    // tuple id -> arrow schema
+    std::unordered_map<int, std::shared_ptr<arrow::Schema>> arrow_input_schemas; 
+    bool                is_simple_select = true;
+    bool                force_vectorize = false; // For store, 强制走向量化
+
+    // 单表编码转换
+    bool need_convert_charset = false;
+    pb::Charset connection_charset = pb::CS_UNKNOWN;
+    pb::Charset table_charset = pb::CS_UNKNOWN;
+
 private:
     bool _is_inited    = false;
     bool _is_cancelled = false;
@@ -479,6 +518,7 @@ private:
     bool _single_txn_cached = false;
     bool _is_expr_subquery = false;
     std::vector<pb::TupleDescriptor> _tuple_descs;
+    uint64_t _tuple_sign = 0;
     SmartDescriptor _mem_row_desc;
     // MemRowDescriptor _mem_row_desc;
     int64_t          _region_id = 0;
@@ -525,9 +565,18 @@ private:
     std::string      _remote_side;
     TimeCost  time_cost;
 
+    bool _is_from_subquery = false;
+    QueryContext* _ctx = nullptr;
+
+    bool _is_union_subquery = false;
+
+    int set_mem_row_decriptor();
     //清理长期不使用的sql签名对应的MemRowDescriptor释放内存
-    void clear_mem_row_descriptor(MemRowDescriptorMap& sql_sign_to_mem_row_descriptor);
-    uint64_t tuple_descs_to_sign();
+    void clear_mem_row_descriptor();
+    uint64_t tuple_descs_to_sign(const std::vector<pb::TupleDescriptor>& tuple_descs);
+
+    //thread_local map:线程局部变量map,保存签名,  tuple_sign => pair<TimeCost, std::shared_ptr<SmartDescriptor>>, 避免重复BuildFile
+    static thread_local MemRowDescriptorMap sql_sign_to_mem_row_descriptor;
 };
 typedef std::shared_ptr<RuntimeState> SmartState;
 }

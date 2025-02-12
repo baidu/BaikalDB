@@ -76,6 +76,13 @@ int MetaServer::init(const std::vector<braft::PeerId>& peers) {
         DB_FATAL("new meta_state_machine fail");
         return -1;
     }
+    // state_machine初始化前进行配置
+    SchemaManager::get_instance()->set_meta_state_machine(_meta_state_machine);
+    PrivilegeManager::get_instance()->set_meta_state_machine(_meta_state_machine);
+    ClusterManager::get_instance()->set_meta_state_machine(_meta_state_machine);
+    DDLManager::get_instance()->set_meta_state_machine(_meta_state_machine);
+    DBManager::get_instance()->set_meta_state_machine(_meta_state_machine);
+
     //state_machine初始化
     ret = _meta_state_machine->init(peers);
     if (ret != 0) {
@@ -108,12 +115,7 @@ int MetaServer::init(const std::vector<braft::PeerId>& peers) {
     }
     DB_WARNING("_tso_state_machine init success");
 
-    SchemaManager::get_instance()->set_meta_state_machine(_meta_state_machine);
-    PrivilegeManager::get_instance()->set_meta_state_machine(_meta_state_machine);
-    ClusterManager::get_instance()->set_meta_state_machine(_meta_state_machine);
     MetaServerInteract::get_instance()->init();
-    DDLManager::get_instance()->set_meta_state_machine(_meta_state_machine);
-    DBManager::get_instance()->set_meta_state_machine(_meta_state_machine);
     DDLManager::get_instance()->launch_work();
     DBManager::get_instance()->init();
     _flush_bth.run([this]() {flush_memtable_thread();});
@@ -180,7 +182,8 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
             || request->op_type() == pb::OP_DROP_USER
             || request->op_type() == pb::OP_MODIFY_USER
             || request->op_type() == pb::OP_ADD_PRIVILEGE
-            || request->op_type() == pb::OP_DROP_PRIVILEGE) {
+            || request->op_type() == pb::OP_DROP_PRIVILEGE
+            || request->op_type() == pb::OP_DROP_INVALID_PRIVILEGE) {
         PrivilegeManager::get_instance()->process_user_privilege(controller,
                                                    request,
                                                    response,
@@ -195,6 +198,8 @@ void MetaServer::meta_manager(google::protobuf::RpcController* controller,
             || request->op_type() == pb::OP_MODIFY_DATABASE
             || request->op_type() == pb::OP_CREATE_TABLE 
             || request->op_type() == pb::OP_DROP_TABLE 
+            || request->op_type() == pb::OP_CREATE_VIEW
+            || request->op_type() == pb::OP_DROP_VIEW
             || request->op_type() == pb::OP_DROP_TABLE_TOMBSTONE
             || request->op_type() == pb::OP_RESTORE_TABLE 
             || request->op_type() == pb::OP_RENAME_TABLE

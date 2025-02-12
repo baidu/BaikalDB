@@ -29,6 +29,9 @@ DEFINE_int32(ddl_status_update_interval_us, 10 * 1000 * 1000, "ddl_status_update
 DEFINE_int32(max_region_num_ratio, 2, "max region number ratio");
 DEFINE_int32(max_ddl_retry_time, 30, "max ddl retry time");
 DECLARE_int32(baikal_heartbeat_interval_us);
+DEFINE_bool(all_rollup_region_need_execute, false, "all rollup region need execute");
+DEFINE_int32(single_store_max_ddlwork_num, 3, "store max ddlwork num");
+DEFINE_bool(cold_data_rollup_done, true, "cold data rollup done");
 
 std::string construct_ddl_work_key(const std::string& identify, const std::initializer_list<int64_t>& ids) {
     std::string ddl_key;
@@ -71,14 +74,16 @@ void DBManager::process_common_task_hearbeat(const std::string& address, const p
             todo_iter = db_task_map.to_do_task_map.erase(todo_iter);
         }
     });
-
     //处理已经完成的工作
     for (const auto& region_ddl_info : request->region_ddl_works()) {
         // 删除 _to_launch_task_info_map内任务。
         //DB_NOTICE("update ddlwork %s", region_ddl_info.ShortDebugString().c_str());
-        _common_task_map.update(region_ddl_info.address(), [&region_ddl_info](CommonTaskMap& db_task_map) {
-            auto task_id = std::to_string(region_ddl_info.table_id()) + 
+        auto task_id = std::to_string(region_ddl_info.table_id()) + 
                 "_" + std::to_string(region_ddl_info.region_id());
+        if (region_ddl_info.status() != pb::DdlWorkDoing) {
+            clear_store_check(task_id);
+        }
+        _common_task_map.update(region_ddl_info.address(), [this, task_id, &region_ddl_info](CommonTaskMap& db_task_map) {
             if (region_ddl_info.status() == pb::DdlWorkDoing) {
                 // 正在运行，跟新时间戳。
                 auto iter =  db_task_map.doing_task_map.find(task_id);
@@ -185,6 +190,11 @@ void DBManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* reque
     }
     TimeCost tc;
     std::string address = butil::endpoint2str(cntl->remote_side()).c_str();
+    if (!request->has_physical_room()) {
+        DB_WARNING("!has_physical_room, addr:%s", address.c_str());
+        // 非baikaldb心跳
+        return;
+    }
     auto room = request->physical_room();
     update_baikaldb_info(address, room);
     auto update_db_info_ts = tc.get_time();
@@ -199,7 +209,7 @@ void DBManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* reque
 
     DB_NOTICE("process ddl baikal heartbeat update biakaldb info %ld, common task time %ld, broadcast task time %ld",
         update_db_info_ts, common_task_ts, broadcast_task_ts);
-
+    
     DB_DEBUG("ddl_request : %s address %s", request->ShortDebugString().c_str(), address.c_str());
     DB_DEBUG("dll_response : %s address %s", response->ShortDebugString().c_str(), address.c_str());
 }
@@ -273,6 +283,21 @@ int DBManager::execute_task(MemRegionDdlWork& work) {
     std::string address;
     if (select_instance(&address, work.region_info.op_type() == pb::OP_MODIFY_FIELD)) {
         auto task_id = std::to_string(region_ddl_info.table_id()) + "_" + std::to_string(region_ddl_info.region_id());
+        // 一个store同一时间只能执行single_store_max_ddlwork_num个ddl任务
+        SmartRegionInfo region_info = RegionManager::get_instance()->get_region_info(region_ddl_info.region_id());
+        if (region_info != nullptr && work.region_info.op_type() != pb::OP_MODIFY_FIELD) {
+            BAIDU_SCOPED_LOCK(_task_store_mutex);
+            if (store_ddlwork_cnt_map[region_info->leader()] >= FLAGS_single_store_max_ddlwork_num) {
+                DB_NOTICE("store_check address_%s is doing %d ddl_work", 
+                    region_info->leader().c_str(), store_ddlwork_cnt_map[region_info->leader()]);
+                return -2;
+            } else {
+                store_ddlwork_cnt_map[region_info->leader()]++;
+                task_store_map[task_id] = region_info->leader();
+                DB_NOTICE("store_check address_%s start task: %s ddl_work_num: %d", 
+                    region_info->leader().c_str(), task_id.c_str(), store_ddlwork_cnt_map[region_info->leader()]);
+            }
+        }
         auto retry_time = region_ddl_info.retry_time();
         region_ddl_info.set_retry_time(++retry_time);
         region_ddl_info.set_address(address);
@@ -324,7 +349,7 @@ void DBManager::init() {
             }
             DB_NOTICE("db manager working thread.");
             _common_task_map.traverse([this](CommonTaskMap& db_task_map) {
-                auto traverse_func = [](std::unordered_map<TaskId, MemRegionDdlWork>& update_map){
+                auto traverse_func = [this](std::unordered_map<TaskId, MemRegionDdlWork>& update_map){
                     auto iter = update_map.begin();
                     for (; iter != update_map.end(); ) {
                         if (butil::gettimeofday_us() - iter->second.update_timestamp >
@@ -338,6 +363,7 @@ void DBManager::init() {
                             iter->second.region_info.set_status(pb::DdlWorkIdle);
                             DDLManager::get_instance()->update_region_ddlwork(iter->second.region_info);
                             iter = update_map.erase(iter);
+                            clear_store_check(task_id);
                         } else {
                             iter++;
                         }
@@ -411,8 +437,17 @@ int DBManager::restore_task(const pb::RegionDdlWork& region_ddl_info) {
     work.region_info = region_ddl_info;
     work.update_timestamp = butil::gettimeofday_us();
     map.to_do_task_map[task_id] = work;
-    _common_task_map.init_if_not_exist_else_update(region_ddl_info.address(), false, [&work, &task_id](CommonTaskMap& db_task_map){
+    _common_task_map.init_if_not_exist_else_update(region_ddl_info.address(), false, [this, region_ddl_info, &work, &task_id](CommonTaskMap& db_task_map){
         db_task_map.doing_task_map[task_id] = work;
+        {
+            SmartRegionInfo region_info = RegionManager::get_instance()->get_region_info(region_ddl_info.region_id());
+            if (region_info != nullptr) {
+                BAIDU_SCOPED_LOCK(this->_task_store_mutex);
+                store_ddlwork_cnt_map[region_info->leader()]++;
+                task_store_map[task_id] = region_info->leader();
+                DB_NOTICE("store_check address_%s is doing task: %s ", region_info->leader().c_str(), task_id.c_str());
+            }
+        }
     }, map);
     DB_NOTICE("choose address_%s for doing_task_map task_%s", region_ddl_info.address().c_str(), task_id.c_str());
     return 0;
@@ -480,6 +515,9 @@ int DDLManager::init_index_ddlwork(int64_t table_id, const pb::IndexInfo& index_
     mem_info.work_info.set_errcode(pb::IN_PROCESS);
     mem_info.work_info.set_status(pb::DdlWorkIdle);
     mem_info.work_info.set_global(index_info.is_global());
+    if (index_info.index_type() == pb::I_ROLLUP) {
+        mem_info.work_info.set_is_rollup(true);
+    }
     _table_ddl_mem.emplace(table_id, mem_info);
     std::string index_ddl_string;
     if (!mem_info.work_info.SerializeToString(&index_ddl_string)) {
@@ -887,7 +925,8 @@ int DDLManager::add_index_ddlwork(pb::DdlWorkInfo& ddl_work) {
     int64_t table_id = ddl_work.table_id();
     int64_t region_table_id = ddl_work.global() ? ddl_work.index_id() : ddl_work.table_id();
     size_t region_size = TableManager::get_instance()->get_region_size(region_table_id);
-    DB_NOTICE("table_id:%ld index_id:%ld region size %zu", table_id, ddl_work.index_id(), region_size);
+    bool is_rollup = ddl_work.is_rollup();
+    DB_NOTICE("table_id:%ld index_id:%ld region size %zu, is_rollup: %d", table_id, ddl_work.index_id(), region_size, is_rollup);
     pb::IndexState current_state;
     if (TableManager::get_instance()->get_index_state(ddl_work.table_id(), ddl_work.index_id(), current_state) != 0) {
         DB_WARNING("ddl index not ready. table_id[%ld] index_id[%ld]", 
@@ -970,71 +1009,64 @@ int DDLManager::add_index_ddlwork(pb::DdlWorkInfo& ddl_work) {
                 return 0;
             }
 
-            region_map_ptr->traverse_with_early_return([&done, &rollback, this, table_id, region_size, 
+            if (is_rollup) {
+                // 如果是rollup需要按region_id从大到小排序
+                region_map_ptr->traverse_with_early_return_by_order([&done, &rollback, this, table_id, region_size, 
                 &current_task_number, max_task_number, &ddl_work, &wait_num](MemRegionDdlWork& region_work) -> bool {
-                auto task_id = std::to_string(region_work.region_info.table_id()) + 
-                        "_" + std::to_string(region_work.region_info.region_id());
-                if (region_work.region_info.status() == pb::DdlWorkIdle) {
-                    done = false;
-                    DB_NOTICE("execute task_%s %s", task_id.c_str(), region_work.region_info.ShortDebugString().c_str());
-                    if (DBManager::get_instance()->execute_task(region_work) == 0) {
-                        //提交任务成功，设置状态为DOING.
-                        region_work.region_info.set_status(pb::DdlWorkDoing);
-                        if (increase_doing_work_number(table_id) > region_size * FLAGS_max_region_num_ratio) {
-                            DB_NOTICE("table_%ld not enough region.", table_id);
-                            return false;
+                    // 检查region是否存在, 转冷会删除region
+                    if (region_work.region_info.status() == pb::DdlWorkIdle) {
+                        std::set<int64_t> region_ids;
+                        TableManager::get_instance()->get_region_ids(table_id, {region_work.region_info.partition()}, region_ids);
+                        if (region_ids.count(region_work.region_info.region_id()) == 0) {
+                            region_work.region_info.set_status(pb::DdlWorkDone);
+                            DB_NOTICE("table_id: %ld, region_id: %ld, partition %ld not exist, region ddl work done", table_id, region_work.region_info.region_id(), region_work.region_info.partition());
+                            return true;
                         }
-                        current_task_number++;
-                        if (current_task_number > max_task_number) {
-                            DB_NOTICE("table_%ld launch task next round.", table_id);
-                            return false;
-                        }
-                    } else {
-                        DB_NOTICE("table_%ld not enough baikaldb to execute.", table_id);
-                        return false;
-                    }
-                }
-                if (region_work.region_info.status() != pb::DdlWorkDone) {
-                    DB_NOTICE("wait task_%s %s", task_id.c_str(), region_work.region_info.ShortDebugString().c_str());
-                    wait_num++;
-                    done = false;
-                }
-                if (region_work.region_info.status() == pb::DdlWorkFail) {
-                    auto retry_time = region_work.region_info.retry_time();
-                    if (retry_time < FLAGS_max_ddl_retry_time) {
-                        if (DBManager::get_instance()->execute_task(region_work) == 0) {
-                            region_work.region_info.set_status(pb::DdlWorkDoing);
-                            if (increase_doing_work_number(table_id) > region_size * FLAGS_max_region_num_ratio) {
-                                DB_NOTICE("not enough region.");
-                                return false;
+                    
+                        // 百+集群只有OLAP_ACTIVE状态, 需要下发任务
+                        if (FLAGS_cold_data_rollup_done) {
+                            pb::SchemaInfo table_schema_pb;
+                            int ret = TableManager::get_instance()->get_table_info(table_id, table_schema_pb);
+                            if (ret != 0) {
+                                DB_WARNING("get table info failed, table id: %ld", table_id);
+                                return true;
                             }
-                            DB_NOTICE("retry task_%s %s", task_id.c_str(), 
-                                region_work.region_info.ShortDebugString().c_str());
+                            if (table_schema_pb.has_partition_info()) {
+                                const pb::PartitionInfo& partition_info_pb = table_schema_pb.partition_info();
+                                for (auto it = partition_info_pb.range_partition_infos().rbegin(); it != partition_info_pb.range_partition_infos().rend(); ++it) {
+                                if (it->partition_id() == region_work.region_info.partition()) {
+                                    if (it->is_cold()) {
+                                        region_work.region_info.set_status(pb::DdlWorkDone);
+                                        DB_NOTICE("table_id: %ld, region_id: %ld, partition %ld is cold, region ddl work done", table_id, region_work.region_info.region_id(), region_work.region_info.partition());
+                                        return true;
+                                    }
+                                }
+                            }
                         }
-                    } else {
-                        rollback = true;
-                        DB_NOTICE("rollback task_%s %s", task_id.c_str(), 
-                            region_work.region_info.ShortDebugString().c_str());
                     }
-                    done = false;
-                } else if (region_work.region_info.status() == pb::DdlWorkDupUniq ||
-                           region_work.region_info.status() == pb::DdlWorkError) {
-                    DB_FATAL("region task_%s %s dup uniq or create index region error.", task_id.c_str(), 
-                        region_work.region_info.ShortDebugString().c_str());
-                    done = false;
-                    rollback = true;
-                }
+                    }
 
-                if (rollback) {
-                    DB_FATAL("ddl work %s rollback.", ddl_work.ShortDebugString().c_str());
-                    ddl_work.set_errcode(pb::EXEC_FAIL);
-                    ddl_work.set_status(pb::DdlWorkFail);
-                    update_table_ddl_mem(ddl_work);
-                    _update_policy.clear(table_id);
-                    return false;
-                }
-                return true;
-            });
+                    // 1. 判断region是不是符合日期, 为了方便测试, 测试集群不做判断
+                    if (!FLAGS_all_rollup_region_need_execute) {
+                        int ret = is_region_work_need_executor(region_work, table_id, done);
+                        if (ret == -2) {
+                            return false;
+                        } else if (ret == -1) {
+                            return true;
+                        }
+                    }
+                    // 2. 派发任务
+                    return execute_or_retry_task(done, rollback, table_id, region_size, 
+                        current_task_number, max_task_number, ddl_work, wait_num, region_work);
+                });
+            } else {
+                region_map_ptr->traverse_with_early_return([&done, &rollback, this, table_id, region_size, 
+                    &current_task_number, max_task_number, &ddl_work, &wait_num](MemRegionDdlWork& region_work) -> bool {
+                    return execute_or_retry_task(done, rollback, table_id, region_size, 
+                        current_task_number, max_task_number, ddl_work, wait_num, region_work);
+                });
+            }
+
             if (done) {
                 DB_NOTICE("done");
                 ddl_work.set_job_state(pb::IS_PUBLIC);
@@ -1061,6 +1093,136 @@ int DDLManager::add_index_ddlwork(pb::DdlWorkInfo& ddl_work) {
         break;
     }
     return 0;
+}
+
+bool DDLManager::execute_or_retry_task(bool& done, bool& rollback, int64_t table_id, size_t region_size, 
+                        size_t& current_task_number, size_t max_task_number, pb::DdlWorkInfo& ddl_work, 
+                        int32_t& wait_num, MemRegionDdlWork& region_work) {
+    auto task_id = std::to_string(region_work.region_info.table_id()) + 
+                            "_" + std::to_string(region_work.region_info.region_id());                        
+    if (region_work.region_info.status() == pb::DdlWorkIdle) {
+        done = false;
+        DB_NOTICE("execute task_%s %s", task_id.c_str(), region_work.region_info.ShortDebugString().c_str());
+        int ret = DBManager::get_instance()->execute_task(region_work);
+        if (ret == 0) {
+            //提交任务成功，设置状态为DOING.
+            region_work.region_info.set_status(pb::DdlWorkDoing);
+            if (increase_doing_work_number(table_id) > region_size * FLAGS_max_region_num_ratio) {
+                DB_NOTICE("table_%ld not enough region.", table_id);
+                return false;
+            }
+            current_task_number++;
+            if (current_task_number > max_task_number) {
+                DB_NOTICE("table_%ld launch task next round.", table_id);
+                return false;
+            }
+        } else if (ret == -2) {
+            // 单个store任务满, 尝试下一个region_work
+            return true;
+        } else {
+            DB_NOTICE("table_%ld not enough baikaldb to execute.", table_id);
+            return false;
+        }
+    }
+    if (region_work.region_info.status() != pb::DdlWorkDone) {
+        DB_NOTICE("wait task_%s %s", task_id.c_str(), region_work.region_info.ShortDebugString().c_str());
+        wait_num++;
+        done = false;
+    }
+    if (region_work.region_info.status() == pb::DdlWorkFail) {
+        auto retry_time = region_work.region_info.retry_time();
+        if (retry_time < FLAGS_max_ddl_retry_time) {
+            if (DBManager::get_instance()->execute_task(region_work) == 0) {
+                region_work.region_info.set_status(pb::DdlWorkDoing);
+                if (increase_doing_work_number(table_id) > region_size * FLAGS_max_region_num_ratio) {
+                    DB_NOTICE("not enough region.");
+                    return false;
+                }
+                DB_NOTICE("retry task_%s %s", task_id.c_str(), 
+                    region_work.region_info.ShortDebugString().c_str());
+            }
+        } else {
+            rollback = true;
+            DB_NOTICE("rollback task_%s %s", task_id.c_str(), 
+                region_work.region_info.ShortDebugString().c_str());
+        }
+        done = false;
+    } else if (region_work.region_info.status() == pb::DdlWorkDupUniq ||
+            region_work.region_info.status() == pb::DdlWorkError) {
+        DB_FATAL("region task_%s %s dup uniq or create index region error.", task_id.c_str(), 
+            region_work.region_info.ShortDebugString().c_str());
+        done = false;
+        rollback = true;
+    }
+
+    if (rollback) {
+        DB_FATAL("ddl work %s rollback.", ddl_work.ShortDebugString().c_str());
+        ddl_work.set_errcode(pb::EXEC_FAIL);
+        ddl_work.set_status(pb::DdlWorkFail);
+        update_table_ddl_mem(ddl_work);
+        _update_policy.clear(table_id);
+        return false;
+    }
+    return true;
+}
+
+int DDLManager::is_region_work_need_executor(MemRegionDdlWork& region_work, int64_t table_id, bool& done) {
+    if (region_work.region_info.status() != pb::DdlWorkIdle) {
+        return 0;
+    }
+    pb::PartitionRange partition_range;
+    ExprNode* p_left_node = nullptr;
+    ExprNode* p_right_node = nullptr;
+    ScopeGuard auto_delete([&p_left_node, &p_right_node] () {
+        SAFE_DELETE(p_left_node);
+        SAFE_DELETE(p_right_node);
+    });
+    TableManager::get_instance()->get_partition_range_info(table_id, region_work.region_info.partition(), partition_range);
+    if (partition_range.left_value().nodes_size() == 0 || partition_range.right_value().nodes_size() == 0) {
+        DB_FATAL("table_id: %ld, region_id: %ld, partition %ld has no range info", table_id, region_work.region_info.region_id(), region_work.region_info.partition());
+        return -2;
+    }
+
+    if (ExprNode::create_expr_node(partition_range.left_value().nodes(0), &p_left_node) != 0) {
+        DB_FATAL("create expr node error.");
+        done = false;
+        return -2;
+    }
+    if (p_left_node == nullptr) {
+        DB_FATAL("p_left_node is nullptr");
+        done = false;
+        return -2;
+    }
+    if (ExprNode::create_expr_node(partition_range.right_value().nodes(0), &p_right_node) != 0) {
+        DB_FATAL("create expr node error.");
+        done = false;
+        return -2;
+    }
+    if (p_right_node == nullptr) {
+        DB_FATAL("p_left_node is nullptr");
+        done = false;
+        return -2;
+    }
+    ExprValue left_expr_value = p_left_node->get_value(nullptr);
+    ExprValue right_expr_value = p_right_node->get_value(nullptr);
+    left_expr_value.cast_to(pb::TIMESTAMP);
+    right_expr_value.cast_to(pb::TIMESTAMP);
+    ExprValue nowtime_expr_value(pb::TIMESTAMP);
+    nowtime_expr_value._u.uint32_val = ::time(NULL);
+    ExprValue two_days_age_expr_value(pb::TIMESTAMP);
+    two_days_age_expr_value._u.uint32_val = ::time(NULL) - 2 * 24 * 3600;
+    if (left_expr_value.compare(nowtime_expr_value) > 0
+        || right_expr_value.compare(two_days_age_expr_value) < 0) {
+        DB_NOTICE("table_id: %ld, region_id: %ld, partition %ld, datetime: %s - %s executed", 
+            table_id, region_work.region_info.region_id(), region_work.region_info.partition(), 
+            left_expr_value.get_string().c_str(), right_expr_value.get_string().c_str());
+        return 0;
+    }
+    done = false;
+    DB_NOTICE("table_id: %ld, region_id: %ld, partition %ld, datetime: %s - %s not ready", 
+            table_id, region_work.region_info.region_id(), region_work.region_info.partition(), 
+            left_expr_value.get_string().c_str(), right_expr_value.get_string().c_str());
+    return -1;
 }
 
 int DDLManager::add_column_ddlwork(pb::DdlWorkInfo& ddl_work) {
@@ -1102,7 +1264,8 @@ int DDLManager::add_column_ddlwork(pb::DdlWorkInfo& ddl_work) {
         if (region_work.region_info.status() == pb::DdlWorkIdle) {
             done = false;
             DB_NOTICE("execute task_%s %s", task_id.c_str(), region_work.region_info.ShortDebugString().c_str());
-            if (DBManager::get_instance()->execute_task(region_work) == 0) {
+            int ret = DBManager::get_instance()->execute_task(region_work);
+            if (ret == 0) {
                 //提交任务成功，设置状态为DOING.
                 region_work.region_info.set_status(pb::DdlWorkDoing);
                 if (increase_doing_work_number(table_id) > region_size * FLAGS_max_region_num_ratio) {
@@ -1114,6 +1277,9 @@ int DDLManager::add_column_ddlwork(pb::DdlWorkInfo& ddl_work) {
                     DB_NOTICE("table_%ld launch task next round.", table_id);
                     return false;
                 }
+            } else if (ret == -2) {
+                // 单个store任务满, 尝试下一个region_work
+                return true;
             } else {
                 DB_NOTICE("table_%ld not enough baikaldb to execute.", table_id);
                 return false;
@@ -1142,25 +1308,25 @@ int DDLManager::add_column_ddlwork(pb::DdlWorkInfo& ddl_work) {
                     region_work.region_info.ShortDebugString().c_str());
             }
             done = false;
-            } else if (region_work.region_info.status() == pb::DdlWorkDupUniq ||
-                        region_work.region_info.status() == pb::DdlWorkError) {
-                DB_FATAL("region task_%s %s dup uniq or create index region error.", task_id.c_str(), 
-                    region_work.region_info.ShortDebugString().c_str());
-                done = false;
-                rollback = true;
-            }
+        } else if (region_work.region_info.status() == pb::DdlWorkDupUniq ||
+                    region_work.region_info.status() == pb::DdlWorkError) {
+            DB_FATAL("region task_%s %s dup uniq or create index region error.", task_id.c_str(), 
+                region_work.region_info.ShortDebugString().c_str());
+            done = false;
+            rollback = true;
+        }
 
-            if (rollback) {
-                DB_FATAL("ddl work %s rollback.", ddl_work.ShortDebugString().c_str());
-                ddl_work.set_errcode(pb::EXEC_FAIL);
-                ddl_work.set_job_state(pb::IS_PUBLIC);
-                ddl_work.set_status(pb::DdlWorkFail);
-                ddl_work.set_end_timestamp(butil::gettimeofday_s());
-                update_table_ddl_mem(ddl_work);
-                return false;
-            }
-            return true;
-        });
+        if (rollback) {
+            DB_FATAL("ddl work %s rollback.", ddl_work.ShortDebugString().c_str());
+            ddl_work.set_errcode(pb::EXEC_FAIL);
+            ddl_work.set_job_state(pb::IS_PUBLIC);
+            ddl_work.set_status(pb::DdlWorkFail);
+            ddl_work.set_end_timestamp(butil::gettimeofday_s());
+            update_table_ddl_mem(ddl_work);
+            return false;
+        }
+        return true;
+    });
     if (done) {
         ddl_work.set_job_state(pb::IS_PUBLIC);
         ddl_work.set_errcode(pb::SUCCESS);

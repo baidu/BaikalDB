@@ -26,9 +26,13 @@ void QueryTableManager::get_schema_info(const pb::QueryRequest* request,
     TableManager* manager = TableManager::get_instance();
     std::map<int64_t, std::vector<int64_t>> table_region_ids;
     {
-        BAIDU_SCOPED_LOCK(manager->_table_mutex);
         if (!request->has_table_name()) {
-            for (auto& table_mem : manager->_table_info_map) {
+            DoubleBufferedTableMemMapping::ScopedPtr info;
+            if (manager->_table_mem_infos.Read(&info) != 0) {
+                DB_WARNING("read double_buffer_table error.");
+                return;
+            }
+            for (auto& table_mem : info->table_info_map) {
                 if (request->has_namespace_name() && request->has_database()) {
                     if (table_mem.second.schema_pb.namespace_name() == request->namespace_name() &&
                             table_mem.second.schema_pb.database() == request->database() && 
@@ -45,27 +49,31 @@ void QueryTableManager::get_schema_info(const pb::QueryRequest* request,
             std::string namespace_name = request->namespace_name();
             std::string database = namespace_name + "\001" + request->database();
             std::string table_name = database + "\001" + request->table_name();
-            if (manager->_table_id_map.find(table_name) == manager->_table_id_map.end()) {
+            int64_t main_table_id = manager->get_table_id(table_name);
+            if (main_table_id == 0) {
                 response->set_errmsg("table not exist");
                 response->set_errcode(pb::INPUT_PARAM_ERROR);
                 DB_WARNING("namespace: %s database: %s table_name: %s not exist",
                             namespace_name.c_str(), database.c_str(), table_name.c_str());
                 return;
             }
-            int64_t main_table_id = manager->_table_id_map[table_name];
             auto table_pb = response->add_schema_infos();
-            *table_pb = manager->_table_info_map[main_table_id].schema_pb;
+            pb::SchemaInfo mem_schema_info;
+            manager->get_table_info(main_table_id, mem_schema_info);
+            *table_pb = mem_schema_info;
 
             std::vector<int64_t> global_index_ids;
             global_index_ids.push_back(main_table_id);
-            for (auto& index_info : manager->_table_info_map[main_table_id].schema_pb.indexs()) {
+            for (auto& index_info : mem_schema_info.indexs()) {
                 if (!manager->is_global_index(index_info)) {
                     continue;
                 }
                 global_index_ids.push_back(index_info.index_id());
             } 
             for (auto& index_id : global_index_ids) {
-                for (auto& partition_region: manager->_table_info_map[index_id].partition_regions) {
+                std::unordered_map<int64_t, std::set<int64_t>> partition_regions;
+                manager->get_partition_regions(index_id, partition_regions);
+                for (auto& partition_region: partition_regions) {
                     for (auto& region_id : partition_region.second) {
                         table_region_ids[index_id].push_back(region_id);
                     }
@@ -243,8 +251,12 @@ void QueryTableManager::get_flatten_table(const pb::QueryRequest* request,
         }
     }
     {
-        BAIDU_SCOPED_LOCK(manager->_table_mutex);
-        table_info_map_tmp = manager->_table_info_map;
+        DoubleBufferedTableMemMapping::ScopedPtr info;
+        if (manager->_table_mem_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return;
+        }
+        table_info_map_tmp = info->table_info_map;
     }
     std::map<std::string, pb::QueryTable> table_infos;
     for (auto& table_info : table_info_map_tmp) {
@@ -279,33 +291,37 @@ void QueryTableManager::get_flatten_table(const pb::QueryRequest* request,
 }
 
 void QueryTableManager::check_table_and_update(
-                  const std::unordered_map<int64_t, std::tuple<pb::SchemaInfo, int64_t, int64_t>> table_schema_map, 
+                  const std::unordered_map<int64_t, TableMem>& table_schema_map, 
                   std::unordered_map<int64_t, int64_t>& report_table_map,
                   pb::ConsoleHeartBeatResponse* response, uint64_t log_id) {
     for (auto& table_info_pair : table_schema_map) {
         int64_t table_id = table_info_pair.first;
+        auto& table_mem = table_info_pair.second;
         auto iter = report_table_map.find(table_id);
         bool need_update_info = false;
         if (iter != report_table_map.end()) {
-            auto schema = std::get<0>(table_info_pair.second); 
-            if (schema.version() > iter->second) {
+            if (table_mem.schema_pb.version() > iter->second) {
                 need_update_info = true;
             }
             report_table_map.erase(table_id);
         } else {
             need_update_info = true;
         }
+        int64_t region_count = 0;
+        for (auto& partition_region : table_mem.partition_regions) {
+            region_count += partition_region.second.size();
+        }
 
         if (need_update_info) {
             auto table_info = response->add_table_change_infos();
-            *(table_info->mutable_schema_info()) = std::get<0>(table_info_pair.second);
-            table_info->set_region_count(std::get<1>(table_info_pair.second));
-            table_info->set_main_table_id(std::get<2>(table_info_pair.second));
+            *(table_info->mutable_schema_info()) = table_mem.schema_pb;
+            table_info->set_region_count(region_count);
+            table_info->set_main_table_id(table_mem.main_table_id);
             table_info->set_table_id(table_id);
         } else {
             auto table_info = response->add_table_change_infos();
-            table_info->set_region_count(std::get<1>(table_info_pair.second));
-            table_info->set_main_table_id(std::get<2>(table_info_pair.second));
+            table_info->set_region_count(region_count);
+            table_info->set_main_table_id(table_mem.main_table_id);
             table_info->set_table_id(table_id);
         }
     }
@@ -333,24 +349,18 @@ void QueryTableManager::process_console_heartbeat(const pb::ConsoleHeartBeatRequ
     step_time_cost.reset();
  
     TableManager* manager = TableManager::get_instance();
-    std::unordered_map<int64_t, std::tuple<pb::SchemaInfo, int64_t, int64_t>> table_schema_map;
     {
-        BAIDU_SCOPED_LOCK(manager->_table_mutex);
-        for (auto& table_mem_pair : manager->_table_info_map) {
-            int64_t region_count = 0;
-            auto table_mem = table_mem_pair.second;
-            for (auto&partition_region : table_mem.partition_regions) {
-                region_count += partition_region.second.size();
-            }
-            table_schema_map[table_mem_pair.first] = std::make_tuple(table_mem.schema_pb,
-                  region_count, table_mem.main_table_id); 
+        DoubleBufferedTableMemMapping::ScopedPtr info;
+        if (manager->_table_mem_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return;
         }
+        check_table_and_update(info->table_info_map, report_table_map, response, log_id);
     }
 
     int64_t prepare_time = step_time_cost.get_time();
     step_time_cost.reset(); 
      
-    check_table_and_update(table_schema_map, report_table_map, response, log_id);
 
     int64_t update_table_time = step_time_cost.get_time();
     step_time_cost.reset();

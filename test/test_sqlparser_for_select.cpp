@@ -40,7 +40,7 @@ TEST(test_parser, case_encode) {
             std::string sql = boost::trim_copy(split_vec[0]);
             std::string assert_sql = boost::trim_copy(split_vec[1]);
             parser::SqlParser parser;
-            parser.charset = "gbk";
+            parser.charset = baikaldb::pb::GBK;
             parser.parse(sql);
             ASSERT_EQ(0, parser.error);
             ASSERT_EQ(1, parser.result.size());
@@ -61,7 +61,7 @@ TEST(test_parser, case_encode) {
             std::string sql = boost::trim_copy(split_vec[0]);
             std::string assert_sql = boost::trim_copy(split_vec[1]);
             parser::SqlParser parser;
-            parser.charset = "uft8";
+            parser.charset = baikaldb::pb::UTF8;
             parser.parse(sql);
             ASSERT_EQ(0, parser.error);
             ASSERT_EQ(1, parser.result.size());
@@ -2868,7 +2868,7 @@ TEST(test_parser, case_exists_subselect) {
         parser::SelectStmt* select_stmt = (parser::SelectStmt*)parser.result[0];
         std::cout << select_stmt->to_string() << std::endl;
         ASSERT_TRUE(select_stmt->table_refs != nullptr);
-        ExprNode* exists_expr = (ExprNode*)(select_stmt->where->children[0]);
+        ExprNode* exists_expr = (ExprNode*)(select_stmt->where);
         ASSERT_TRUE(exists_expr->expr_type == parser::ET_EXISTS_SUB_QUERY_EXPR);
         parser::ExistsSubqueryExpr* sub_expr = (parser::ExistsSubqueryExpr*)exists_expr;
         ASSERT_TRUE(typeid(*(sub_expr->query_expr)) == typeid(parser::SubqueryExpr));

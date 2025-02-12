@@ -99,6 +99,10 @@ public:
         _namespace_info_map.clear();
         _database_ids.clear();
     }
+
+    void process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* request, 
+            pb::BaikalHeartBeatResponse* response);
+
 private:
     NamespaceManager(): _max_namespace_id(0) {
         bthread_mutex_init(&_namespace_mutex, NULL);

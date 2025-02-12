@@ -56,7 +56,7 @@ DEFINE_int32(raft_write_concurrency, 40, "raft_write concurrency, default:40");
 DEFINE_int32(service_write_concurrency, 40, "service_write concurrency, default:40");
 DEFINE_int32(snapshot_load_num, 4, "snapshot load concurrency, default 4");
 DEFINE_int32(baikal_heartbeat_concurrency, 10, "baikal heartbeat concurrency, default:10");
-DEFINE_int64(incremental_info_gc_time, 600 * 1000 * 1000, "time interval to clear incremental info");
+DEFINE_int64(incremental_info_gc_time, 3600 * 1000 * 1000LL, "time interval to clear incremental info");
 DECLARE_string(default_physical_room);
 DEFINE_bool(enable_debug, false, "open DB_DEBUG log");
 DEFINE_bool(enable_self_trace, true, "open SELF_TRACE log");
@@ -69,7 +69,7 @@ DEFINE_int32(new_sign_read_concurrency, 10, "new_sign_read concurrency, default:
 DEFINE_bool(open_new_sign_read_concurrency, false, "open new_sign_read concurrency, default: false");
 DEFINE_bool(need_verify_ddl_permission, false, "default true");
 DEFINE_bool(use_cond_decrease_signal, false, "default false");
-
+DEFINE_int32(first_batch_size_for_vector, 1024, "first_batch_size_for_vector, default: 1024, max: 1024");
 
 int64_t timestamp_diff(timeval _start, timeval _end) {
     return (_end.tv_sec - _start.tv_sec) * 1000000 
@@ -366,6 +366,40 @@ void update_op_version(pb::SchemaConf* p_conf, const std::string& desc) {
     auto version = p_conf->has_op_version() ? p_conf->op_version() : 0;
     p_conf->set_op_version(version + 1);
     p_conf->set_op_desc(desc);
+}
+
+void set_snapshot_blacklist(pb::SchemaConf& schema_conf, pb::SchemaConf* p_conf) {
+    std::set<std::string> snapshot_blacklist;
+    std::string snapshot;
+    if (schema_conf.has_snapshot_blacklist()) {
+        std::stringstream ss(schema_conf.snapshot_blacklist());
+        while (std::getline(ss, snapshot, ',')) {
+            snapshot_blacklist.insert(snapshot);
+        }
+    }
+    if (p_conf->has_snapshot_blacklist()) {
+        std::stringstream ss(p_conf->snapshot_blacklist());
+        while (std::getline(ss, snapshot, ',')) {
+            snapshot_blacklist.insert(snapshot);
+        }
+    }
+    if (schema_conf.has_del_snapshot_blacklist()) {
+        std::stringstream ss(schema_conf.del_snapshot_blacklist());
+        while (std::getline(ss, snapshot, ',')) {
+            snapshot_blacklist.erase(snapshot);
+        }
+    }
+    bool is_first = true;
+    std::string out_value;
+    for (auto s : snapshot_blacklist) {
+        if (!is_first) {
+            out_value += ',';
+        }
+        out_value += s;
+        is_first = false;
+    }
+    schema_conf.set_snapshot_blacklist(out_value);
+    schema_conf.clear_del_snapshot_blacklist();
 }
 
 void update_schema_conf_common(const std::string& table_name, const pb::SchemaConf& schema_conf, pb::SchemaConf* p_conf) {
@@ -852,6 +886,35 @@ std::string store_or_db_bns_to_meta_bns(const std::string& bns) {
 
     return meta_bns;
 }
+
+std::string get_platform_from_bns(const std::string& bns) {
+#ifdef BAIDU_INTERNAL
+    std::vector<std::string> split_vec;
+    boost::split(split_vec, bns, boost::is_any_of("-"));
+    if (split_vec.size() < 2) {
+        DB_WARNING("Invalid bns: %s", bns.c_str());
+        return "";
+    }
+    return split_vec[1];
+#else
+    return "";
+#endif
+}
+
+std::string get_productline_from_bns(const std::string& bns) {
+#ifdef BAIDU_INTERNAL
+    std::vector<std::string> split_vec;
+    boost::split(split_vec, bns, boost::is_any_of("."));
+    if (split_vec.size() < 3) {
+        DB_WARNING("Invalid bns: %s", bns.c_str());
+        return "";
+    }
+    return split_vec[2];
+#else
+    return "";
+#endif
+}
+
 void parse_sample_sql(const std::string& sample_sql, std::string& database, std::string& table, std::string& sql) {
     // Remove comments.
     re2::RE2::Options option;
@@ -871,6 +934,29 @@ void parse_sample_sql(const std::string& sample_sql, std::string& database, std:
         DB_WARNING("extract commit error.");
     }
     DB_WARNING("sample_sql: %s, database: %s, table: %s, sql: %s", sample_sql.c_str(), database.c_str(), table.c_str(), sql.c_str());
+}
+
+int convert_charset(const pb::Charset& from_charset, const std::string& from_str,
+                    const pb::Charset& to_charset, std::string& to_str) {
+    to_str = from_str;
+    if (from_charset == to_charset) {
+        return 0;
+    }
+    if (from_charset == pb::CS_UNKNOWN || to_charset == pb::CS_UNKNOWN) {
+        return -1;
+    }
+    if (from_charset == pb::UTF8 && to_charset == pb::GBK) {
+        if (iconv_convert<pb::GBK, pb::UTF8>(to_str, from_str) != 0) {
+            return -1;
+        }
+    } else if (from_charset == pb::GBK && to_charset == pb::UTF8) {
+        if (iconv_convert<pb::UTF8, pb::GBK>(to_str, from_str) != 0) {
+            return -1;
+        }
+    } else {
+        return -1;
+    }
+    return 0;
 }
 
 }  // baikaldb

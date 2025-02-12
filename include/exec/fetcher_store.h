@@ -37,6 +37,19 @@ enum ErrorType {
     E_RETRY
 };
 
+struct RegionReturnData {
+    std::shared_ptr<RowBatch> row_data = nullptr;
+    std::shared_ptr<arrow::RecordBatch> arrow_data = nullptr;
+    void set_row_data(std::shared_ptr<RowBatch>& batch) {
+        row_data = batch;
+        arrow_data = nullptr;
+    } 
+    void set_arrow_data(std::shared_ptr<arrow::RecordBatch>& batch) {
+        arrow_data = batch;
+        row_data = nullptr;
+    } 
+};
+
 class RPCCtrl;
 class FetcherStore;
 #define DB_DONE(level, _fmt_, args...) \
@@ -107,6 +120,19 @@ public:
     void send_request();
     ErrorType handle_version_old();
     ErrorType handle_response(const std::string& remote_side);
+    void pick_addr_for_resource_tag(const std::string& resource_tag, std::string& addr) {
+        std::string baikaldb_logical_room = SchemaFactory::get_instance()->get_logical_room();
+        for (auto& peer : _info.peers()) {
+            auto status = SchemaFactory::get_instance()->get_instance_status(peer);
+            if (status.status == pb::NORMAL 
+                    && status.resource_tag == resource_tag) {
+                addr = peer;
+                if (status.logical_room == baikaldb_logical_room) {
+                    break;
+                }
+            }
+        }
+    }
 
 private:
     FetcherStore* _fetcher_store;
@@ -129,7 +155,7 @@ private:
     NetworkSocket* _client_conn = nullptr;
 
     pb::StoreReq _request;
-    pb::StoreRes _response;
+    std::shared_ptr<pb::StoreRes> _response_ptr = std::make_shared<pb::StoreRes>();
     bool _has_fill_request = false;
     std::shared_ptr<pb::TraceNode> _trace_node = nullptr;
     brpc::Controller _cntl;
@@ -139,6 +165,9 @@ private:
     static bvar::LatencyRecorder total_send_request;
     static bvar::LatencyRecorder add_backup_send_request;
     static bvar::LatencyRecorder has_backup_send_request;
+
+    // DBLINK外部映射表使用
+    int64_t _meta_id = -1;
 };
 
 // RPCCtrl只控制rpc的异步发送和并发控制，具体rpc的成功与否结果收集由fetcher_store处理
@@ -344,6 +373,8 @@ public:
         no_copy_cache_plan_set.clear();
         dynamic_timeout_ms = -1;
         callids.clear();
+        arrow_schema.reset();
+        region_vectorized_response.clear();
     }
 
     void cancel_rpc() {
@@ -459,25 +490,39 @@ public:
     } 
 
     template<typename Repeated>
-    static void choose_opt_instance(int64_t region_id, Repeated&& peers, std::string& addr, 
-                                    pb::Status& addr_status, std::string* backup,
-                                    const std::set<std::string>& cannot_access_peers = {}) {
+    static void choose_opt_instance(int64_t region_id, Repeated&& peers, const std::string& resource_tag, 
+                                    std::string& addr, pb::Status& addr_status, std::string* backup,
+                                    const std::set<std::string>& cannot_access_peers = {}, bool rolling = false) {
         SchemaFactory* schema_factory = SchemaFactory::get_instance();
         addr_status = pb::NORMAL;
         std::string baikaldb_logical_room = schema_factory->get_logical_room();
-        if (baikaldb_logical_room.empty()) {
-            return;
-        }
         std::vector<std::string> candicate_peers;
+        std::vector<std::string> candicate_peers2;
         std::vector<std::string> normal_peers;
         bool addr_in_candicate = false;
         bool addr_in_normal = false;
         for (auto& peer: peers) {
             auto status = schema_factory->get_instance_status(peer);
+            DB_DEBUG("peer:%s resource_tag:%s status.resource_tag:%s, baikaldb_logical_room:%s %s, %d", peer.c_str(), resource_tag.c_str(), status.resource_tag.c_str(), baikaldb_logical_room.c_str(), status.logical_room.c_str(), status.status);
             if (status.status != pb::NORMAL) {
                 continue;
             } else if (cannot_access_peers.find(peer) != cannot_access_peers.end()) {
                 continue;
+            } else if (rolling) {
+                normal_peers.emplace_back(peer);
+            } else if (!resource_tag.empty()) {
+                if (status.resource_tag == resource_tag) {
+                    // 倾向访问的store集群，仅第一次有效, 如pap-bj db第一次优先访问pap-bj的store
+                    if (!status.logical_room.empty() && status.logical_room == baikaldb_logical_room) {
+                        if (addr == peer) {
+                            addr_in_candicate = true;
+                        } else {
+                            candicate_peers.emplace_back(peer);
+                        }
+                    } else {
+                        candicate_peers2.emplace_back(peer);
+                    }
+                }
             } else if (!status.logical_room.empty() && status.logical_room == baikaldb_logical_room) {
                 if (addr == peer) {
                     addr_in_candicate = true;
@@ -491,6 +536,11 @@ public:
                     normal_peers.emplace_back(peer);
                 }
             }
+        }
+        if (candicate_peers.size() > 0) {
+            normal_peers.insert(normal_peers.end(), candicate_peers2.begin(), candicate_peers2.end());
+        } else if (candicate_peers2.size() > 0) {
+            candicate_peers = candicate_peers2;
         }
         if (addr_in_candicate) {
             if (backup != nullptr) {
@@ -522,9 +572,10 @@ public:
             return;
         } 
         if (normal_peers.size() > 0) {
-            addr = normal_peers[0];
-            if (normal_peers.size() > 1) {
-                addr = normal_peers[1];
+            uint32_t i = butil::fast_rand() % normal_peers.size();
+            addr = normal_peers[i];
+            if (backup != nullptr && normal_peers.size() > 1) {
+                *backup = normal_peers[(i + 1) % normal_peers.size()];
             }
         } else {
             addr_status = pb::FAULTY;
@@ -557,12 +608,11 @@ public:
     int64_t get_commit_ts();
     static int64_t get_dynamic_timeout_ms(ExecNode* store_request, pb::OpType op_type, uint64_t sign);
     static int64_t get_sign_latency(pb::OpType op_type, uint64_t sign);
-
 public:
     std::map<int64_t, std::vector<SmartRecord>>  index_records; //key: index_id
     std::map<int64_t, std::vector<std::string>>  return_str_records;
     std::map<int64_t, std::vector<std::string>>  return_str_old_records;
-    std::map<int64_t, std::shared_ptr<RowBatch>> region_batch;
+    std::map<int64_t, RegionReturnData> region_batch;
     //std::map<int64_t, std::shared_ptr<RowBatch>> split_region_batch;
     std::map<int64_t, std::vector<int64_t>> region_id_ttl_timestamp_batch;
 
@@ -592,6 +642,9 @@ public:
     bool need_send_rollback = true;
     WriteBinlogParam write_binlog_param;
     GlobalBackupType global_backup_type = GBT_INIT;
+    // vectorized
+    std::shared_ptr<arrow::Schema> arrow_schema;
+    std::map<int64_t, std::shared_ptr<pb::StoreRes>> region_vectorized_response;
 };
 
 template<typename Repeated>

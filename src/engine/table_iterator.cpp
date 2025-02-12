@@ -180,7 +180,6 @@ int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& field
     } else {
         _right_open = false;
     }
-
     //取[left_key, right_key]和[start_key, end_key)的交集
     if (_need_check_region && (_idx_type == pb::I_PRIMARY || _index_info->is_global)) {
         std::string left_key = _start.data().substr(sizeof(int64_t) * 2);
@@ -299,7 +298,6 @@ int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& field
             read_options.fill_cache = FLAGS_cstore_scan_fill_cache;
         }
     }
-
 
     if (txn != nullptr) {
         // 查询请求txn都不为空
@@ -478,7 +476,7 @@ bool Iterator::_fits_prefix(const rocksdb::Slice& key, int32_t field_id) {
     return key.starts_with(prefix_key.data());
 }
 
-int TableIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std::unique_ptr<MemRow>* mem_row) {
+int TableIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std::unique_ptr<MemRow>* mem_row, std::shared_ptr<Chunk> chunk) {
     if (!_valid) {
         return -1;
     }
@@ -509,7 +507,7 @@ int TableIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std:
         if (!_is_cstore) {
             TupleRecord tuple_record(value_slice);
             // only decode the required field (field_ids stored in fields)
-            if (0 != tuple_record.decode_fields(_fields, &_field_slot, record, tuple_id, mem_row)) {
+            if (0 != tuple_record.decode_fields(_fields, &_field_slot, record, tuple_id, mem_row, chunk)) {
                 DB_WARNING("decode value failed: %ld, _use_ttl:%d", _index_info->id, _use_ttl);
                 _valid = false;
                 return -1;
@@ -528,9 +526,15 @@ int TableIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std:
                 _valid = false;
                 return -1;
             } 
-        } else {
+        } else if (mem_row != nullptr) {
             if (0 != (*mem_row)->decode_key(tuple_id, *_index_info, _field_slot, key, pos)) {
                 DB_WARNING("decode key failed: %ld", _index_info->id);
+                _valid = false;
+                return -1;
+            }
+        } else {
+            if (0 != chunk->decode_key(tuple_id, *_index_info, _field_slot, key, pos)) {
+                DB_WARNING("decode key failed in arrow mode: %ld", _index_info->id);
                 _valid = false;
                 return -1;
             }
@@ -625,7 +629,7 @@ int TableIterator::get_column(int32_t tuple_id, const FieldInfo& field, const Fi
     return 0;
 }
 
-int IndexIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std::unique_ptr<MemRow>* mem_row) {
+int IndexIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std::unique_ptr<MemRow>* mem_row, std::shared_ptr<Chunk> chunk) {
     while (_valid) {
         rocksdb::Slice iter_key = _iter->key();
         if ((_forward && !_fits_right_bound(iter_key)) || (!_forward && !_fits_left_bound(iter_key))) {
@@ -676,9 +680,15 @@ int IndexIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std:
                 _valid = false;
                 return -1;
             }
-        } else {
+        } else if (mem_row != nullptr) {
             if (0 != (*mem_row)->decode_key(tuple_id, *_index_info, _field_slot, key, pos)) {
                 DB_WARNING("decode secondary record failed: %ld", _index_info->id);
+                _valid = false;
+                return -1;
+            }
+        } else {
+            if (0 != chunk->decode_key(tuple_id, *_index_info, _field_slot, key, pos)) {
+                DB_FATAL("decode secondary record failed in arrow mode: %ld", _index_info->id);
                 _valid = false;
                 return -1;
             }
@@ -692,9 +702,15 @@ int IndexIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std:
                     _valid = false;
                     return -1;
                 }
-            } else {
+            } else if (mem_row != nullptr) {
                 if (0 != (*mem_row)->decode_primary_key(tuple_id, *_index_info, _field_slot, pkey, pos)) {
                     DB_WARNING("decode primary record failed: %ld", _index_info->pk);
+                    _valid = false;
+                    return -1;
+                }
+            } else {
+                if (0 != chunk->decode_primary_key(tuple_id, *_index_info, _field_slot, pkey, pos)) {
+                    DB_FATAL("decode primary record failed in arrow mode: %ld", _index_info->pk);
                     _valid = false;
                     return -1;
                 }
@@ -707,10 +723,16 @@ int IndexIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std:
                     _valid = false;
                     return -1;
                 }
-            } else {
+            } else if (mem_row != nullptr) {
                 if (0 != (*mem_row)->decode_primary_key(tuple_id, *_index_info, _field_slot, key, pos)) {
                     DB_WARNING("decode primary record failed: %ld, %d, %ld", 
                             _index_info->pk, pos, iter_key.size());
+                    _valid = false;
+                    return -1;
+                }
+            } else {
+                if (0 != chunk->decode_primary_key(tuple_id, *_index_info, _field_slot, key, pos)) {
+                    DB_FATAL("decode primary record failed in arrow mode: %ld", _index_info->pk);
                     _valid = false;
                     return -1;
                 }

@@ -196,7 +196,7 @@ struct NetworkSocket {
     // Socket status.
     std::string     current_db;                     // Current use database.
     int             charset_num;                    // Client charset number.
-    std::string     charset_name;                   // Client charset name.
+    pb::Charset     charset;                        // Client charset.
 
     std::string     username;
     TimeCost        last_update_user;               // update userinfo every 10s

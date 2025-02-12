@@ -28,7 +28,7 @@ class Transaction;
 class TableIterator;
 class IndexIterator;
 typedef std::shared_ptr<Transaction> SmartTransaction;
-typedef std::bitset<ROW_BATCH_CAPACITY> FiltBitSet;
+typedef std::bitset<1024> FiltBitSet;
 
 //前缀的=传 [key, key],双闭区间
 struct IndexRange {
@@ -43,6 +43,7 @@ struct IndexRange {
     // region & table & index info for the current scan
     IndexInfo*  index_info = nullptr;
     IndexInfo*  pri_info   = nullptr;
+    TableInfo*  table_info   = nullptr;
     pb::RegionInfo* region_info = nullptr;
 
     // left and right bound field count
@@ -220,10 +221,13 @@ public:
     virtual ~TableIterator() {}
 
     int get_next(SmartRecord& record) {
-        return get_next_internal(&record, 0, nullptr);
+        return get_next_internal(&record, 0, nullptr, nullptr);
     }
     int get_next(int32_t tuple_id, std::unique_ptr<MemRow>& mem_row) {
-        return get_next_internal(nullptr, tuple_id, &mem_row);
+        return get_next_internal(nullptr, tuple_id, &mem_row, nullptr);
+    }
+    int get_next_for_chunk(int32_t tuple_id, std::shared_ptr<Chunk> chunk) {
+        return get_next_internal(nullptr, tuple_id, nullptr, chunk);
     }
 
     void set_mode(KVMode mode) {
@@ -231,7 +235,7 @@ public:
     }
     int get_column(int32_t tuple_id, const FieldInfo& field, const FiltBitSet* filter, RowBatch* batch);
 private:
-    int get_next_internal(SmartRecord* record, int32_t tuple_id, std::unique_ptr<MemRow>* mem_row);
+    int get_next_internal(SmartRecord* record, int32_t tuple_id, std::unique_ptr<MemRow>* mem_row, std::shared_ptr<Chunk> chunk);
     KVMode  _mode;
 };
 
@@ -243,10 +247,13 @@ public:
     virtual ~IndexIterator() {}
 
     int get_next(SmartRecord& record) {
-        return get_next_internal(&record, 0, nullptr);
+        return get_next_internal(&record, 0, nullptr, nullptr);
     }
     int get_next(int32_t tuple_id, std::unique_ptr<MemRow>& mem_row) {
-        return get_next_internal(nullptr, tuple_id, &mem_row);
+        return get_next_internal(nullptr, tuple_id, &mem_row, nullptr);
+    }
+    int get_next_for_chunk(int32_t tuple_id, std::shared_ptr<Chunk> chunk) {
+        return get_next_internal(nullptr, tuple_id, nullptr, chunk);
     }
 
     // get the index slice and primary key slice
@@ -255,6 +262,6 @@ public:
         return -1;
     }
 private:
-    int get_next_internal(SmartRecord* record, int32_t tuple_id, std::unique_ptr<MemRow>* mem_row);
+    int get_next_internal(SmartRecord* record, int32_t tuple_id, std::unique_ptr<MemRow>* mem_row, std::shared_ptr<Chunk> chunk);
 };
 } // end of namespace

@@ -25,6 +25,7 @@
 #include "log.h"
 #include <gflags/gflags.h>
 #include <time.h>
+#include "external_filesystem.h"
 
 namespace bthread {
 DECLARE_int32(bthread_concurrency); //bthread.cpp
@@ -53,55 +54,104 @@ DEFINE_int32(batch_insert_sign_sql_interval_us, 10 * 60 * 1000 * 1000, "batch_in
 DEFINE_bool(enable_tcp_keep_alive, false, "enable tcp keepalive flag");
 DECLARE_int32(baikal_heartbeat_interval_us);
 DEFINE_bool(open_to_collect_slow_query_infos, false, "open to collect slow_query_infos, default: false");
+DEFINE_bool(need_ext_fs_gc, false, "need_ext_fs_gc");
 DEFINE_uint64(limit_slow_sql_size, 50, "each sign to slow query sql counts, default: 50");
 DEFINE_int32(slow_query_batch_size, 100, "slow query sql batch size, default: 100");
 DECLARE_bool(auto_update_meta_list);
 
 static const std::string instance_table_name = "INTERNAL.baikaldb.__baikaldb_instance";
 
-void NetworkServer::report_heart_beat() {
-    while (!_shutdown) {
-        TimeCost cost;
-        pb::BaikalHeartBeatRequest request;
-        pb::BaikalHeartBeatResponse response;
-        _heart_beat_count << 1;
-        //1、construct heartbeat request
-        BaikalHeartBeat::construct_heart_beat_request(request);
-        request.set_physical_room(_physical_room);
-        int64_t construct_req_cost = cost.get_time();
-        cost.reset();
-        //2、send heartbeat request to meta server
-        if (MetaServerInteract::get_instance()->send_request("baikal_heartbeat", request, response) == 0) {
-            //处理心跳
+// is_sync: 是否同步处理心跳返回信息
+// is_backup: 是否进行backup心跳交互
+int NetworkServer::heartbeat(bool is_sync, bool is_backup) {
+    // 主Meta
+    TimeCost cost;
+    pb::BaikalHeartBeatRequest request;
+    pb::BaikalHeartBeatResponse response;
+    // 1、construct heartbeat request
+    BaikalHeartBeat::construct_heart_beat_request(request);
+    request.set_physical_room(_physical_room);
+    int64_t construct_req_cost = cost.get_time();
+    cost.reset();
+    // 2、send heartbeat request to meta server
+    if (MetaServerInteract::get_instance()->send_request("baikal_heartbeat", request, response) == 0) {
+        // 处理心跳
+        if (is_sync) {
+            BaikalHeartBeat::process_heart_beat_response_sync(response);
+            DB_WARNING("sync report_heartbeat, construct_req_cost:%ld, process_res_cost:%ld",
+                        construct_req_cost, cost.get_time());
+        } else {
             BaikalHeartBeat::process_heart_beat_response(response);
-            DB_WARNING("report_heart_beat, construct_req_cost:%ld, process_res_cost:%ld",
-                    construct_req_cost, cost.get_time());
+            DB_WARNING("async report_heartbeat, construct_req_cost:%ld, process_res_cost:%ld",
+                        construct_req_cost, cost.get_time());
+        }
+    } else {
+        if (is_sync) {
+            DB_FATAL("send heart beat request to meta server fail");
+            return -1;
+        }
+        DB_WARNING("send heart beat request to meta server fail");
+    }
+
+    // 非主Meta
+    std::unordered_map<int64_t, pb::BaikalHeartBeatRequest> meta_request_map;
+    cost.reset();
+    BaikalHeartBeat::construct_heart_beat_request(meta_request_map);
+    construct_req_cost = cost.get_time();
+    DB_WARNING("dblink construct_req_cost: %ld", construct_req_cost);
+    for (auto& kv : meta_request_map) {
+        const int64_t& meta_id = kv.first;
+        const pb::BaikalHeartBeatRequest& request = kv.second;
+        cost.reset();
+        if (MetaServerInteract::get_instance()->send_request("baikal_heartbeat", request, response, meta_id) == 0) {
+            //处理心跳
+            if (is_sync) {
+                BaikalHeartBeat::process_heart_beat_response_sync(response, meta_id);
+                DB_WARNING("sync report_heartbeat, meta_id: %ld, process_res_cost:%ld", meta_id, cost.get_time());
+            } else {
+                BaikalHeartBeat::process_heart_beat_response(response, false, meta_id);
+                DB_WARNING("async report_heartbeat, meta_id: %ld, process_res_cost:%ld", meta_id, cost.get_time());
+            }
+        } else {
+            if (is_sync) {
+                DB_FATAL("send heart beat request to meta server fail");
+                // return -1;
+                continue;
+            }
+            DB_WARNING("send heart beat request to meta server fail");
+        }
+    }
+
+    // backup
+    // backup不获取外部表心跳
+    if (is_backup && MetaServerInteract::get_backup_instance()->is_inited()) {
+        request.Clear();
+        response.Clear();
+        // 1、construct heartbeat request
+        cost.reset();
+        BaikalHeartBeat::construct_heart_beat_request(request, true);
+        construct_req_cost = cost.get_time();
+        cost.reset();
+        // 2、send heartbeat request to meta server
+        if (MetaServerInteract::get_backup_instance()->send_request("baikal_heartbeat", request, response) == 0) {
+            // 处理心跳
+            BaikalHeartBeat::process_heart_beat_response(response, true);
+            DB_WARNING("backup report_heart_beat, construct_req_cost:%ld, process_res_cost:%ld",
+                        construct_req_cost, cost.get_time());
         } else {
             DB_WARNING("send heart beat request to meta server fail");
         }
+    }
+    return 0;
+}
 
-        if (MetaServerInteract::get_backup_instance()->is_inited()) {
-            request.Clear();
-            response.Clear();
-            //1、construct heartbeat request
-            BaikalHeartBeat::construct_heart_beat_request(request, true);
-            int64_t construct_req_cost = cost.get_time();
-            cost.reset();
-            //2、send heartbeat request to meta server
-            if (MetaServerInteract::get_backup_instance()->send_request("baikal_heartbeat", request, response) == 0) {
-                //处理心跳
-                BaikalHeartBeat::process_heart_beat_response(response, true);
-                DB_WARNING("report_heart_beat, construct_req_cost:%ld, process_res_cost:%ld",
-                        construct_req_cost, cost.get_time());
-            } else {
-                DB_WARNING("send heart beat request to meta server fail");
-            }
-        }
-
+void NetworkServer::report_heart_beat() {
+    while (!_shutdown) {
+        _heart_beat_count << 1;
+        heartbeat(false, true);
         if (FLAGS_auto_update_meta_list) {
             update_meta_list();
         }
-
         _heart_beat_count << -1;
         bthread_usleep_fast_shutdown(FLAGS_baikal_heartbeat_interval_us, _shutdown);
     }
@@ -194,120 +244,120 @@ void NetworkServer::fill_field_info(int64_t table_id, std::map<int64_t, int>& di
     }
 }
 
-// 推荐索引
-void NetworkServer::index_recommend(const std::string& sample_sql, int64_t table_id, int64_t index_id, std::string& index_info, std::string& desc) {
-    BvarMap sample = StateMachine::get_instance()->index_recommend_st.get_value();
-    SchemaFactory* factory = SchemaFactory::get_instance();
+// // 推荐索引
+// void NetworkServer::index_recommend(const std::string& sample_sql, int64_t table_id, int64_t index_id, std::string& index_info, std::string& desc) {
+//     BvarMap sample = StateMachine::get_instance()->index_recommend_st.get_value();
+//     SchemaFactory* factory = SchemaFactory::get_instance();
     
-    // 没有统计信息无法推荐索引
-    auto st_ptr = factory->get_statistics_ptr(table_id);
-    if (st_ptr == nullptr) {
-        desc = "no statistics info";
-        return;
-    }
+//     // 没有统计信息无法推荐索引
+//     auto st_ptr = factory->get_statistics_ptr(table_id);
+//     if (st_ptr == nullptr) {
+//         desc = "no statistics info";
+//         return;
+//     }
 
-    auto iter = sample.internal_map.find(sample_sql);
-    if (iter == sample.internal_map.end()) {
-        return;
-    }
+//     auto iter = sample.internal_map.find(sample_sql);
+//     if (iter == sample.internal_map.end()) {
+//         return;
+//     }
 
-    auto sum_iter = iter->second.find(index_id);
-    if (sum_iter == iter->second.end()) {
-        return;
-    }
+//     auto sum_iter = iter->second.find(index_id);
+//     if (sum_iter == iter->second.end()) {
+//         return;
+//     }
 
-    // 没有条件不推荐索引
-    auto field_range_type = sum_iter->second.field_range_type;
-    if (field_range_type.size() <= 0) {
-        desc = "no condition";
-        return;
-    }
+//     // 没有条件不推荐索引
+//     auto field_range_type = sum_iter->second.field_range_type;
+//     if (field_range_type.size() <= 0) {
+//         desc = "no condition";
+//         return;
+//     }
 
-    std::set<int> eq_field;
-    std::set<int> in_field;
-    std::set<int> range_field;
+//     std::set<int> eq_field;
+//     std::set<int> in_field;
+//     std::set<int> range_field;
 
-    for (auto pair : field_range_type) {
-        if (pair.second == range::EQ) {
-            eq_field.insert(pair.first);
-        } else if (pair.second == range::IN) {
-            in_field.insert(pair.first);
-        } else if (pair.second == range::RANGE) {
-            range_field.insert(pair.first);
-        } else {
-            // 非 RANGE EQ IN 条件暂时无法推荐索引
-            desc = "not only range eq in";
-            return;
-        }
-    }
+//     for (auto pair : field_range_type) {
+//         if (pair.second == range::EQ) {
+//             eq_field.insert(pair.first);
+//         } else if (pair.second == range::IN) {
+//             in_field.insert(pair.first);
+//         } else if (pair.second == range::RANGE) {
+//             range_field.insert(pair.first);
+//         } else {
+//             // 非 RANGE EQ IN 条件暂时无法推荐索引
+//             desc = "not only range eq in";
+//             return;
+//         }
+//     }
 
-    std::map<int64_t, int> eq_distinct_field_map;
-    std::map<int64_t, int> in_distinct_field_map;
-    std::map<int64_t, int> range_distinct_field_map;
-    get_field_distinct_cnt(table_id, eq_field, eq_distinct_field_map);
-    get_field_distinct_cnt(table_id, in_field, in_distinct_field_map);
-    get_field_distinct_cnt(table_id, range_field, range_distinct_field_map);
-    std::ostringstream os;
-    fill_field_info(table_id, eq_distinct_field_map, "EQ", os);
-    fill_field_info(table_id, in_distinct_field_map, "IN", os);
-    fill_field_info(table_id, range_distinct_field_map, "RANGE", os);
-    desc = os.str();
+//     std::map<int64_t, int> eq_distinct_field_map;
+//     std::map<int64_t, int> in_distinct_field_map;
+//     std::map<int64_t, int> range_distinct_field_map;
+//     get_field_distinct_cnt(table_id, eq_field, eq_distinct_field_map);
+//     get_field_distinct_cnt(table_id, in_field, in_distinct_field_map);
+//     get_field_distinct_cnt(table_id, range_field, range_distinct_field_map);
+//     std::ostringstream os;
+//     fill_field_info(table_id, eq_distinct_field_map, "EQ", os);
+//     fill_field_info(table_id, in_distinct_field_map, "IN", os);
+//     fill_field_info(table_id, range_distinct_field_map, "RANGE", os);
+//     desc = os.str();
 
-    // 平均过滤行数小于100不用推荐索引
-    if (sum_iter->second.count == 0 || (sum_iter->second.filter_rows / sum_iter->second.count) < 100) {
-        desc = "filter rows < 100";
-        return;
-    }
+//     // 平均过滤行数小于100不用推荐索引
+//     if (sum_iter->second.count == 0 || (sum_iter->second.filter_rows / sum_iter->second.count) < 100) {
+//         desc = "filter rows < 100";
+//         return;
+//     }
 
-    // 过滤率小于10%不推荐索引
-    if (sum_iter->second.scan_rows == 0 || sum_iter->second.filter_rows * 1.0 / sum_iter->second.scan_rows < 0.1) {
-        desc = "filter ratio < 0.1";
-        return;
-    }
+//     // 过滤率小于10%不推荐索引
+//     if (sum_iter->second.scan_rows == 0 || sum_iter->second.filter_rows * 1.0 / sum_iter->second.scan_rows < 0.1) {
+//         desc = "filter ratio < 0.1";
+//         return;
+//     }
 
-    std::ostringstream recommend_index;
-    auto table_ptr = factory->get_table_info_ptr(table_id);
-    for (auto iter = eq_distinct_field_map.rbegin(); iter != eq_distinct_field_map.rend(); iter++) {
-        auto field_ptr = table_ptr->get_field_ptr(iter->second);
-        recommend_index << field_ptr->short_name << ",";
-    }
+//     std::ostringstream recommend_index;
+//     auto table_ptr = factory->get_table_info_ptr(table_id);
+//     for (auto iter = eq_distinct_field_map.rbegin(); iter != eq_distinct_field_map.rend(); iter++) {
+//         auto field_ptr = table_ptr->get_field_ptr(iter->second);
+//         recommend_index << field_ptr->short_name << ",";
+//     }
 
-    bool in_pre = false;
-    bool finish = false;
-    for (auto iter = in_distinct_field_map.rbegin(); iter != in_distinct_field_map.rend(); iter++) {
-        auto field_ptr = table_ptr->get_field_ptr(iter->second);
-        if (in_pre) {
-            if (range_distinct_field_map.size() <= 0) {
-                recommend_index << field_ptr->short_name;
-            } else {
-                auto range_iter = range_distinct_field_map.rbegin();
-                if (range_iter->first > iter->first) {
-                    auto range_field_ptr = table_ptr->get_field_ptr(range_iter->second);
-                    recommend_index << range_field_ptr->short_name;
-                } else {
-                    recommend_index << field_ptr->short_name;
-                }
-            }
-            finish = true;
-            break;
-        }
-        recommend_index << field_ptr->short_name << ",";
-        in_pre = true;
-    }
+//     bool in_pre = false;
+//     bool finish = false;
+//     for (auto iter = in_distinct_field_map.rbegin(); iter != in_distinct_field_map.rend(); iter++) {
+//         auto field_ptr = table_ptr->get_field_ptr(iter->second);
+//         if (in_pre) {
+//             if (range_distinct_field_map.size() <= 0) {
+//                 recommend_index << field_ptr->short_name;
+//             } else {
+//                 auto range_iter = range_distinct_field_map.rbegin();
+//                 if (range_iter->first > iter->first) {
+//                     auto range_field_ptr = table_ptr->get_field_ptr(range_iter->second);
+//                     recommend_index << range_field_ptr->short_name;
+//                 } else {
+//                     recommend_index << field_ptr->short_name;
+//                 }
+//             }
+//             finish = true;
+//             break;
+//         }
+//         recommend_index << field_ptr->short_name << ",";
+//         in_pre = true;
+//     }
 
-    if (finish) {
-        index_info = recommend_index.str();
-        return;
-    }
+//     if (finish) {
+//         index_info = recommend_index.str();
+//         return;
+//     }
 
-    if (range_distinct_field_map.size() > 0) {
-        auto range_iter = range_distinct_field_map.rbegin();
-        auto range_field_ptr = table_ptr->get_field_ptr(range_iter->second);
-        recommend_index << range_field_ptr->short_name;
-    }
+//     if (range_distinct_field_map.size() > 0) {
+//         auto range_iter = range_distinct_field_map.rbegin();
+//         auto range_field_ptr = table_ptr->get_field_ptr(range_iter->second);
+//         recommend_index << range_field_ptr->short_name;
+//     }
 
-    index_info = recommend_index.str();
-}
+//     index_info = recommend_index.str();
+// }
 
 int NetworkServer::insert_agg_sql(const std::string& values) {
     baikal::client::ResultSet result_set;
@@ -426,32 +476,24 @@ int NetworkServer::get_filter_sign_set(const std::map<uint64_t, std::string>& si
     baikal::client::ResultSet result_set;
     TimeCost cost;
 
-    std::string sign_strings = "";
-    int sign_cnt = 0;
     std::vector<std::string> sign_strings_vec;
     for (auto& item: sign_sql_map) {
-        sign_strings = std::to_string(item.first) + ",";
-        sign_cnt ++;
-        if (sign_cnt > FLAGS_batch_insert_agg_sql_size) {
-            sign_strings.pop_back();
-            if (sign_strings.size() > 0) {
-                sign_strings_vec.push_back(sign_strings);
-            }
-            sign_strings = "";
-            sign_cnt = 0;
-        }
-    }
-    if(!sign_strings.empty()) {
-        sign_strings.pop_back();
-        sign_strings_vec.push_back(sign_strings);
+        const std::string& sign_string = std::to_string(item.first);
+        sign_strings_vec.push_back(sign_string);
     }
     if (sign_strings_vec.size() == 0) {
         return 0;
     }
-
+    std::string sign_strings = "";
     for (int i = 0; i < sign_strings_vec.size(); i++) {
+        sign_strings += sign_strings_vec[i];
+        if (i != sign_strings_vec.size() - 1) {
+            sign_strings += ", ";
+        }
+    }
+    if (sign_strings.size() > 0) {
     // 构造sql
-        std::string sql = "SELECT sign FROM BaikalStat.sign_family_table_sql WHERE sign in (" + sign_strings_vec[i] + ")";
+        std::string sql = "SELECT sign FROM BaikalStat.sign_family_table_sql WHERE sign in (" + sign_strings + ")";
 
         int ret = _baikaldb->query(0, sql, &result_set);
         if (ret != 0) {
@@ -906,6 +948,11 @@ void NetworkServer::construct_other_heart_beat_request(pb::BaikalOtherHeartBeatR
     auto schema_read_recallback = [&request, factory](const SchemaMapping& schema){
         auto& table_statistics_mapping = schema.table_statistics_mapping;
         for (auto& info_pair : schema.table_info_mapping) {
+            const int64_t meta_id = ::baikaldb::get_meta_id(info_pair.first);
+            if (meta_id != 0) {
+                // 跳过非主Meta的表
+                continue;
+            }
             if (info_pair.second->engine != pb::ROCKSDB &&
                     info_pair.second->engine != pb::ROCKSDB_CSTORE) {
                 continue;
@@ -929,7 +976,6 @@ void NetworkServer::process_other_heart_beat_response(const pb::BaikalOtherHeart
     if (response.statistics().size() > 0) {
         factory->update_statistics(response.statistics());
     }
-
     if (response.has_instance_param()) {
         for (auto& item : response.instance_param().params()) {
             if (!item.is_meta_param()) {
@@ -1201,6 +1247,8 @@ NetworkServer::~NetworkServer() {
     _other_heartbeat_bth.join();
     _agg_sql_bth.join();
     _health_check_bth.join();
+    _ext_fs_gc_bth.join();
+    _conn_bvars_update_bth.join();
     if (_epoll_info != NULL) {
         delete _epoll_info;
         _epoll_info = NULL;
@@ -1253,18 +1301,8 @@ bool NetworkServer::init() {
     }
     DB_NOTICE("get physical_room %s", _physical_room.c_str());
     // 先把meta数据都获取到
-    pb::BaikalHeartBeatRequest request;
-    pb::BaikalHeartBeatResponse response;
-    //1、构造心跳请求
-    BaikalHeartBeat::construct_heart_beat_request(request);
-    request.set_physical_room(_physical_room);
-    //2、发送请求
-    if (MetaServerInteract::get_instance()->send_request("baikal_heartbeat", request, response) == 0) {
-        //处理心跳
-        BaikalHeartBeat::process_heart_beat_response_sync(response);
-        //DB_WARNING("req:%s  \nres:%s", request.DebugString().c_str(), response.DebugString().c_str());
-    } else {
-        DB_FATAL("send heart beat request to meta server fail");
+    if (heartbeat(true, false) != 0) {
+        DB_FATAL("heartbeat fail");
         return false;
     }
     DB_NOTICE("sync time2:%ld", cost.get_time());
@@ -1457,6 +1495,9 @@ int NetworkServer::make_worker_process() {
     }
 
     _conn_bvars_update_bth.run([this](){client_conn_bvars_update();});
+    if (FLAGS_need_ext_fs_gc) {
+        _ext_fs_gc_bth.run([this]() {ExtFileSystemGC::external_filesystem_gc(&_shutdown, FLAGS_hostname);});
+    }
 
     // Create listen socket.
     _service = create_listen_socket();

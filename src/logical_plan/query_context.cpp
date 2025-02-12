@@ -43,7 +43,7 @@ void QueryContext::update_ctx_stat_info(RuntimeState* state, int64_t query_total
     stat_info.read_disk_size += state->read_disk_size();
     stat_info.num_filter_rows += state->num_filter_rows();
     stat_info.region_count += state->region_count;
-    if (stmt_type == parser::NT_SELECT && stat_info.error_code == 1000 && state->sign != 0) {
+    if (stat_info.error_code == 1000 && state->sign != 0) {
         auto sql_info = SchemaFactory::get_instance()->get_sql_stat(state->sign);
         if (sql_info == nullptr) {
             sql_info = SchemaFactory::get_instance()->create_sql_stat(state->sign);
@@ -70,6 +70,7 @@ int QueryContext::copy_query_context(QueryContext* p_query_ctx) {
         return -1;
     }
 
+    is_select = p_query_ctx->is_select;
     is_plan_cache = p_query_ctx->is_plan_cache;
     is_straight_join = p_query_ctx->is_straight_join;
     // is_full_export = is_full_export || p_query_ctx->is_full_export; // 缓存不支持全量导出SQL
@@ -79,6 +80,7 @@ int QueryContext::copy_query_context(QueryContext* p_query_ctx) {
     ref_slot_id_mapping.insert(p_query_ctx->ref_slot_id_mapping.begin(), p_query_ctx->ref_slot_id_mapping.end());
     table_partition_names.insert(p_query_ctx->table_partition_names.begin(), p_query_ctx->table_partition_names.end());
     table_version_map.insert(p_query_ctx->table_version_map.begin(), p_query_ctx->table_version_map.end());
+    table_with_clause_mapping.insert(p_query_ctx->table_with_clause_mapping.begin(), p_query_ctx->table_with_clause_mapping.end());
     _tuple_descs.assign(p_query_ctx->tuple_descs().begin(), p_query_ctx->tuple_descs().end());
     stat_info.family = p_query_ctx->stat_info.family;
     stat_info.table = p_query_ctx->stat_info.table;
@@ -87,19 +89,30 @@ int QueryContext::copy_query_context(QueryContext* p_query_ctx) {
     stat_info.sample_sql << p_query_ctx->stat_info.sample_sql.str();
     need_learner_backup = p_query_ctx->need_learner_backup;
     use_backup = p_query_ctx->use_backup;
+    need_convert_charset = p_query_ctx->need_convert_charset;
+    charset = p_query_ctx->charset;
+    table_charset = p_query_ctx->table_charset;
 
     // runtime state
-    if (p_query_ctx->is_select) {
+    // if (p_query_ctx->is_select) {
+    //     if (client_conn->txn_id == 0) {
+    //         p_query_ctx->get_runtime_state()->set_single_sql_autocommit(true);
+    //     } else {
+    //         p_query_ctx->get_runtime_state()->set_single_sql_autocommit(false);
+    //     }
+    //     runtime_state = p_query_ctx->runtime_state;
+    // }
+    if (is_select) {
         if (client_conn->txn_id == 0) {
-            p_query_ctx->get_runtime_state()->set_single_sql_autocommit(true);
+            get_runtime_state()->set_single_sql_autocommit(true);
         } else {
-            p_query_ctx->get_runtime_state()->set_single_sql_autocommit(false);
+            get_runtime_state()->set_single_sql_autocommit(false);
         }
-        runtime_state = p_query_ctx->runtime_state;
     }
     // sql sign
     sign_blacklist.insert(p_query_ctx->sign_blacklist.begin(), p_query_ctx->sign_blacklist.end());
     sign_forcelearner.insert(p_query_ctx->sign_forcelearner.begin(), p_query_ctx->sign_forcelearner.end());
+    sign_rolling.insert(p_query_ctx->sign_rolling.begin(), p_query_ctx->sign_rolling.end());
     sign_forceindex.insert(p_query_ctx->sign_forceindex.begin(), p_query_ctx->sign_forceindex.end());
 
     has_derived_table = p_query_ctx->has_derived_table;
@@ -108,6 +121,9 @@ int QueryContext::copy_query_context(QueryContext* p_query_ctx) {
     slot_column_mapping.insert(p_query_ctx->slot_column_mapping.begin(),
                                      p_query_ctx->slot_column_mapping.end());
 
+
+    sign_exec_type.insert(p_query_ctx->sign_exec_type.begin(), p_query_ctx->sign_exec_type.end());
+    table_can_use_arrow_vectorize = p_query_ctx->table_can_use_arrow_vectorize;
     return 0;
 }
 

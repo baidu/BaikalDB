@@ -292,7 +292,7 @@ int ApplyNode::nested_loop_apply(RuntimeState* state) {
         _outer_table_is_null = true;
         return 0;
     }
-    DB_WARNING("data size:%ld", _outer_tuple_data.size());
+    //DB_WARNING("_outer_node:%p , _inner_node:%p , data size:%ld", _outer_node, _inner_node, _outer_tuple_data.size());
     get_slot_ref_sign_set(state, _slot_ref_sign_set);
     _inner_node->replace_slot_ref_to_literal(_slot_ref_sign_set, _literal_maps);
     _outer_iter = _outer_tuple_data.begin();
@@ -322,27 +322,11 @@ int ApplyNode::hash_apply(RuntimeState* state) {
         return 0;
     }
     construct_equal_values(_outer_tuple_data, _outer_equal_slot);
-    std::vector<ExprNode*> in_exprs;
-    ret = construct_in_condition(_inner_equal_slot, _outer_join_values, in_exprs);
+    ret = runtime_filter(state, _inner_node, nullptr);
     if (ret < 0) {
-        DB_WARNING("ExecNode::create in condition for right table fail");
+        DB_WARNING("Fail to runtime_filter");
         return ret;
     }
-    //表达式下推，下推的那个节点重新做索引选择，路由选择
-    _inner_node->predicate_pushdown(in_exprs);
-    if (in_exprs.size() > 0) {
-        DB_WARNING("inner node add filter node");
-        _inner_node->add_filter_node(in_exprs);
-    }
-    std::vector<ExecNode*> scan_nodes;
-    _inner_node->get_node(pb::SCAN_NODE, scan_nodes);
-    bool index_has_null = false;
-    do_plan_router(state, scan_nodes, index_has_null);
-    if (index_has_null) {
-        _inner_node->set_return_empty();
-    }
-    //谓词下推后可能生成新的plannode重新生成tracenode
-    _inner_node->create_trace();
     ret = _inner_node->open(state);
     if (ret < 0) {
         DB_WARNING("ExecNode::inner table open fail");
@@ -430,23 +414,6 @@ int ApplyNode::fetcher_inner_table_data(RuntimeState* state,
                             std::vector<ExecNode*>& scan_nodes,
                             std::vector<MemRow*>& inner_tuple_data) {
     _outer_join_values.clear();
-    std::vector<MemRow*> tuple_data;
-    //DB_WARNING("inter row:%s ", outer_tuple_data->debug_string(0).c_str());
-    tuple_data.emplace_back(outer_tuple_data);
-    construct_equal_values(tuple_data, _outer_equal_slot);
-    std::vector<ExprNode*> in_exprs;
-    int ret = construct_in_condition(_inner_equal_slot, _outer_join_values, in_exprs);
-    if (ret < 0) {
-        DB_WARNING("ExecNode::create in condition for right table fail");
-        return ret;
-    }
-    std::vector<ExprNode*> in_exprs_back = in_exprs;
-    //表达式下推，下推的那个节点重新做索引选择，路由选择
-    _inner_node->predicate_pushdown(in_exprs);
-    if (in_exprs.size() > 0) {
-        DB_WARNING("inner node add filter node");
-        _inner_node->add_filter_node(in_exprs);
-    }
     std::map<int64_t, ExprValue> join_values;
     for (auto& sign : _slot_ref_sign_set) {
         ExprValue value = outer_tuple_data->get_value(sign >> 16, sign & 0xffff);
@@ -458,12 +425,16 @@ int ApplyNode::fetcher_inner_table_data(RuntimeState* state,
             ((Literal*)literal)->init(value);
         }
     }
-    bool index_has_null = false;
-    do_plan_router(state, scan_nodes, index_has_null);
-    if (index_has_null) {
-        _inner_node->set_return_empty();
+    std::vector<MemRow*> tuple_data;
+    tuple_data.emplace_back(outer_tuple_data);
+    std::vector<ExprNode*> in_exprs_back;
+    construct_equal_values(tuple_data, _outer_equal_slot);
+    int ret = runtime_filter(state, _inner_node, &in_exprs_back);
+    if (ret < 0) {
+        DB_WARNING("Fail to runtime_filter");
+        return -1;
     }
-    _inner_node->create_trace();
+    //DB_WARNING("_outer_node:%p , _inner_node:%p , data size:%ld", _outer_node, _inner_node, _outer_tuple_data.size());
     ret = _inner_node->open(state);
     if (ret < 0) {
         DB_WARNING("ExecNode::inner table open fail");

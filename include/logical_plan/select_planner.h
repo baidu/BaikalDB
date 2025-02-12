@@ -27,8 +27,8 @@ public:
         LogicalPlanner(ctx),
         _select(nullptr) {}
 
-    SelectPlanner(QueryContext* ctx, const SmartPlanTableCtx& plan_state) : 
-        LogicalPlanner(ctx, plan_state),
+    SelectPlanner(QueryContext* ctx, const SmartUniqueIdCtx& uniq_ctx, const SmartPlanTableCtx& plan_state) : 
+        LogicalPlanner(ctx, uniq_ctx, plan_state),
         _select(nullptr) {}
 
     virtual ~SelectPlanner() {}
@@ -47,11 +47,12 @@ private:
 
     int parse_select_star(parser::SelectField* field);
     int parse_select_field(parser::SelectField* field);
-    int parse_select_name(parser::SelectField* field, std::string& select_name);
     // method to parse SQL elements
     int parse_select_fields();
 
     void add_single_table_columns(const std::string& table_name, TableInfo* table_info);
+    
+    int parse_with();
 
     int parse_where();
 
@@ -83,14 +84,36 @@ private:
     // for base subscribe
     int get_base_subscribe_scan_ref_slot();
 
+    // for snapshot blacklist
+    void add_snapshot_blacklist_to_where_filters();
+
     // non-prepare plan cache
     virtual int plan_cache_get() override;
     virtual int plan_cache_add() override;
     virtual bool enable_plan_cache() override {
-        return _ctx != nullptr && !_ctx->is_base_subscribe && !_ctx->is_complex && !_ctx->is_full_export;
+        return _ctx != nullptr 
+                    && !_ctx->is_base_subscribe /* 基准导出场景 */
+                    && !_ctx->is_complex /* 不包含复杂查询 */
+                    && !_ctx->is_full_export /* 全量导出场景 */
+                    && _ctx->sub_query_plans.size() == 0 /* 不包含子查询或视图 */
+                    && !_ctx->has_unable_cache_expr; /* 不包含不能缓存的函数 */
     }
     int replace_select_names();
-    
+
+    int check_multi_distinct(); 
+    void check_multi_distinct_in_select(int& multi_distinct_cnt, 
+                                    bool& multi_col_single_child,
+                                    std::set<std::string>& name_set);
+    void check_multi_distinct_in_having(int& multi_distinct_cnt, 
+                                    bool& multi_col_single_child,
+                                    std::set<std::string>& name_set);
+    void check_multi_distinct_in_orderby(int& multi_distinct_cnt, 
+                                    bool& multi_col_single_child,
+                                    std::set<std::string>& name_set);
+    void check_multi_distinct_in_node(const parser::ExprNode* item, 
+                                    int& multi_distinct_cnt, 
+                                    bool& multi_col_single_child,
+                                    std::set<std::string>& name_set);
 private:
     parser::SelectStmt*                 _select;
 

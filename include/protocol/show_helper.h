@@ -23,7 +23,8 @@
 #include "proto/store.interface.pb.h"
 
 const std::string SQL_SHOW_ABNORMAL_REGIONS      = "abnormal";              // show abnormal regions;
-const std::string SQL_SHOW_CREATE_TABLE          = "create";                // show create table test;
+const std::string SQL_SHOW_CREATE_TABLE          = "create_table";          // show create table test;
+const std::string SQL_SHOW_CREATE_VIEW           = "create_view";           // show create view test;
 const std::string SQL_SHOW_COLLATION             = "collation";             // show collation;
 const std::string SQL_SHOW_DATABASES             = "databases";             // show databases;
 const std::string SQL_SHOW_NAMESPACE             = "namespace";             // show namespace
@@ -58,8 +59,9 @@ const std::string SQL_SHOW_DIFF_REGION_SIZE      = "diff_region_size";      // s
 const std::string SQL_SHOW_NETWORK_SEGMENT       = "network_segment";       // show network_segment resourceTag;
 const std::string SQL_SHOW_SWITCH                = "switch";                // show switch
 const std::string SQL_SHOW_ALL_TABLES            = "all_tables";            // show all_tables [ttl/binlog/...]
-const std::string SQL_SHOW_BINLOGS_INFO          = "binlogs_info";          // show binlogs_info
+const std::string SQL_SHOW_BINLOG_INFO           = "binlog_info";           // show binlog_info
 const std::string SQL_SHOW_INSTANCE_PARAM        = "instance_param";        // show instance_param [resource_tag/instance]
+const std::string SQL_SHOW_PLUGINS               = "plugins";               // show plugins 
 const std::string SQL_SHOW_ENGINES               = "engines";               // show engines
 const std::string SQL_SHOW_CHARSET               = "charset";               // show charset
 const std::string SQL_SHOW_CHARACTER_SET         = "character";             // show character set; same as `show charset`
@@ -73,6 +75,10 @@ const std::string SQL_SHOW_ACTIVE_RANGE          = "active_range";          // s
 const std::string SQL_SHOW_OFFLINE_BINLOG        = "offline_binlog";        // show offline_binlog tableID regionID
 const std::string SQL_SHOW_NAMESPACES            = "namespaces";            // show namespaces;
 const std::string SQL_SHOW_GRANTS                = "grants";                // show grants for username;
+const std::string SQL_SHOW_ALL_PRIVILEGES        = "all_privileges";        // show all_privileges db...;
+const std::string SQL_SHOW_SWITCH_TABLES         = "switch_tables";         // show switch_tables username;
+const std::string SQL_SHOW_CREATE_DATABASE       = "create_database";       // show create database test;
+const std::string SQL_SHOW_ALL_META              = "all_meta";              // show all_meta;
 
 namespace baikaldb {
 typedef std::shared_ptr<NetworkSocket> SmartSocket;
@@ -105,6 +111,11 @@ private:
     bool _show_databases(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show create table tableName;
     bool _show_create_table(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    // sql: show create view viewName;
+    bool _show_create_view(const SmartSocket& client,
+                const std::vector<std::string>& split_vec);
+    // sql: show create database dbName;
+    bool _show_create_database(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show collation
     bool _show_collation(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show socket
@@ -135,8 +146,8 @@ private:
     bool _show_schema_conf(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show all_tables ttl/binlog; 
     bool _show_all_tables(const SmartSocket& client, const std::vector<std::string>& split_vec);
-    // sql: show binlogs_info;
-    bool _show_binlogs_info(const SmartSocket& client, const std::vector<std::string>& split_params);
+    // sql: show binlog_info;
+    bool _show_binlog_info(const SmartSocket& client, const std::vector<std::string>& split_params);
     // sql: show table status;
     bool _show_table_status(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show virtual index
@@ -165,6 +176,7 @@ private:
     bool _show_switch(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show instance_param ResourceTag / Instance
     bool _show_instance_param(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    bool _show_plugins(const SmartSocket& client, const std::vector<std::string>& split_vec);
     bool _show_engines(const SmartSocket& client, const std::vector<std::string>& split_vec);
     bool _show_charset(const SmartSocket& client, const std::vector<std::string>& split_vec);
     bool _show_index(const SmartSocket& client, const std::vector<std::string>& split_vec);
@@ -179,6 +191,11 @@ private:
     bool _show_namespaces(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // sql: show grants for username;
     bool _show_grants(const SmartSocket& client, const std::vector<std::string>& split_vec);
+
+    bool _show_all_privileges(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    bool _show_switch_tables(const SmartSocket& client, const std::vector<std::string>& split_vec);
+
+    bool _show_all_meta(const SmartSocket& client, const std::vector<std::string>& split_vec);
 
     bool _handle_client_query_template_dispatch(const SmartSocket& client, const std::vector<std::string>& split_vec);
     int _make_common_resultset_packet(const SmartSocket& sock, 

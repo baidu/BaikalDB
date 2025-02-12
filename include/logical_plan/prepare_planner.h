@@ -33,6 +33,5 @@ private:
     int stmt_prepare(const std::string& stmt_name, const std::string& stmt_sql);
     int stmt_execute(const std::string& stmt_name, std::vector<pb::ExprNode>& params);
     int stmt_close(const std::string& stmt_name);
-    
 };
 } //namespace baikal

@@ -16,6 +16,7 @@
 
 #include <functional>
 #include <execinfo.h>
+#include <iconv.h>
 #include <type_traits>
 #include <fstream>
 #include <cmath>
@@ -73,6 +74,7 @@ namespace braft = raft;
 
 namespace baikaldb {
 DECLARE_bool(use_cond_decrease_signal);
+DECLARE_int32(first_batch_size_for_vector);
 
 #define BAIKALDB_LIKELY(x)   __builtin_expect(!!(x), 1)
 #define BAIKALDB_UNLIKELY(x) __builtin_expect(!!(x), 0)
@@ -145,10 +147,41 @@ enum ExplainType {
     SHOW_KEYPOINT           = 9
 };
 
-const size_t ROW_BATCH_CAPACITY = 1024;
+const size_t ROW_BATCH_CAPACITY = std::min(FLAGS_first_batch_size_for_vector, 1024);
 
 inline bool explain_is_trace(ExplainType& type) {
     return type == SHOW_TRACE || type == SHOW_TRACE2;
+}
+
+enum SignExecType {
+    SIGN_EXEC_NOT_SET                   = 0,
+    SIGN_EXEC_ROW                       = 1,
+    SIGN_EXEC_ARROW_ACERO               = 2,
+    SIGN_EXEC_ARROW_FORCE_NO_INDEX_JOIN = 3
+};
+
+inline SignExecType to_sign_exec_type(uint64_t id) {
+    switch (id) {
+        case 1:
+            return SIGN_EXEC_ROW;
+        case 2:
+            return SIGN_EXEC_ARROW_ACERO;
+        case 3:
+            return SIGN_EXEC_ARROW_FORCE_NO_INDEX_JOIN;
+    }
+    return SIGN_EXEC_NOT_SET;
+}
+
+inline std::string explain_type_to_str(uint64_t type) {
+    switch (type) {
+        case 1:
+            return "SIGN_EXEC_ROW";
+        case 2:
+            return "SIGN_EXEC_ARROW_ACERO";
+        case 3:
+            return "SIGN_EXEC_ARROW_FORCE_NO_INDEX_JOIN";
+    }
+    return "SIGN_EXEC_NOT_SET";
 }
 
 class TimeCost {
@@ -378,7 +411,13 @@ public:
     }
     explicit Bthread(const bthread_attr_t* attr) : _attr(attr) {
     }
-
+    explicit Bthread(const std::function<void()>& call, bool urgent = false) {
+        if (urgent) {
+            run_urgent(call);
+        } else {
+            run(call);
+        }
+    }
     void run(const std::function<void()>& call) {
         std::function<void()>* _call = new std::function<void()>;
         *_call = call;
@@ -611,6 +650,18 @@ public:
         return _map[idx][key];
     }
 
+    const VALUE get(const KEY& key, const std::function<void(VALUE& value)>& call) {
+        uint32_t idx = map_idx(key);
+        BAIDU_SCOPED_LOCK(_mutex[idx]);
+        if (_map[idx].count(key) == 0) {
+            static VALUE tmp;
+            return tmp;
+        }
+        call(_map[idx][key]);
+        return _map[idx][key];
+    }
+
+
     bool call_and_get(const KEY& key, const std::function<void(VALUE& value)>& call) {
         uint32_t idx = map_idx(key);
         BAIDU_SCOPED_LOCK(_mutex[idx]);
@@ -638,6 +689,22 @@ public:
         if (_map[idx].count(key) == 0) {
             return call(_map[idx][key]);
         }
+        return _map[idx][key];
+    }
+
+    const VALUE get_or_put_call(const KEY& key, 
+                                const std::function<bool(VALUE& value)>& call1,
+                                const std::function<void(VALUE& value)>& call2) {
+        uint32_t idx = map_idx(key);
+        BAIDU_SCOPED_LOCK(_mutex[idx]);
+        if (_map[idx].count(key) == 0) {
+            if (!call1(_map[idx][key])) {
+                _map[idx].erase(key);
+                static VALUE tmp;
+                return tmp;
+            }
+        }
+        call2(_map[idx][key]);
         return _map[idx][key];
     }
 
@@ -670,6 +737,17 @@ public:
         }
         return true;
     }
+    bool erase_if_match_call(const KEY& key, const std::function<bool(const VALUE& value)>& call) {
+        uint32_t idx = map_idx(key);
+        BAIDU_SCOPED_LOCK(_mutex[idx]);
+        if (_map[idx].count(key) == 0) {
+            return false;
+        } else if (call(_map[idx][key])) {
+            _map[idx].erase(key);
+            return true;
+        }
+        return false;
+    }
 
     // 会加锁，轻量级操作采用traverse否则用copy
     void traverse(const std::function<void(VALUE& value)>& call) {
@@ -697,6 +775,22 @@ public:
             }
             for (auto& pair : tmp) {
                 call(pair.second);
+            }
+        }
+    }
+    void traverse_copy(const std::function<void(VALUE& value)>& call1,
+                       const std::function<void(VALUE& value)>& call2) {
+        for (uint32_t i = 0; i < MAP_COUNT; i++) {
+            std::unordered_map<KEY, VALUE> tmp;
+            {
+                BAIDU_SCOPED_LOCK(_mutex[i]);
+                for (auto& pair : _map[i]) {
+                    call1(pair.second);
+                }
+                tmp = _map[i];
+            }
+            for (auto& pair : tmp) {
+                call2(pair.second);
             }
         }
     }
@@ -751,6 +845,30 @@ public:
         return true;
     }
 
+    // 根据KEY值由大到小排序
+    bool traverse_with_early_return_by_order(const std::function<bool(VALUE& value)>& call) {
+        std::vector<std::pair<KEY, uint32_t> > keys;
+        for (uint32_t i = 0; i < MAP_COUNT; i++) {
+            BAIDU_SCOPED_LOCK(_mutex[i]);
+            for (auto& item : _map[i]) {
+                keys.push_back({item.first, i}); 
+            }
+        }
+        std::sort(keys.begin(), keys.end(), 
+            [](const std::pair<KEY, uint32_t>& a, const std::pair<KEY, uint32_t>& b) {
+                return a.first > b.first; 
+            }
+        );
+        for (auto& item : keys) {
+            for (auto& pair : _map[item.second]) {
+                if (!call(pair.second)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
 private:
     uint32_t map_idx(const KEY& key) {
         return std::hash<KEY>{}(key) % MAP_COUNT;
@@ -774,6 +892,12 @@ public:
         return _data + _index;
     }
     T* read_background() {
+        return _data + !_index;
+    }
+    const T* read()  const {
+        return _data + _index;
+    }
+    const T* read_background() const {
         return _data + !_index;
     }
     void swap() {
@@ -812,43 +936,53 @@ template <typename T>
 class IncrementalUpdate {
 public:
     IncrementalUpdate() {
-        bthread_mutex_init(&_mutex, NULL);
     }
 
     ~IncrementalUpdate() {
-        bthread_mutex_destroy(&_mutex);
     }
 
     void put_incremental_info(const int64_t apply_index, T& infos) {
-        BAIDU_SCOPED_LOCK(_mutex);
-        auto background  = _buf.read_background();
-        auto frontground = _buf.read();
-        //保证bg中最少有一个元素
-        if (background->size() <= 0) {
+        int64_t cost = _the_earlist_time_for_background.get_time();
+        auto call_func = [=, this](DoubleBuffer<std::map<int64_t, T>>& buf) -> int {
+            auto background  = buf.read_background();
+            auto frontground = buf.read();
+            //保证bg中最少有一个元素
+            if (background->size() <= 0) {
+                (*background)[apply_index] = infos;
+                _the_earlist_time_for_background.reset();
+                return 1;
+            }
             (*background)[apply_index] = infos;
-            _the_earlist_time_for_background.reset();
-            return;
-        }
-        (*background)[apply_index] = infos;
-        // 当bg中最早的元素大于回收时间时清理fg，互换bg和fg；这样可以保证清理掉的都是大于超时时间的，极端情况下超时回收时间变为2倍的gc time
-        if (_the_earlist_time_for_background.get_time() > FLAGS_incremental_info_gc_time) {
-            frontground->clear();
-            _buf.swap();
-        } 
+            // 当bg中最早的元素大于回收时间时清理fg，互换bg和fg；这样可以保证清理掉的都是大于超时时间的，极端情况下超时回收时间变为2倍的gc time
+            if (cost > FLAGS_incremental_info_gc_time) {
+                frontground->clear();
+                buf.swap();
+            } 
+            return 1;
+        };
+        _buf.Modify(call_func);
     }
 
     // 返回值 true:需要全量更新外部处理 false:增量更新，通过update_incremental处理增量
     bool check_and_update_incremental(std::function<void(const T&)> update_incremental, int64_t& last_updated_index, const int64_t applied_index) {
-        BAIDU_SCOPED_LOCK(_mutex);
-        auto background  = _buf.read_background();
-        auto frontground = _buf.read();
+        typename butil::DoublyBufferedData<DoubleBuffer<std::map<int64_t, T>>>::ScopedPtr ptr;
+        if (_buf.Read(&ptr) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return true;
+        }
+        auto background  = ptr->read_background(); //新的
+        auto frontground = ptr->read(); //旧的
         if (frontground->size() == 0 && background->size() == 0) {
-            if (last_updated_index < applied_index) {
+            if (last_updated_index + 1 < applied_index) {
+                DB_WARNING("last_updated_index:%ld applied_index:%ld, frontground and background size = 0", 
+                    last_updated_index, applied_index);
                 return true;
             }
             return false;
         } else if (frontground->size() == 0 && background->size() > 0) {
-            if (last_updated_index < background->begin()->first) {              
+            if (last_updated_index + 1 < background->begin()->first) {
+                DB_WARNING("first:%ld, background->size = %lu, frontground size = 0", 
+                    background->begin()->first, background->size());
                 return true;
             } else {
                 auto iter = background->upper_bound(last_updated_index);
@@ -863,7 +997,9 @@ public:
                 return false;
             }
         } else if (frontground->size() > 0) {
-            if (last_updated_index < frontground->begin()->first) {
+            if (last_updated_index + 1 < frontground->begin()->first) {
+                DB_WARNING("first:%ld, frontground size = %lu, background size = %lu", 
+                    frontground->begin()->first, frontground->size(), background->size());
                 return true;
             } else {
                 auto iter = frontground->upper_bound(last_updated_index);
@@ -891,15 +1027,18 @@ public:
     }
 
     void clear() {
-        auto background  = _buf.read_background();
-        auto frontground = _buf.read();
-        background->clear();
-        frontground->clear();
+        auto call_func = [](DoubleBuffer<std::map<int64_t, T>>& buf) -> int {
+            auto background  = buf.read_background();
+            auto frontground = buf.read();
+            background->clear();
+            frontground->clear();
+            return 1;
+        };
+        _buf.Modify(call_func);
     }
 
 private:
-    DoubleBuffer<std::map<int64_t, T>> _buf;
-    bthread_mutex_t                    _mutex;
+    butil::DoublyBufferedData<DoubleBuffer<std::map<int64_t, T>>> _buf;
     TimeCost        _the_earlist_time_for_background;
 };
 
@@ -1334,6 +1473,7 @@ extern SerializeStatus to_string(uint64_t number, char *buf, size_t size, size_t
 extern std::string remove_quote(const char* str, char quote);
 extern std::string str_to_hex(const std::string& str);
 void stripslashes(std::string& str, bool is_gbk);
+extern void set_snapshot_blacklist(pb::SchemaConf& schema_conf, pb::SchemaConf* p_conf);
 extern void update_schema_conf_common(const std::string& table_name, const pb::SchemaConf& schema_conf, pb::SchemaConf* p_conf);
 extern void update_op_version(pb::SchemaConf* p_conf, const std::string& desc);
 extern int primitive_to_proto_type(pb::PrimitiveType type);
@@ -1350,6 +1490,8 @@ extern int get_multi_port_from_bns(int* ret,
                           bool need_alive = true); 
 extern bool same_with_container_id_and_address(const std::string& container_id, const std::string& address); 
 extern std::string store_or_db_bns_to_meta_bns(const std::string& bns);
+extern std::string get_platform_from_bns(const std::string& bns);
+extern std::string get_productline_from_bns(const std::string& bns);
 extern bool is_digits(const std::string& str);
 extern std::string url_decode(const std::string& str);
 extern std::string url_encode(const std::string& str);
@@ -1438,5 +1580,121 @@ public:
         return &instance;
     }
 };
+
+enum class IconvOnError {
+    ABORT    = 0, // 失败放弃
+    IGNORE   = 1, // 忽略跳过
+    TRANSLIT = 2, // 相似字符替代
+};
+
+// GBK => GB18030
+template <pb::Charset To, IconvOnError ErrMode = IconvOnError::ABORT>
+struct IconvEncoding {
+    inline static constexpr const char* get_encoding_string() {
+        switch (To) {
+        case pb::GBK:
+            return ErrMode == IconvOnError::IGNORE ? "gb18030//IGNORE"
+                    : ErrMode == IconvOnError::TRANSLIT ? "gb18030//TRANSLIT"
+                    : "gb18030";
+        case pb::UTF8:
+            return ErrMode == IconvOnError::IGNORE ? "utf-8//IGNORE"
+                    : ErrMode == IconvOnError::TRANSLIT ? "utf-8//TRANSLIT"
+                    : "utf-8";
+        default:
+            break;
+        }
+        return "invalid encoding";
+    }
+    inline static constexpr int32_t get_character_bytes() {
+        return To == pb::GBK ? 2 
+                : To == pb::UTF8 ? 3 
+                : -1;
+    }
+
+    static constexpr const char* NAME = get_encoding_string();
+    static constexpr int32_t CHARACTER_BYTES = get_character_bytes();
+};
+
+template <pb::Charset To, pb::Charset From, IconvOnError ErrMode = IconvOnError::ABORT>
+class IconvConverter {
+public:
+    IconvConverter() : _cd(iconv_open(IconvEncoding<To, ErrMode>::NAME, IconvEncoding<From>::NAME)) {
+    }
+    ~IconvConverter() {
+        if (valid()) {
+            iconv_close(_cd);
+        }
+    }
+
+    inline bool valid() const {
+        return _cd != reinterpret_cast<iconv_t>(-1);
+    }
+
+    int32_t convert(std::string& dst, const char* psrc, const size_t nsrc) {
+        if (!valid()) {
+            return -1;
+        }
+        // 估计输出buffer所需大小
+        const int32_t to_bytes = IconvEncoding<To, ErrMode>::CHARACTER_BYTES;
+        const int32_t from_bytes = IconvEncoding<From>::CHARACTER_BYTES;
+        if (to_bytes < 0 || from_bytes < 0) {
+            return -1;
+        }
+        size_t estimate_size = nsrc;
+        if (to_bytes > from_bytes) {
+            estimate_size = estimate_size * to_bytes / from_bytes;
+        }
+        dst.resize(estimate_size + 1);
+
+        // 进行转化 
+        char* inbuf           = const_cast<char*>(psrc);
+        size_t in_bytes_left  = nsrc;
+        char* outbuf          = &dst[0];
+        size_t out_bytes_left = dst.size();
+
+        char* data            = outbuf;
+        size_t outbuf_size    = out_bytes_left;
+
+        // 重置状态
+        iconv(_cd, nullptr, nullptr, nullptr, nullptr);
+        while (true) {
+            size_t ret = iconv(_cd, &inbuf, &in_bytes_left, &outbuf, &out_bytes_left);
+            if (ret != static_cast<size_t>(-1)) {
+                // 正常完成
+                dst.resize(outbuf_size - out_bytes_left);
+                return 0;
+            } else if (errno == E2BIG) {
+                // 空间不足，扩展后继续
+                size_t size = outbuf_size - out_bytes_left;
+                outbuf_size = size + in_bytes_left * to_bytes;
+                dst.resize(outbuf_size);
+                data = &dst[0];
+                outbuf = data + size;
+                out_bytes_left = outbuf_size - size;
+            } else {
+                // 转码异常
+                dst.resize(outbuf_size - out_bytes_left);
+                return -1;
+            }
+        }
+    }
+
+private:
+    iconv_t _cd;
+};
+
+template <pb::Charset To, pb::Charset From, IconvOnError ErrMode = IconvOnError::ABORT>
+inline int iconv_convert(std::string& dst, const char* psrc, const size_t nsrc) {
+    thread_local IconvConverter<To, From, ErrMode> iconv_converter;
+    return iconv_converter.convert(dst, psrc, nsrc);
+}
+
+template <pb::Charset To, pb::Charset From, IconvOnError ErrMode = IconvOnError::ABORT>
+inline int iconv_convert(std::string& dst, const std::string& src) {
+    return iconv_convert<To, From, ErrMode>(dst, src.c_str(), src.size());
+}
+
+extern int convert_charset(const pb::Charset& from_charset, const std::string& from_str,
+                           const pb::Charset& to_charset, std::string& to_str);
 } // namespace baikaldb
 

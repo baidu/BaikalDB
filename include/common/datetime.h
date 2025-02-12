@@ -23,10 +23,13 @@ extern time_t str_to_timestamp(const char* str_time);
 // encode DATETIME to string format
 // ref: https://dev.mysql.com/doc/internals/en/date-and-time-data-type-representation.html
 extern std::string datetime_to_str(uint64_t datetime, int precision_len = 0);
+inline uint64_t str_to_datetime_internal(const char* str_time, size_t length, bool* is_full_datetime);
 extern uint64_t str_to_datetime(const char* str_time, bool* is_full_datetime = nullptr);
+extern uint64_t str_to_datetime(const char* str_time, size_t length);
 
 extern time_t datetime_to_timestamp(uint64_t datetime);
 extern uint64_t timestamp_to_datetime(time_t timestamp);
+extern time_t snapshot_to_timestamp(uint64_t snapshot);
 inline uint32_t datetime_to_day(uint64_t datetime) {
     return ((datetime >> 41) & 0x1F);
 }
@@ -48,6 +51,7 @@ extern uint64_t bin_date_to_datetime(DateTime time_struct);
 extern int32_t bin_time_to_datetime(DateTime time_struct);
 extern void datetime_to_time_struct(uint64_t datetime, DateTime& time_struct, uint8_t type);
 extern int64_t timestamp_to_ts(uint32_t timestamp);
+extern bool is_valid_date(const std::string& date_str, const bool has_hour);
 // inline functions
 // DATE: 17 bits year*13+month  (year 0-9999, month 1-12)
 //        5 bits day            (1-31)
@@ -81,13 +85,17 @@ extern size_t date_format_internal(char* s, size_t maxsize, const char* format, 
 
 // Dynamic Partition
 enum class TimeUnit {
-    DAY = 0,
-    MONTH
+    YEAR = 0,
+    MONTH,
+    DAY,
+    HOUR,
+    MINUTE,
+    SECOND
 };
 
-extern int get_current_timestamp(time_t& current_ts);
-extern int get_specified_timestamp(const time_t& ts, const int64_t offset, TimeUnit time_unit, time_t& specified_ts);
-extern int get_current_day_timestamp(time_t& current_day_ts);
+extern int date_add_interval(time_t& ts, const int64_t interval, const TimeUnit time_unit);
+extern int date_sub_interval(time_t& ts, const int64_t interval, const TimeUnit time_unit);
+extern int get_current_day_timestamp(time_t& current_day_ts, time_t current_ts = -1);
 extern int get_current_month_timestamp(const int start_day_of_month, time_t& current_month_ts);
 extern int timestamp_to_format_str(const time_t ts, const char* format, std::string& str);
 

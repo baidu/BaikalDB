@@ -5,9 +5,12 @@
 #include "plan_router.h"
 #include "separate.h"
 #include "rocksdb_scan_node.h"
-#include "index_ddl_manager_node.h"
 
 namespace baikaldb {
+DEFINE_int64(ddl_work_limit, 100, "ddl_work_limit");
+BRPC_VALIDATE_GFLAG(ddl_work_limit, brpc::NonNegativeInteger);
+DEFINE_int64(rollup_ddl_work_limit, 10000, "rollup_ddl_work_limit");
+BRPC_VALIDATE_GFLAG(rollup_ddl_work_limit, brpc::NonNegativeInteger);
 
 template<typename Type>
 std::unique_ptr<Type> create_generic_manager_node(pb::PlanNodeType node_type) {
@@ -87,7 +90,6 @@ int DDLWorkPlanner::create_index_ddl_plan() {
         DB_FATAL("index or pk index is nullptr.");
         return -1;
     }
-
     if (_is_global_index && !_factory->is_region_info_exist(index_ptr->id)) {
         DB_FATAL("create global index error.");
         return -1;
@@ -141,23 +143,16 @@ int DDLWorkPlanner::plan() {
 }
 
 int DDLWorkPlanner::create_txn_dml_node(std::unique_ptr<SingleTxnManagerNode>& txn_node, std::unique_ptr<ScanNode> scan_node) {
-    auto manager_node = create_generic_manager_node<IndexDDLManagerNode>(pb::INDEX_DDL_MANAGER_NODE);
-    manager_node->set_table_id(_table_id);
-    manager_node->set_index_id(_index_id);
-    manager_node->set_task_id(_task_id);
-    std::map<int64_t, pb::RegionInfo> region_infos =
-            static_cast<RocksdbScanNode*>(scan_node.get())->region_infos();
-        
-    DB_DEBUG("region_info size : %zu", region_infos.size());
-    manager_node->set_region_infos(region_infos);
-    manager_node->add_child(scan_node.release());
+    std::unique_ptr<IndexDDLManagerNode> index_ddl_manager_node;
+    create_index_ddl_manager_node(index_ddl_manager_node, std::move(scan_node));
+
     if (_is_global_index) {
         auto secondary_node_ptr = new (std::nothrow) LockSecondaryNode;
         if (secondary_node_ptr == nullptr) {
             DB_WARNING("create manager_node failed");
             return -1;
         }
-        manager_node->set_is_global_index(true);
+        index_ddl_manager_node->set_is_global_index(true);
         pb::PlanNode plan_node;
         plan_node.set_node_type(pb::LOCK_SECONDARY_NODE);
         plan_node.set_num_children(0);
@@ -169,18 +164,36 @@ int DDLWorkPlanner::create_txn_dml_node(std::unique_ptr<SingleTxnManagerNode>& t
                 _table_id);
         plan_node.mutable_derive_node()->mutable_lock_secondary_node()->set_lock_secondary_type(pb::LST_GLOBAL_DDL);
         secondary_node_ptr->init(plan_node);
-        manager_node->add_child(secondary_node_ptr);
+        index_ddl_manager_node->add_child(secondary_node_ptr);
     }
-    if (create_single_txn(std::move(manager_node), txn_node) != 0) {
+    
+    if (create_single_txn(std::move(index_ddl_manager_node), txn_node) != 0) {
         DB_WARNING("create signele txn error.");            
         return -1;
     }
     return 0;
 }
 
+void DDLWorkPlanner::create_index_ddl_manager_node(std::unique_ptr<IndexDDLManagerNode>& index_ddl_manager_node, 
+                                std::unique_ptr<ScanNode> scan_node) {
+    index_ddl_manager_node = create_generic_manager_node<IndexDDLManagerNode>(pb::INDEX_DDL_MANAGER_NODE);
+    index_ddl_manager_node->set_table_id(_table_id);
+    index_ddl_manager_node->set_index_id(_index_id);
+    index_ddl_manager_node->set_task_id(_task_id);
+    std::map<int64_t, pb::RegionInfo> region_infos =
+            static_cast<RocksdbScanNode*>(scan_node.get())->region_infos();
+    
+    DB_DEBUG("region_info size : %zu", region_infos.size());
+    index_ddl_manager_node->set_region_infos(region_infos);
+    index_ddl_manager_node->add_child(scan_node.release());
+    return;
+}
+
 std::unique_ptr<ScanNode> DDLWorkPlanner::create_scan_node() {
     //plan 已经add_nodes。
     int ret = 0;
+    // 设置 limit
+    _ctx->plan.mutable_nodes(0)->set_limit(_limit);
     std::unique_ptr<ScanNode> scan_node(ScanNode::create_scan_node(_ctx->plan.nodes(0))); 
     if (scan_node == nullptr) {
         return scan_node;
@@ -242,6 +255,24 @@ std::unique_ptr<ScanNode> DDLWorkPlanner::create_scan_node() {
     return scan_node;
 }
 
+int DDLWorkPlanner::exec_rollup_node(RuntimeState& state, NetworkSocket* client_conn, pb::OpType op_type) {
+    std::unique_ptr<ScanNode> rollup_node = create_scan_node();
+    std::map<int64_t, pb::RegionInfo> region_info = static_cast<RocksdbScanNode*>(rollup_node.get())->region_infos();
+    int ret = _fetcher_store.run(&state, 
+                region_info,
+                rollup_node.release(), 
+                client_conn->seq_id, 
+                client_conn->seq_id, 
+                op_type);
+    if (ret < 0) {
+        DB_FATAL("task_%s op_type: %s fetcher store fail, txn_id: %lu, log_id:%lu", 
+                _task_id.c_str(), pb::OpType_Name(op_type).c_str(), state.txn_id, state.log_id());
+        state.ddl_error_code = state.error_code;
+        return ret;
+    }
+    return 0;
+}
+
 int DDLWorkPlanner::execute() {
     bool first_flag = true;
     RuntimeState& state = *_ctx->get_runtime_state();
@@ -251,6 +282,29 @@ int DDLWorkPlanner::execute() {
     }
     int retry_times = 0;
     const int MAX_RETRY_TIMES = 20;
+    bool rollup_finish_succ = true;
+    ON_SCOPE_EXIT(([this, &state, &client_conn, &rollup_finish_succ]() {
+        int exec_cnt = 1;
+        while (exec_cnt < MAX_RETRY_TIMES) {
+            if (_is_rollup_index && !rollup_finish_succ && exec_rollup_node(state, client_conn, pb::OP_ROLLUP_REGION_FAILED) != 0) {
+                DB_FATAL("task_%s exec rollup_failed node open fail, txn_id: %lu, log_id:%lu, exec_cnt: %d", 
+                        _task_id.c_str(), state.txn_id, state.log_id(), exec_cnt);
+                exec_cnt ++;
+            } else {
+                break;
+            }
+        }
+    }));
+
+    if (_is_rollup_index && exec_rollup_node(state, client_conn, pb::OP_ROLLUP_REGION_INIT) != 0) {
+        DB_FATAL("task_%s exec rollup_init node open fail, txn_id: %lu, log_id:%lu", 
+                _task_id.c_str(), state.txn_id, state.log_id());
+        _work.set_status(pb::DdlWorkFail);
+        rollup_finish_succ = false;
+        return -1;
+    }
+
+    int rollup_batch_version = 1;
     while (true) {
         int ret = 0;
 
@@ -271,6 +325,11 @@ int DDLWorkPlanner::execute() {
                 _start_key = state.ddl_max_pk_key;
                 _router_start_key = state.ddl_max_router_key;
             }
+            if (_is_rollup_index) {
+                _limit = FLAGS_rollup_ddl_work_limit;
+            } else {
+                _limit = FLAGS_ddl_work_limit;
+            }
         } else {
             first_flag = false;
         }
@@ -278,64 +337,116 @@ int DDLWorkPlanner::execute() {
         bool success_flag = true;
         uint64_t log_id = state.log_id();
         do {
-            success_flag = true;
-            std::unique_ptr<ScanNode> scan_node = create_scan_node();
-            if (scan_node == nullptr) {
-                DB_FATAL("task_%s logid %lu create scan node error.", _task_id.c_str(), log_id);
-                success_flag = false;
-                retry_times++;
-                continue;
-            }
-            if (!_is_column_ddl) {
-                auto index_info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(_index_id);
-                if (index_info_ptr == nullptr ||
-                    (index_info_ptr->state != pb::IS_WRITE_LOCAL && index_info_ptr->state != pb::IS_WRITE_ONLY)) {
-                    //说明任务已经完成，或者任务失败，该索引正在被删除。
-                    DB_FATAL("index info ptr is nullptr or index state is not pb::IS_WRITE_LOCAL/pb::IS_WRITE_ONLY");
-                    _work.set_status(pb::DdlWorkFail);
-                    return -1;
+            if (!_is_rollup_index) {
+                success_flag = true;
+                std::unique_ptr<ScanNode> scan_node = create_scan_node();
+                if (scan_node == nullptr) {
+                    DB_FATAL("task_%s logid %lu create scan node error.", _task_id.c_str(), log_id);
+                    success_flag = false;
+                    retry_times++;
+                    continue;
                 }
-            }
-            state.txn_id = client_conn->txn_id;
-            std::unique_ptr<SingleTxnManagerNode> txn_manager_node;
-            ret = create_txn_dml_node(txn_manager_node, std::move(scan_node));
-            if (ret != 0) {
-                DB_FATAL("task_%s logid %lu create txn node error.", _task_id.c_str(), log_id);
-                success_flag = false;
-                retry_times++;
-                continue;
-            }
-            ret = txn_manager_node->open(_ctx->get_runtime_state().get());
-            if (ret == -1) {
-                if (state.ddl_error_code == ER_DUP_ENTRY) {
-                    DB_FATAL("task_%s logid %lu txn manager node open error: %d ER_DUP_ENTRY.", 
-                        _task_id.c_str(), log_id, state.ddl_error_code);
-                    _work.set_status(pb::DdlWorkDupUniq);
-                    return -1;
-                } else {
-                    DB_FATAL("task_%s logid %lu txn manager node open error: %d.", 
-                        _task_id.c_str(), log_id, state.ddl_error_code);
+                if (!_is_column_ddl) {
+                    auto index_info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(_index_id);
+                    if (index_info_ptr == nullptr ||
+                        (index_info_ptr->state != pb::IS_WRITE_LOCAL && index_info_ptr->state != pb::IS_WRITE_ONLY)) {
+                        //说明任务已经完成，或者任务失败，该索引正在被删除。
+                        DB_FATAL("index info ptr is nullptr or index state is not pb::IS_WRITE_LOCAL/pb::IS_WRITE_ONLY");
+                        _work.set_status(pb::DdlWorkFail);
+                        return -1;
+                    }
                 }
-                success_flag = false;
-            }
-            if (!success_flag) {
-                retry_times++;
-                uint64_t log_id = butil::fast_rand();
-                state.set_log_id(log_id);
-                if (retry_times < MAX_RETRY_TIMES) {
-                    bthread_usleep(50 * 1000 * 1000LL);
+                state.txn_id = client_conn->txn_id;
+                std::unique_ptr<SingleTxnManagerNode> txn_manager_node;
+                ret = create_txn_dml_node(txn_manager_node, std::move(scan_node));
+                if (ret != 0) {
+                    DB_FATAL("task_%s logid %lu create txn node error.", _task_id.c_str(), log_id);
+                    success_flag = false;
+                    retry_times++;
+                    continue;
                 }
-            }
+                ret = txn_manager_node->open(_ctx->get_runtime_state().get());
+                if (ret == -1) {
+                    if (state.ddl_error_code == ER_DUP_ENTRY) {
+                        DB_FATAL("task_%s logid %lu txn manager node open error: %d ER_DUP_ENTRY.", 
+                            _task_id.c_str(), log_id, state.ddl_error_code);
+                        _work.set_status(pb::DdlWorkDupUniq);
+                        return -1;
+                    } else {
+                        DB_FATAL("task_%s logid %lu txn manager node open error: %d.", 
+                            _task_id.c_str(), log_id, state.ddl_error_code);
+                    }
+                    success_flag = false;
+                }
+                if (!success_flag) {
+                    retry_times++;
+                    uint64_t log_id = butil::fast_rand();
+                    state.set_log_id(log_id);
+                    if (retry_times < MAX_RETRY_TIMES) {
+                        bthread_usleep(50 * 1000 * 1000LL);
+                    }
+                }
+            } else {
+                success_flag = true;
+                std::unique_ptr<ScanNode> scan_node = create_scan_node();
+                if (scan_node == nullptr) {
+                    DB_FATAL("task_%s logid %lu create scan node error.", _task_id.c_str(), log_id);
+                    success_flag = false;
+                    retry_times++;
+                    continue;
+                }
+                scan_node->set_watt_stats_version(rollup_batch_version++);
+                std::unique_ptr<IndexDDLManagerNode> rollup_dml_node;
+                create_index_ddl_manager_node(rollup_dml_node, std::move(scan_node));
+                ret = rollup_dml_node->open(_ctx->get_runtime_state().get());
+                if (ret == -1) {
+                    if (state.ddl_error_code == ER_DUP_ENTRY) {
+                        DB_FATAL("task_%s logid %lu txn manager node open error: %d ER_DUP_ENTRY.", 
+                            _task_id.c_str(), log_id, state.ddl_error_code);
+                        _work.set_status(pb::DdlWorkDupUniq);
+                        rollup_finish_succ = false;
+                        return -1;
+                    } else if (state.ddl_error_code == ER_INDEX_CORRUPT) {
+                        DB_FATAL("task_%s logid %lu  error: %d rollup base work is wrong", 
+                            _task_id.c_str(), log_id, state.ddl_error_code);
+                        _work.set_status(pb::DdlWorkFail);
+                        rollup_finish_succ = false;
+                        return -1;
+                    } else {
+                        DB_FATAL("task_%s logid %lu txn manager node open error: %d.", 
+                            _task_id.c_str(), log_id, state.ddl_error_code);
+                    }
+                    success_flag = false;
+                }
 
+                if (!success_flag) {
+                    retry_times++;
+                    uint64_t log_id = butil::fast_rand();
+                    state.set_log_id(log_id);
+                    if (retry_times < MAX_RETRY_TIMES) {
+                        bthread_usleep(50 * 1000 * 1000LL);
+                    }
+                }
+            }
         } while (retry_times < MAX_RETRY_TIMES && !success_flag);
 
         if (!success_flag) {
             DB_FATAL("task_%s logid %lu failed retry_times %d error: %d.", 
                         _task_id.c_str(), log_id, retry_times, state.ddl_error_code);
             _work.set_status(pb::DdlWorkFail);
+            rollup_finish_succ = false;
             return -1;
         }
     }
+
+    if (_is_rollup_index && exec_rollup_node(state, client_conn, pb::OP_ROLLUP_REGION_FINISH) !=0) {
+        DB_FATAL("task_%s exec rollup_finish node open fail, txn_id: %lu, log_id:%lu", 
+                _task_id.c_str(), state.txn_id, state.log_id());
+        _work.set_status(pb::DdlWorkFail);
+        rollup_finish_succ = false;
+        return -1;
+    }
+
     std::string first_record_str;
     std::string last_record_str;
     if (state.first_record_ptr != nullptr) {
@@ -348,4 +459,4 @@ int DDLWorkPlanner::execute() {
     _work.set_status(pb::DdlWorkDone);
     return 0;
 }
-} // namespace  aikaldbame
+} // namespace baikaldb

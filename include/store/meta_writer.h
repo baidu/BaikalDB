@@ -43,6 +43,8 @@ public:
     static const std::string LOCAL_STORAGE_IDENTIFY;
     static const std::string OLAP_REGION_IDENTIFY;
     static const std::string REGION_OFFLINE_BINLOG_IDENTIFY;
+    static const std::string WATT_STATS_VERSION_IDENTIFY;
+    static const std::string ROLLUP_REGION_INIT_INDEX_INDENTIFY;
 
     virtual ~MetaWriter() {}
    
@@ -100,9 +102,19 @@ public:
     int write_olap_info(int64_t region_id, const pb::OlapRegionInfo& olap_info);
     int read_olap_info(int64_t region_id, pb::OlapRegionInfo& olap_info);
     std::string offline_binlog_key(int64_t region_id) const;
+    std::string watt_stats_version_key(int64_t region_id, uint64_t watt_stats_version) const;
+    rocksdb::Status get_watt_stats_version(int64_t region_id, uint64_t watt_stats_version) const;
+    int put_watt_stats_version(int64_t region_id, uint64_t watt_stats_version, SmartTransaction txn);
+    int clear_watt_stats_version(int64_t region_id);
+    int clear_rollup_batch_version(int64_t region_id);
     int write_region_offline_binlog_info(int64_t region_id, const pb::RegionOfflineBinlogInfo& offline_binlog_info);
     int read_region_offline_binlog_info(int64_t region_id, pb::RegionOfflineBinlogInfo& offline_binlog_info);
     int rocks_hang_check();
+    int64_t read_rollup_region_init_index(int64_t region_id);
+    int clear_unapplied_begin_index(int64_t region_id);
+    int update_rollup_region_init_index(int64_t region_id, int64_t rollup_region_init_index);
+    std::string rollup_region_init_index_key(int64_t region_id) const;
+    std::string encode_rollup_region_init_index(int64_t unapply_index) const;
 public:
     std::string region_info_key(int64_t region_id) const;
     std::string region_for_store_key(int64_t region_id) const;

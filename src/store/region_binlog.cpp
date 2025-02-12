@@ -740,6 +740,7 @@ int Region::binlog_update_map_when_apply(const std::map<std::string, ExprValue>&
         }
     }
 
+    // check_point_ts可能会回退
     _binlog_param.check_point_ts = _binlog_param.ts_binlog_map.empty() ? ts : _binlog_param.ts_binlog_map.begin()->first;
     _binlog_param.max_ts_applied  = std::max(_binlog_param.max_ts_applied, ts);
 
@@ -1010,6 +1011,7 @@ int BinlogReadMgr::multiget(std::map<int64_t, std::string>& start_binlog_map) {
     }
     RocksdbVars::get_instance()->rocksdb_multiget_time << time.get_time();
     RocksdbVars::get_instance()->rocksdb_multiget_count << keys.size();
+    DB_DEBUG("multiget_time:%ld", time.get_time());
     bool failed = false;
     for (int i = 0; i < num_keys; i++) {
         int ts_pos = 0;
@@ -1110,7 +1112,7 @@ int BinlogReadMgr::seek(std::map<int64_t, std::string>& start_binlog_map) {
     }
 }
 
-// only used by offline binlog, read online binlog data
+// only used by offline binlog, read online binlog data, write offline
 int BinlogReadMgr::get_prewrite_binlog(int64_t start_ts, std::map<int64_t, std::string>& start_binlog_map, bool& batch_finish, bool read_finished = false) {
     int ret = 0;
     batch_finish = false;
@@ -1132,7 +1134,7 @@ int BinlogReadMgr::get_prewrite_binlog(int64_t start_ts, std::map<int64_t, std::
         if (_mode == MULTIGET) {
             ret = multiget(start_binlog_map);
         } else {
-            ret = seek(_start_binlog_map);
+            ret = seek(start_binlog_map);
         }
         if (ret != 0) {
             DB_WARNING("get binlog failed, region_id: %ld", _region_id);
@@ -1206,6 +1208,11 @@ int BinlogReadMgr::get_binlog_value(int64_t commit_ts, int64_t start_ts, pb::Sto
             DB_WARNING("get binlog failed, region_id: %ld", _region_id);
             return -1;
         }
+        ON_SCOPE_EXIT([this]{
+            _commit_start_map.clear();
+            _start_binlog_map.clear();
+            _fake_binlog_map.clear();
+        });
 
         for (const auto& iter : _commit_start_map) {
             if (iter.first == iter.second) {
@@ -1222,9 +1229,6 @@ int BinlogReadMgr::get_binlog_value(int64_t commit_ts, int64_t start_ts, pb::Sto
             }
         }
 
-        _commit_start_map.clear();
-        _start_binlog_map.clear();
-        _fake_binlog_map.clear();
     } 
 
     return 0;
@@ -1348,26 +1352,10 @@ int64_t Region::read_data_cf_oldest_ts() {
     return ts;
 }
 
-bool Region::flash_back_need_read(const pb::StoreReq* request, const std::map<std::string, ExprValue>& field_value_map) {
-    std::set<std::string> req_db_tables;
-    if (request->binlog_desc().db_tables_size() > 0) {
-        for (const std::string& db_table : request->binlog_desc().db_tables()) {
-            req_db_tables.insert(db_table);
-        }
-    }
-    std::set<uint64_t> req_signs;
-    if (request->binlog_desc().signs_size() > 0) {
-        for (const uint64_t sign : request->binlog_desc().signs()) {
-            req_signs.insert(sign);
-        }
-    }
-    std::set<int64_t> req_txn_ids;
-    if (request->binlog_desc().txn_ids_size() > 0) {
-        for (const uint64_t txn_id : request->binlog_desc().txn_ids()) {
-            req_txn_ids.insert(txn_id);
-        }
-    }
-
+bool Region::flash_back_need_read(const pb::StoreReq* request, 
+                                const std::map<std::string, ExprValue>& field_value_map,
+                                const std::set<std::string>& req_db_tables,
+                                const std::set<uint64_t>& req_signs) {
     if (request->binlog_desc().has_user_name()) {
         std::string user_name = request->binlog_desc().user_name();
         if (binlog_get_str_val("user_name", field_value_map) != user_name) {
@@ -1419,12 +1407,6 @@ bool Region::flash_back_need_read(const pb::StoreReq* request, const std::map<st
         }
 
     }
-    if (!req_txn_ids.empty()) {
-        int64_t txn_id = binlog_get_int64_val("txn_id", field_value_map);
-        if (req_txn_ids.count(txn_id) <= 0) {
-            return false;
-        }
-    }
 
     return true;
 
@@ -1436,7 +1418,7 @@ void Region::read_binlog(const pb::StoreReq* request,
 
     SmartTable binlog_table = _factory->get_table_info_ptr(get_table_id());
     SmartIndex binlog_pri = _factory->get_index_info_ptr(get_table_id());
-    TimeCost timecost;
+    TimeCost cost;
     int64_t binlog_cnt = request->binlog_desc().read_binlog_cnt();
     int64_t begin_ts = request->binlog_desc().binlog_ts();
     _binlog_alarm.check_read_ts(remote_side, _region_id, begin_ts);
@@ -1540,6 +1522,23 @@ void Region::read_binlog(const pb::StoreReq* request,
     SmartRecord record = _factory->new_record(*binlog_table);
     BinlogReadMgr binlog_reader(_region_id, begin_ts, remote_side, log_id, binlog_cnt, is_read_offline_binlog);
     int ret = 0;
+
+    // SQL闪回预先插入
+    std::set<std::string> req_db_tables;
+    std::set<uint64_t> req_signs;
+    if ((request->binlog_desc().flash_back_read() || request->binlog_desc().read_offline_binlog())) {
+        if (request->binlog_desc().db_tables_size() > 0) {
+            for (const std::string& db_table : request->binlog_desc().db_tables()) {
+                req_db_tables.insert(db_table);
+            }
+        }
+        if (request->binlog_desc().signs_size() > 0) {
+            for (const uint64_t sign : request->binlog_desc().signs()) {
+                req_signs.insert(sign);
+            }
+        }
+    }
+
     while (1) {
         record->clear();
         if (!table_iter->valid()) {
@@ -1558,6 +1557,7 @@ void Region::read_binlog(const pb::StoreReq* request,
         BinlogType binlog_type = static_cast<BinlogType>(binlog_get_int64_val("binlog_type", field_value_map));
         int64_t start_ts = binlog_get_int64_val("start_ts", field_value_map);
         int64_t binlog_row_cnt = binlog_get_int64_val("binlog_row_cnt", field_value_map);
+        DB_DEBUG("ts:%ld,start_ts:%ld, binlog_type:%d", ts, start_ts, binlog_type);
         if (binlog_row_cnt <= 0) {
             binlog_row_cnt = 1;
         }
@@ -1573,6 +1573,8 @@ void Region::read_binlog(const pb::StoreReq* request,
                 response->set_errcode(pb::GET_VALUE_FAIL); 
                 response->set_errmsg("read fake binlog failed");  
                 return;
+            } else if (ret == 1) {
+                break;
             }
             continue;
         }
@@ -1583,7 +1585,7 @@ void Region::read_binlog(const pb::StoreReq* request,
 
         // SQL闪回读取时过滤
         if ((request->binlog_desc().flash_back_read() || request->binlog_desc().read_offline_binlog())
-                 && !flash_back_need_read(request, field_value_map)) {
+                 && !flash_back_need_read(request, field_value_map, req_db_tables, req_signs)) {
             continue;
         }
 
@@ -1620,6 +1622,8 @@ void Region::read_binlog(const pb::StoreReq* request,
 
     response->set_errcode(pb::SUCCESS); 
     response->set_errmsg("read binlog success");    
+    int64_t select_cost = cost.get_time();
+    Store::get_instance()->select_time_cost << select_cost;
 }
 
 // 强制往前推进check point, 删除map中首个binlog
@@ -2146,7 +2150,7 @@ void Region::update_offline_binlog_info(const pb::StoreReq& request, braft::Clos
     int ret = 0;
     const pb::RegionOfflineBinlogInfo& pb_info = request.extra_req().offline_binlog_info();
     int64_t oldest_ts = _offline_binlog_param.oldest_ts;
-    int64_t newest_ts = _offline_binlog_param.newest_ts;
+    int64_t newest_ts = std::min(_offline_binlog_param.newest_ts, pb_info.newest_ts());
     // 每次构造一个新的
     OfflineBinlogParam new_offline_info;
     // check
@@ -2237,12 +2241,9 @@ void Region::recover_offline_binlog_info(const pb::StoreReq* request, pb::StoreR
     const pb::RegionOfflineBinlogInfo& pb_info = request->extra_req().offline_binlog_info();
     int64_t oldest_ts = _offline_binlog_param.oldest_ts;
     int64_t newest_ts = _offline_binlog_param.newest_ts;
-
-    // update _offline_binlog_param
-    {
-        BAIDU_SCOPED_LOCK(_offline_binlog_param_mutex);
-        _offline_binlog_param.oldest_ts = pb_info.oldest_ts();
-        _offline_binlog_param.newest_ts = pb_info.newest_ts();
+    if (clear_offline_binlog(pb_info.oldest_ts(), pb_info.newest_ts()) != 0) {
+        IF_DONE_SET_RESPONSE(response, pb::EXEC_FAIL, "set offline binlog failed");
+        return;
     }
     response->set_errcode(pb::SUCCESS);
     response->set_errmsg("success");
@@ -2384,13 +2385,10 @@ bool Region::need_clear_offline_binlog_sst() {
     return false;
 }
 
-void Region::clear_offline_binlog() {
+// 将离线binlog重置回[start_ts,end_ts],包括时间戳和link的afs文件
+int Region::clear_offline_binlog(int64_t start_ts, int64_t end_ts) {
     if (_shutdown || _removed || !is_binlog_region() || get_version() == 0 || !is_leader()) {
-        return;
-    }
-    int backup_days = _factory->get_binlog_backup_days(_table_id);
-    if (backup_days > 0) {
-        return;
+        return -1;
     }
     // 清空region offine binlog信息
     pb::StoreReq req;
@@ -2399,15 +2397,32 @@ void Region::clear_offline_binlog() {
     req.set_region_id(_region_id);
     req.set_region_version(get_version());
     auto offline_binlog_info = req.mutable_extra_req()->mutable_offline_binlog_info();
-    offline_binlog_info->set_oldest_ts(0);
-    offline_binlog_info->set_newest_ts(0);
+    offline_binlog_info->set_oldest_ts(start_ts);
+    offline_binlog_info->set_newest_ts(end_ts);
     offline_binlog_info->set_task_start_ts(0);
     offline_binlog_info->set_task_end_ts(0);
+    OfflineSSTInfo info;
+    for (const auto& data_sst : _offline_binlog_param.data_ssts) {
+        int ret = info.parse_remote_offline_binlog_sst(data_sst.second);
+        if (ret != 0 || info.start_ts < start_ts || info.end_ts > end_ts) {
+            DB_WARNING("discard data afs file: %s", data_sst.second.c_str());
+            continue;
+        }
+        offline_binlog_info->add_external_full_path(data_sst.second);
+    }
+    for (const auto& binlog_sst : _offline_binlog_param.binlog_ssts) {
+        int ret = info.parse_remote_offline_binlog_sst(binlog_sst.second);
+        if (ret != 0 || info.start_ts < start_ts || info.end_ts > end_ts) {
+            DB_WARNING("discard data afs file: %s", binlog_sst.second.c_str());
+            continue;
+        }
+        offline_binlog_info->add_external_full_path(binlog_sst.second);
+    }
     butil::IOBuf data;
     butil::IOBufAsZeroCopyOutputStream wrapper(&data);
     if (!req.SerializeToZeroCopyStream(&wrapper)) {
         DB_FATAL("serializeToString fail, region_id: %ld", _region_id);  
-        return;
+        return -1;
     }
     BthreadCond cond;
     BinlogClosure* c = new BinlogClosure(&cond);
@@ -2422,10 +2437,10 @@ void Region::clear_offline_binlog() {
     if (res.errcode() != pb::SUCCESS) {
         DB_FATAL("region_id: %ld, sync offline binlog info: %s failed, response: %s", 
                 _region_id, req.ShortDebugString().c_str(), res.ShortDebugString().c_str());
-        return;
+        return -1;
     }
     DB_NOTICE("region_id: %ld sync offline binlog info: %s", _region_id, req.ShortDebugString().c_str());
-    return;
+    return 0;
 }
 
 int Region::write_offline_binlog_data() {
@@ -2610,13 +2625,13 @@ void Region::do_backup_binlog() {
         if (fs == nullptr) {
             return;
         }
+        // 一旦提交了raft日志, leader失败不能直接删除afs文件,可能leader异常失败,其他peer ingest成功并更新了元数据
+        // 可以等ttl一起清理afs文件
         for (const std::string& file : _offline_binlog_task.data_ssts) {
-            DB_WARNING("region_id: %ld backup fail, delete data external_file: %s", _region_id, file.c_str());
-            fs->delete_path(file, false);
+            DB_WARNING("region_id: %ld backup fail, maybe need to delete afs by hand, data external_file: %s", _region_id, file.c_str());
         }
         for (const std::string& file : _offline_binlog_task.binlog_ssts) {
-            DB_WARNING("region_id: %ld backup fail, delete binlog external_file: %s", _region_id, file.c_str());
-            fs->delete_path(file, false);
+            DB_WARNING("region_id: %ld backup fail, maybe need to delete afs by hand, binlog external_file: %s", _region_id, file.c_str());
         }
     });
     if (!is_leader()) {
@@ -2714,10 +2729,19 @@ void Region::delete_remote_expired_file() {
     std::unordered_map<std::string, int64_t> ttl_remote_files;
     std::set<std::string> list_remote_files; 
     std::shared_ptr<ExtFileSystem> fs = SstExtLinker::get_instance()->get_exteranl_filesystem();
-    ret = fs->list("", path, list_remote_files);
-    if (ret < 0) {
-        DB_FATAL("list afs path fail: %s", path.c_str());
+    std::string full_name = fs->make_full_name("", false, path);
+    if (full_name.empty()) {
+        DB_FATAL("local_file: %s make full path failed", path.c_str());
         return;
+    }
+    std::set<std::string> sub_files;
+    ret = fs->readdir(full_name, sub_files);
+    if (ret < 0) {
+        DB_FATAL("list afs path fail: %s", full_name.c_str());
+        return;
+    }
+    for (const auto& f : sub_files) {
+        list_remote_files.insert(full_name + f);
     }
     for (const auto& f : list_remote_files) {
         ret = info.parse_remote_offline_binlog_sst(f);

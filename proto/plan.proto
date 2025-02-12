@@ -89,8 +89,9 @@ message PossibleIndex {
         optional bytes right_key = 12;
         optional bool  left_full = 13;
         optional bool  right_full = 14;
-        optional int32 partition_id = 15;
-        optional int32 topk         = 16;
+        repeated int32 partition_ids = 15; // 该Range属于哪个partition，外挂分区场景可能属于多个partition
+        optional int32 topk = 16;
+        optional uint64 separate_value = 17; // 向量索引使用
     };
 
     message SortIndex {
@@ -124,10 +125,10 @@ message FulltextIndex {
 };
 
 enum DDLType {
-    DDL_NONE           = 0;
-    DDL_LOCAL_INDEX    = 1;
-    DDL_GLOBAL_INDEX   = 2;
-    DDL_COLUMN         = 3;
+    DDL_NONE                        = 0;
+    DDL_LOCAL_INDEX                 = 1;
+    DDL_GLOBAL_INDEX                = 2;
+    DDL_COLUMN                      = 3;
 };
 
 message ScanNode {
@@ -145,6 +146,8 @@ message ScanNode {
     optional bytes learner_index   = 12;
     optional DDLType ddl_work_type = 13;
     optional ColumnDdlInfo column_ddl_info = 14;
+    optional uint64 watt_stats_version = 15; // watt stats写入version幂等, 用于ROLLUP基准
+    optional int32 union_tuple_id = 16; // union子查询对应的union_tuple_id
 };
 
 message LimitNode {
@@ -165,6 +168,7 @@ message AggNode {
     repeated Expr group_exprs = 1;
     repeated Expr agg_funcs = 2;
     optional int32 agg_tuple_id = 3;
+    optional int32 arrow_ignore_tuple_id = 4;
 };
 
 message FilterNode {
@@ -179,6 +183,7 @@ enum JoinType {
     INNER_JOIN          = 3;
     SEMI_JOIN           = 4;
     ANTI_SEMI_JOIN      = 5;
+    FULL_JOIN           = 6;
 };
 
 message JoinNode {
@@ -235,6 +240,7 @@ message InsertNode {
     optional bool  ddl_need_write = 12; // ddl索引数据写入以db状态为准
     optional int64 ddl_index_id = 13;
     optional bool is_merge = 14;
+    optional uint64 watt_stats_version = 15; // watt stats写入version幂等
 };
 message LockPrimaryNode {
     required int64        table_id       = 1;
@@ -377,6 +383,7 @@ message LocalTraceNode {
     optional string            description       = 8;
     optional int64             where_filter_rows = 9;
     optional string            index_name        = 10;
+    repeated string            arrow_plan        = 11;
 };
 
 message TraceNode {

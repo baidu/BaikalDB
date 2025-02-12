@@ -17,6 +17,7 @@
 #include <rapidjson/pointer.h>
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 #include "hll_common.h"
 #include "datetime.h"
 #include <boost/date_time/gregorian/gregorian.hpp>
@@ -595,6 +596,56 @@ ExprValue concat_ws(const std::vector<ExprValue>& input) {
     return tmp;
 }
 
+ExprValue split_part(const std::vector<ExprValue>& input) {
+    // 检查输入向量的大小是否为 3
+    if (input.size() != 3) {
+        return ExprValue::Null();
+    }
+    // 检查输入向量中是否有任何一个元素为 null
+    for (const auto& s : input) {
+        if (s.is_null()) {
+            return ExprValue::Null();
+        }
+    }
+
+    // 获取输入字符串和分隔符
+    std::string str = input[0].get_string();
+    std::string delimiter = input[1].get_string();
+    // 获取要返回的部分的索引
+    int part_index = input[2].get_numberic<int>();
+
+    // 检查索引是否合法
+    if (part_index <= 0) {
+        return ExprValue::Null();
+    }
+
+    // 创建一个 ExprValue 对象，用于存储结果，类型为 STRING
+    ExprValue tmp(pb::STRING);
+
+    // 分割字符串
+    size_t start = 0;
+    size_t end = str.find(delimiter);
+    int current_part = 1;
+   
+    while (end != std::string::npos) {
+        if (current_part == part_index) {
+            tmp.str_val = str.substr(start, end - start);
+            return tmp;
+        }
+        start = end + delimiter.length();
+        end = str.find(delimiter, start);
+        current_part++;
+    }
+
+    // 检查最后一部分
+    if (current_part == part_index) {
+        tmp.str_val = str.substr(start);
+    } else {
+        tmp.str_val.clear(); // 如果索引超出范围，返回空字符串
+    }
+    return tmp;
+}
+
 ExprValue ascii(const std::vector<ExprValue>& input) {
     if (input.size() < 1) {
         return ExprValue::Null();
@@ -783,8 +834,13 @@ ExprValue instr(const std::vector<ExprValue>& input) {
 // @ref: https://dev.mysql.com/doc/refman/8.0/en/json-search-functions.html#function_json-extract
 // @ref: https://rapidjson.org/md_doc_pointer.html#JsonPointer
 ExprValue json_extract(const std::vector<ExprValue>& input) {
-    if (input.size() != 2) {
+    if (input.size() < 2) {
         return ExprValue::Null();
+    }
+
+    bool return_list = false;
+    if (input.size() > 2) {
+        return_list = true;
     }
 
     for (auto s : input) {
@@ -793,15 +849,20 @@ ExprValue json_extract(const std::vector<ExprValue>& input) {
         }
     }
     std::string json_str = input[0].get_string();
-    std::string path = input[1].get_string();
-    if (path.length() > 0 && path[0] == '$') {
-        path.erase(path.begin());
-    } else {
-        return ExprValue::Null();
+
+    std::vector<std::string> paths;
+    for (int i = 1; i < input.size(); ++i) {
+        std::string path = input[i].get_string();
+        if (path.length() > 0 && path[0] == '$') {
+            path.erase(path.begin());
+        } else {
+            return ExprValue::Null();
+        }
+        std::replace(path.begin(), path.end(), '.', '/');
+        std::replace(path.begin(), path.end(), '[', '/');
+        path.erase(std::remove(path.begin(), path.end(), ']'), path.end());
+        paths.emplace_back(path);
     }
-    std::replace(path.begin(), path.end(), '.', '/');
-    std::replace(path.begin(), path.end(), '[', '/');
-    path.erase(std::remove(path.begin(), path.end(), ']'), path.end());
 
     rapidjson::Document doc;
     try {
@@ -816,35 +877,58 @@ ExprValue json_extract(const std::vector<ExprValue>& input) {
         DB_WARNING("parse json_str error [%s]", json_str.c_str());
         return ExprValue::Null();
     }
-    rapidjson::Pointer pointer(path.c_str());
-    if (!pointer.IsValid()) {
-        DB_WARNING("invalid path: [%s]", path.c_str());
-        return ExprValue::Null();
-    }
 
-    const rapidjson::Value *pValue = rapidjson::GetValueByPointer(doc, pointer);
-    if (pValue == nullptr) {
-        DB_WARNING("the path: [%s] does not exist in doc [%s]", path.c_str(), json_str.c_str());
-        return ExprValue::Null();
+    std::vector<std::string> results;
+    for (const auto& path: paths) {
+        rapidjson::Pointer pointer(path.c_str());
+        if (!pointer.IsValid()) {
+            DB_WARNING("invalid path: [%s]", path.c_str());
+            return ExprValue::Null();
+        }
+
+        const rapidjson::Value *pValue = rapidjson::GetValueByPointer(doc, pointer);
+        if (pValue == nullptr) {
+            DB_WARNING("the path: [%s] does not exist in doc [%s]", path.c_str(), json_str.c_str());
+            continue;
+        }
+        // TODO type on fly
+        if (pValue->IsString()) {
+            results.emplace_back(pValue->GetString());
+        } else if (pValue->IsInt()) {
+            results.emplace_back(std::to_string(pValue->GetInt()));
+        } else if (pValue->IsInt64()) {
+            results.emplace_back(std::to_string(pValue->GetInt64()));
+        } else if (pValue->IsUint()) {
+            results.emplace_back(std::to_string(pValue->GetUint()));
+        } else if (pValue->IsUint64()) {
+            results.emplace_back(std::to_string(pValue->GetUint64()));
+        } else if (pValue->IsDouble()) {
+            results.emplace_back(std::to_string(pValue->GetDouble()));
+        } else if (pValue->IsFloat()) {
+            results.emplace_back(std::to_string(pValue->GetFloat()));
+        } else if (pValue->IsBool()) {
+            results.emplace_back(std::to_string(pValue->GetBool()));
+        } else if (pValue->IsObject() || pValue->IsArray()) {
+            rapidjson::StringBuffer buffer;
+            rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+            pValue->Accept(writer);
+            results.emplace_back(buffer.GetString());
+        }
     }
-    // TODO type on fly
     ExprValue tmp(pb::STRING);
-    if (pValue->IsString()) {
-        tmp.str_val = pValue->GetString();
-    } else if (pValue->IsInt()) {
-        tmp.str_val = std::to_string(pValue->GetInt());
-    } else if (pValue->IsInt64()) {
-        tmp.str_val = std::to_string(pValue->GetInt64());
-    } else if (pValue->IsUint()) {
-        tmp.str_val = std::to_string(pValue->GetUint());
-    } else if (pValue->IsUint64()) {
-        tmp.str_val = std::to_string(pValue->GetUint64());
-    } else if (pValue->IsDouble()) {
-        tmp.str_val = std::to_string(pValue->GetDouble());
-    } else if (pValue->IsFloat()) {
-        tmp.str_val = std::to_string(pValue->GetFloat());
-    } else if (pValue->IsBool()) {
-        tmp.str_val = std::to_string(pValue->GetBool());
+    if (results.empty()) {
+        return ExprValue::Null();
+    } else if (return_list) {
+        std::string return_str = "[";
+        for (const auto& it: results) {
+            return_str.append(it);
+            return_str.append(", ");
+        }
+        return_str.pop_back();
+        return_str.back() = ']';
+        tmp.str_val = return_str;
+    } else {
+        tmp.str_val = results[0];
     }
     return tmp;
 }
@@ -1857,18 +1941,24 @@ ExprValue date_add(const std::vector<ExprValue>& input) {
     } else {
         ret = arg1.cast_to(pb::STRING).cast_to(pb::TIMESTAMP);
     }
+    time_t ts = ret._u.uint32_val;
     if (input[2].str_val == "second") {
-        ret._u.uint32_val += interval;
+        date_add_interval(ts, interval, TimeUnit::SECOND);
     } else if (input[2].str_val == "minute") {
-        ret._u.uint32_val += interval * 60;
+        date_add_interval(ts, interval, TimeUnit::MINUTE);
     } else if (input[2].str_val == "hour") {
-        ret._u.uint32_val += interval * 3600;
+        date_add_interval(ts, interval, TimeUnit::HOUR);
     } else if (input[2].str_val == "day") {
-        ret._u.uint32_val += interval * (24 * 3600);
+        date_add_interval(ts, interval, TimeUnit::DAY);
+    } else if (input[2].str_val == "month") {
+        date_add_interval(ts, interval, TimeUnit::MONTH);
+    } else if (input[2].str_val == "year") {
+        date_add_interval(ts, interval, TimeUnit::YEAR);
     } else {
         // un-support
         return ExprValue::Null();
     }
+    ret._u.uint32_val = ts;
     return ret;
 }
 
@@ -1890,18 +1980,24 @@ ExprValue date_sub(const std::vector<ExprValue>& input) {
     } else {
         ret = arg1.cast_to(pb::STRING).cast_to(pb::TIMESTAMP);
     }
+    time_t ts = ret._u.uint32_val;
     if (input[2].str_val == "second") {
-        ret._u.uint32_val -= interval;
+        date_sub_interval(ts, interval, TimeUnit::SECOND);
     } else if (input[2].str_val == "minute") {
-        ret._u.uint32_val -= interval * 60;
+        date_sub_interval(ts, interval, TimeUnit::MINUTE);
     } else if (input[2].str_val == "hour") {
-        ret._u.uint32_val -= interval * 3600;
+        date_sub_interval(ts, interval, TimeUnit::HOUR);
     } else if (input[2].str_val == "day") {
-        ret._u.uint32_val -= interval * (24 * 3600);
+        date_sub_interval(ts, interval, TimeUnit::DAY);
+    } else if (input[2].str_val == "month") {
+        date_sub_interval(ts, interval, TimeUnit::MONTH);
+    } else if (input[2].str_val == "year") {
+        date_sub_interval(ts, interval, TimeUnit::YEAR);
     } else {
         // un-support
         return ExprValue::Null();
     }
+    ret._u.uint32_val = ts;
     return ret;
 }
 
@@ -2082,7 +2178,7 @@ ExprValue case_expr_when(const std::vector<ExprValue>& input) {
     for (size_t i = 0; i < (input.size() - 1) / 2; ++i) {
         auto if_index = i * 2 + 1;
         auto then_index = i * 2 + 2;
-        if (input[0].compare(input[if_index]) == 0) {
+        if (const_cast<ExprValue&>(input[0]).compare_diff_type(const_cast<ExprValue&>(input[if_index])) == 0) {
             return input[then_index];
         }
     }

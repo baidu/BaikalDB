@@ -23,6 +23,7 @@
 #include "sorter.h"
 #include "mem_row_compare.h"
 #include "fetcher_store.h"
+#include "arrow_io_excutor.h"
 
 namespace baikaldb {
 struct FetcherInfo {
@@ -44,25 +45,25 @@ public:
         _factory = SchemaFactory::get_instance();
     }
     virtual ~SelectManagerNode() {
-        for (auto expr : _derived_table_projections) {
-            ExprNode::destroy_tree(expr);
+    }
+    virtual bool can_use_arrow_vector() {
+        for (auto& c : _children) {
+            if (!c->can_use_arrow_vector()) {
+                return false;
+            }
         }
-        if (_sub_query_node != nullptr) {
-            delete _sub_query_node;
-            _sub_query_node = nullptr;
-        }
+        return true;
     }
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state) {
         ExecNode::close(state);
-        if (_sub_query_node != nullptr) {
-            _sub_query_node->close(state);
-        }
-        for (auto expr : _derived_table_projections) {
-            expr->close();
-        }
         _sorter = nullptr;
+        _region_batches.clear();
+        _arrow_responses.clear();
+        _arrow_schema.reset();
+        _is_dual_scan = false;
+        _arrow_io_executor.reset();
     }
     int init_sort_info(SortNode* sort_node) {
         _slot_order_exprs = sort_node->slot_order_exprs();
@@ -88,25 +89,36 @@ public:
                           int64_t main_table_id,
                           LimitNode* limit = nullptr);
 
-    void set_sub_query_runtime_state(RuntimeState* state) {
-        _sub_query_runtime_state = state;
-    }
-    void steal_projections(std::vector<ExprNode*>& projections) {
-        _derived_table_projections.swap(projections);
-    }
-
-    void set_sub_query_node(ExecNode* sub_query_node) {
-        _sub_query_node = sub_query_node;
-    }
+    int construct_primary_possible_index_vectorize(
+                      FetcherStore& fetcher_store,
+                      ScanIndexInfo* scan_index_info,
+                      RuntimeState* state,
+                      ExecNode* exec_node,
+                      int64_t main_table_id,
+                      SmartIndex pri_info,
+                      LimitNode* limit);
 
     int subquery_open(RuntimeState* state);
 
-    void set_slot_column_mapping(std::map<int32_t, int32_t>& slot_column_map) {
-        _slot_column_mapping.swap(slot_column_map);
+    int delay_fetcher_store(RuntimeState* state);
+
+    virtual int build_arrow_declaration(RuntimeState* state);
+
+    std::vector<RegionReturnData>& get_region_batches() {
+        return _region_batches;
     }
-    void set_derived_tuple_id(int32_t derived_tuple_id) {
-        _derived_tuple_id = derived_tuple_id;
+
+    const std::shared_ptr<arrow::Schema>& get_arrow_schema() {
+        return _arrow_schema;
     }
+
+    int32_t get_scan_tuple_id() {
+        return _scan_tuple_id;
+    }
+    bool need_sorter() {
+        return _slot_order_exprs.size() > 0;
+    }
+
 private:
     //允许fetcher回来后排序
     std::vector<ExprNode*> _slot_order_exprs;
@@ -114,13 +126,44 @@ private:
     std::vector<bool> _is_null_first;
     std::shared_ptr<MemRowCompare> _mem_row_compare;
     std::shared_ptr<Sorter> _sorter;
-    std::map<int32_t, int32_t> _index_slot_field_map;
     SchemaFactory*  _factory = nullptr;
-    RuntimeState*   _sub_query_runtime_state = nullptr;
-    ExecNode*       _sub_query_node = nullptr;
-    std::vector<ExprNode*>  _derived_table_projections;
-    std::map<int32_t, int32_t>  _slot_column_mapping;
-    int32_t         _derived_tuple_id = 0;
+    int32_t         _scan_tuple_id = 0;
+    bool            _is_dual_scan = false;
+
+    // vectorized
+    std::vector<std::shared_ptr<pb::StoreRes>> _arrow_responses;
+    std::shared_ptr<arrow::Schema> _arrow_schema;
+    std::vector<RegionReturnData>  _region_batches;
+    std::shared_ptr<BthreadArrowExecutor> _arrow_io_executor;
+};
+
+class FetcherStoreVectorizedReader : public arrow::RecordBatchReader {
+public:
+    FetcherStoreVectorizedReader() {}
+    virtual ~FetcherStoreVectorizedReader() {}
+
+    // for streaming output use
+    std::shared_ptr<arrow::Schema> schema() const override { 
+        return _schema;
+    }
+
+    int init(SelectManagerNode* select_node, RuntimeState* state);
+    
+    arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* out) override;
+
+    int transfer_row_batch_to_arrow(const std::shared_ptr<RowBatch>& row_batch, std::shared_ptr<arrow::RecordBatch>* out);
+
+private:
+    SelectManagerNode* _select_node = nullptr;
+    RuntimeState* _state = nullptr;
+    std::shared_ptr<arrow::Schema> _schema;
+    bool _eos = false;
+    bool _need_fetcher_store = false;
+    bool _need_check_arrow_schema = false;
+    int _record_batch_idx = 0;
+    int64_t _row_idx_in_record_batch = 0;
+    std::shared_ptr<Chunk> _chunk;
+    std::vector<const pb::TupleDescriptor*> _tuples;
 };
 }
 

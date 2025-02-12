@@ -24,6 +24,7 @@ class RegionControl {
 typedef std::shared_ptr<Region> SmartRegion;
 public:
     static int remove_data(int64_t drop_region_id);
+    static int remove_data(int64_t drop_region_id, int64_t drop_index_id); // 用于只删除索引
     static void compact_data(int64_t region_id);
     static void compact_data_in_queue(int64_t region_id);
     static int remove_log_entry(int64_t drop_region_id);
@@ -34,6 +35,7 @@ public:
     static int ingest_meta_sst(const std::string& meta_sst_file, int64_t region_id);
     static int remove_cold_data(int64_t drop_region_id);
     static int remove_cold_binlog(int64_t drop_region_id);
+    static int remove_cold_index_data(int64_t drop_region_id, int64_t drop_index_id);
     static int remove_expired_offline_data(int64_t region_id, int64_t table_id, int64_t ttl_ts, int64_t newest_ts);
 
     RegionControl(Region* region, int64_t region_id): _region(region), _region_id(region_id) {}

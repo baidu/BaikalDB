@@ -81,10 +81,10 @@ int InsertManagerNode::init_insert_info(InsertNode* insert_node, bool is_local) 
         DB_WARNING("no table found with table_id: %ld", _table_id);
         return -1;
     }
-    if (_is_merge && _table_info->indices.size() > 1) {
-        DB_FATAL("table_id: %ld has multi index not support merge", _table_id);
-        return -1;
-    }
+    // if (_is_merge && _table_info->indices.size() > 1) {
+    //     DB_FATAL("table_id: %ld has multi index not support merge", _table_id);
+    //     return -1;
+    // }
     for (const auto index_id : _table_info->indices) {
         auto info_ptr = _factory->get_index_info_ptr(index_id);
         if (info_ptr == nullptr) {
@@ -213,7 +213,7 @@ int InsertManagerNode::subquery_open(RuntimeState* state) {
                 } else {
                     result.cast_to(field_type);
                 }
-                record->set_value(record->get_field_by_idx(_selected_field_ids[i] - 1), result);
+                record->set_value(record->get_field_by_tag(_selected_field_ids[i]), result);
             }
             for (auto& field : default_fields) {
                 if (0 != _factory->fill_default_value(record, *field)) {
@@ -335,9 +335,9 @@ int InsertManagerNode::open(RuntimeState* state) {
         if (_values_tuple_id >= 0) {
             _values_tuple_desc = state->get_tuple_desc(_values_tuple_id);
         }
-        ret =  insert_on_dup_key_update(state);
+        ret = insert_on_dup_key_update(state);
     } else {
-        ret =  basic_insert(state);
+        ret = basic_insert(state);
     }
     if (ret >=0) {
         process_binlog(state, false);

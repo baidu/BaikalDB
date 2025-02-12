@@ -114,9 +114,9 @@ void ExecNode::remove_additional_predicate(std::vector<ExprNode*>& input_exprs) 
     }
 }
 
-void ExecNode::add_filter_node(const std::vector<ExprNode*>& input_exprs) {
+void ExecNode::add_filter_node(const std::vector<ExprNode*>& input_exprs, pb::PlanNodeType type) {
     pb::PlanNode pb_plan_node;
-    pb_plan_node.set_node_type(pb::TABLE_FILTER_NODE);
+    pb_plan_node.set_node_type(type);
     pb_plan_node.set_num_children(1);
     pb_plan_node.set_is_explain(_is_explain);
     pb_plan_node.set_limit(-1);
@@ -126,6 +126,20 @@ void ExecNode::add_filter_node(const std::vector<ExprNode*>& input_exprs) {
     filter_node->add_child(this);
     for (auto& expr : input_exprs) {
         filter_node->add_conjunct(expr);
+    }
+}
+
+void ExecNode::add_filter_node_as_child(const std::vector<ExprNode*>& input_exprs, pb::PlanNodeType type) {
+    if (_children.size() == 1) {
+        _children[0]->add_filter_node(input_exprs, type);
+    } else {
+        DB_FATAL("Fail to add_filter_node_as_child");
+    }
+}
+
+void ExecNode::get_all_dual_scan_node(std::vector<ExecNode*>& exec_nodes) {
+    for (auto c : _children) {
+        c->get_all_dual_scan_node(exec_nodes);
     }
 }
 
@@ -161,6 +175,43 @@ ExecNode* ExecNode::get_node(const pb::PlanNodeType node_type) {
             }
         }
         return nullptr;
+    }
+}
+
+ExecNode* ExecNode::get_node_pass_subquery(const pb::PlanNodeType node_type) {
+    if (_node_type == node_type) {
+        return this;
+    }
+    if (_node_type == pb::DUAL_SCAN_NODE) {
+        DualScanNode* dual_scan_node = static_cast<DualScanNode*>(this);
+        ExecNode* sub_query_node = dual_scan_node->sub_query_node();
+        if (sub_query_node == nullptr) {
+            return nullptr;
+        }
+        return sub_query_node->get_node_pass_subquery(node_type);
+    }
+    for (auto c : _children) {
+        ExecNode* node = c->get_node_pass_subquery(node_type);
+        if (node != nullptr) {
+            return node;
+        }
+    }
+    return nullptr;
+}
+
+void ExecNode::get_node_pass_subquery(const pb::PlanNodeType node_type, std::vector<ExecNode*>& exec_nodes) {
+    if (_node_type == node_type) {
+        exec_nodes.emplace_back(this);
+    }
+    if (_node_type == pb::DUAL_SCAN_NODE) {
+        DualScanNode* dual_scan_node = static_cast<DualScanNode*>(this);
+        ExecNode* sub_query_node = dual_scan_node->sub_query_node();
+        if (sub_query_node != nullptr) {
+            sub_query_node->get_node_pass_subquery(node_type, exec_nodes);
+        }
+    }
+    for (auto c : _children) {
+        c->get_node_pass_subquery(node_type, exec_nodes);
     }
 }
 
@@ -218,6 +269,9 @@ int ExecNode::open(RuntimeState* state) {
         ret = c->open(state);
         if (ret < 0) {
             return ret;
+        }
+        if (c->node_exec_type() == pb::EXEC_ARROW_ACERO) {
+            _node_exec_type = pb::EXEC_ARROW_ACERO;
         }
         num_affected_rows += ret;
     }

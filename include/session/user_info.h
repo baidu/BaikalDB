@@ -128,6 +128,9 @@ public:
     }
 
     bool allow_op_v1(pb::OpType op_type, int64_t db, int64_t tbl, const std::string& table_name) {
+        if (is_super) {
+            return true;
+        }
         if (op_type == pb::OP_SELECT) {
             return allow_read(db, tbl, table_name);
         } else {
@@ -148,6 +151,9 @@ public:
 
     bool allow_ddl() {
         if (!FLAGS_need_verify_ddl_permission) {
+            return true;
+        }
+        if (is_super) {
             return true;
         }
         return ddl_permission;
@@ -212,6 +218,9 @@ public:
     bool            ddl_permission = false;
     bool            use_read_index = true; // 上线先默认true
     bool            enable_plan_cache = false;
+    bool            is_super = false;
+    bool            is_request_additional = false;
+
 
     pb::RangePartitionType request_range_partition_type = pb::RPT_DEFAULT;
 
@@ -229,5 +238,6 @@ public:
     std::set<int64_t> all_database;
     std::unordered_set<std::string> auth_ip_set;
     std::string resource_tag;
+    std::unordered_set<int64_t> switch_tables;
 };
 } // namespace baikaldb

@@ -129,10 +129,12 @@ struct QueryStat {
 struct ExprParams {
     bool is_expr_subquery = false;
     bool is_correlated_subquery = false;
+    bool is_from_subquery = false;
     parser::FuncType    func_type = parser::FT_COMMON;
     parser::CompareType cmp_type  = parser::CMP_ANY;
     // (a,b) in (select a,b from t) row_filed_number=2
     int  row_filed_number  = 1;
+    bool is_union_subquery = false;
 };
 
 class QueryContext {
@@ -226,11 +228,32 @@ public:
     // 用于PreparePlanner和PlanCache复制QueryContext
     int copy_query_context(QueryContext* p_query_context);
 
+    // 用于最外层查询获取所有的子查询QueryContext
+    void get_all_derived_table_ctx_mapping(std::map<int32_t, std::shared_ptr<QueryContext>>& m) {
+        for (auto& kv : derived_table_ctx_mapping) {
+            m[kv.first] = kv.second;
+            if (kv.second != nullptr) {
+                kv.second->get_all_derived_table_ctx_mapping(m);
+            }
+        }
+    }
+    // 用于最外层查询获取所有的子查询slot_column_mapping
+    void get_all_slot_column_mapping(std::map<int32_t, std::map<int32_t, int32_t>>& m) {
+        for (auto& kv : slot_column_mapping) {
+            m[kv.first] = kv.second;
+        }
+        for (auto& kv : derived_table_ctx_mapping) {
+            if (kv.second != nullptr) {
+                kv.second->get_all_slot_column_mapping(m);
+            }
+        }
+    }
+
 public:
     std::string         sql;
     std::vector<std::string> comments;
     std::string         cur_db;
-    std::string         charset;
+    pb::Charset         charset = pb::CS_UNKNOWN; // Connection charset
     pb::TraceNode       trace_node;
 
     // new sql parser data structs
@@ -247,6 +270,7 @@ public:
     uint8_t             mysql_cmd = COM_SLEEP;      // Command number in mysql protocal.
     int                 type;           // Query type. finer than mysql_cmd.
     int64_t             row_ttl_duration = 0; // used for /*{"duration": xxx}*/ insert ...
+    uint64_t            watt_stats_version = 0; // used for /*{"watt_stats_version": xxx}*/ insert merge into ...
     QueryStat           stat_info;      // query execute result status info
     std::shared_ptr<UserInfo> user_info;
 
@@ -283,7 +307,7 @@ public:
     // tuple_id: field: slot_id
     std::map<int64_t, std::map<std::string, int32_t>> ref_slot_id_mapping;
     // tuple_id: slot_id: column_id
-    std::map<int64_t, std::map<int32_t, int32_t>>     slot_column_mapping;
+    std::map<int64_t, std::map<int32_t, int32_t>> slot_column_mapping;
     std::map<int64_t, std::shared_ptr<QueryContext>> derived_table_ctx_mapping;
     // 当前sql涉及的所有tuple
     std::set<int64_t>   current_tuple_ids;
@@ -291,6 +315,7 @@ public:
     std::set<int64_t>   current_table_tuple_ids;
     bool                open_binlog = false;
     bool                no_binlog = false; // 用于控制DM导入是否写binlog
+    SignExecType        sql_exec_type_defined = SignExecType::SIGN_EXEC_NOT_SET;
 
     // user can scan data in specific region by comments 
     // /*{"region_id":$region_id}*/ preceding a Select statement 
@@ -318,9 +343,13 @@ public:
     std::map<int32_t, int> field_range_type;
     std::set<uint64_t> sign_blacklist;
     std::set<uint64_t> sign_forcelearner;
+    std::set<uint64_t> sign_rolling;
     std::map<uint64_t, std::map<int64_t, std::set<std::string>>> sign_forceindex; // sign => <table_id, index_name_set>
 
     std::map<int64_t, std::vector<std::string>> table_partition_names;
+    std::map<uint64_t, SignExecType> sign_exec_type;
+
+    std::map<std::string, std::string> table_with_clause_mapping;
 
     // for base subscribe
     bool                is_base_subscribe = false;
@@ -334,7 +363,24 @@ public:
     bool has_find_placeholder = false;
     PlanCacheKey cache_key;
     std::unordered_map<int64_t, int64_t> table_version_map;
+    bool has_unable_cache_expr = false;
 
+    // 单表编码转换
+    bool need_convert_charset = false;
+    pb::Charset table_charset = pb::CS_UNKNOWN;
+
+    // 是否为from型子查询
+    bool is_from_subquery = false;
+    int  sub_query_level = 0;
+
+    // 是否为Union型子查询
+    bool is_union_subquery = false;
+
+    bool table_can_use_arrow_vectorize = true;
+    // 是否是with语句
+    bool is_with = false;
+    // 是否是create view语句
+    bool is_create_view = false;
 private:
     std::vector<pb::TupleDescriptor> _tuple_descs;
     bthread::Mutex _kill_lock;

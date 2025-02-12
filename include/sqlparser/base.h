@@ -69,20 +69,24 @@ enum NodeType {
     NT_TABLE_OPT,
     NT_PARTITION_OPT,
     NT_CREATE_TABLE, // CreateTableStmt in ddl.h
+    NT_CREATE_VIEW,  // CreateViewStmt in ddl.h
     NT_FLOAT_OPT,    
     NT_TYPE_OPT,     // TypeOption (unsigned, zerofill) 
     NT_FIELD_TYPE,   // TypeOption (unsigned, zerofill) 
     NT_DROP_TABLE,
+    NT_DROP_VIEW,
     NT_RESTORE_TABLE,
     NT_DATABASE_OPT,
     NT_CREATE_DATABASE,
     NT_DROP_DATABASE,
     NT_ALTER_TABLE,
+    NT_ALTER_VIEW,
     NT_ALTER_SEPC,
     NT_FIELDS,
     NT_FIELDS_ITEM,
     NT_LINES,
     NT_LOAD_DATA,
+    NT_WITH,
 
     /*Account Management Statements*/
     NT_CREATE_USER,

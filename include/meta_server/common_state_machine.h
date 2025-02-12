@@ -38,12 +38,18 @@ struct MetaServerClosure : public braft::Closure {
     int64_t total_time_cost;
     TimeCost time_cost;
 
-    pb::SchemaInfo create_table_schema_pb;
-    bool whether_level_table;
+    pb::OpType op_type;
+    pb::SchemaInfo schema_pb;
     std::shared_ptr<std::vector<pb::InitRegion>> init_regions;
+    int ret = -1;
+
+    // create table
     bool has_auto_increment = false;
     int64_t start_region_id;
-    int create_table_ret = -1;
+
+    // add partition
+    pb::MetaManagerRequest add_request;
+    pb::MetaManagerRequest drop_request;
 };
 
 struct TsoClosure : public braft::Closure {

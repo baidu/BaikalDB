@@ -68,35 +68,36 @@ public:
         _buffer = val;
         arrow::io::BufferReader buf_reader((const uint8_t*)(_buffer.data()), _buffer.size());
 
-        auto rex = arrow::ipc::ReadRecordBatch(get_arrow_schema(), nullptr, &buf_reader, &_result);
-        if (rex.ok()) {
+        auto ret = arrow::ipc::ReadRecordBatch(get_arrow_schema(), nullptr, arrow::ipc::IpcReadOptions::Defaults(), &buf_reader);
+        if (ret.ok()) {
+            _result = std::move(ret).ValueOrDie();
             set_internal_info();
         } else {
-            DB_WARNING("parser from string error [%s].", rex.ToString().c_str());
+            DB_WARNING("parser from string error [%s].", (*ret)->ToString().c_str());
         }
-        return rex.ok();
+        return ret.ok();
     }
 
     //不拷贝，data生命周期必须比该类长
     bool ParseFromArray(const char* data, size_t size) {
         arrow::io::BufferReader buf_reader((unsigned char*)data, size);
-        auto rex = arrow::ipc::ReadRecordBatch(get_arrow_schema(), nullptr, &buf_reader, &_result);
-        if (rex.ok()) {
+        auto ret = arrow::ipc::ReadRecordBatch(get_arrow_schema(), nullptr, arrow::ipc::IpcReadOptions::Defaults(), &buf_reader);
+        if (ret.ok()) {
+            _result = std::move(ret).ValueOrDie();
             set_internal_info();
         } else {
-            DB_WARNING("parser from array error [%s].", rex.ToString().c_str());
+            DB_WARNING("parser from array error [%s]. ", (*ret)->ToString().c_str());
         }
-        return rex.ok();
+        return ret.ok();
     }
 
     bool SerializeToString(std::string* val) const {
-        std::shared_ptr<arrow::Buffer> buffer;
-        auto status = arrow::ipc::SerializeRecordBatch(*_result, arrow::default_memory_pool(), &buffer);
-        if (!status.ok()) {
-            DB_WARNING("serializeToString error [%s].", status.ToString().c_str());
+        auto ret = arrow::ipc::SerializeRecordBatch(*_result, arrow::ipc::IpcWriteOptions::Defaults());
+        if (!ret.ok()) {
+            DB_WARNING("serializeToString error [%s].", ret.status().ToString().c_str());
             return false;
         }
-        *val = buffer->ToString();
+        *val = (*ret)->ToString();
         return true;
     }
 

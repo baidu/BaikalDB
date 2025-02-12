@@ -44,7 +44,8 @@ enum IndexHint {
         return true;
     }
 
-    void calc_index_range(int64_t partition_field_id, const std::map<std::string, int64_t>& expr_partition_map);
+    void calc_index_range(
+            int64_t partition_field_id, const std::map<std::string, std::unordered_set<int64_t>>& expr_partition_map);
 
     void calc_index_match(Property& sort_property) {
         fetch_field_ids();
@@ -150,6 +151,13 @@ enum IndexHint {
         return _need_filter;
     }
     
+    bool pushed_join_on_condition() {
+        return _pushed_join_on_condition;
+    }
+
+    void set_pushed_join_on_condition(bool pushed) {
+        _pushed_join_on_condition = pushed;
+    }
 public:
     //TODO 先mock一个，后面从schema读取
     static const int64_t INDEX_SEEK_FACTOR = 1;
@@ -194,6 +202,7 @@ public:
     bool _in_pred = false;
     bool _is_eq_or_in = true;
     bool _need_filter = false;
+    bool _pushed_join_on_condition = false;
 };
 typedef std::shared_ptr<AccessPath> SmartPath;
 }

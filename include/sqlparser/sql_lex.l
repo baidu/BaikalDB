@@ -89,6 +89,7 @@ FOR { return FOR; }
 FORCE { return FORCE; }
 FOREIGN { return FOREIGN; }
 FROM { return FROM; }
+FULL { return FULL; }
 FULLTEXT { return FULLTEXT; }
 GENERATED { return GENERATED; }
 GRANT { return GRANT; }
@@ -393,6 +394,7 @@ HLL { un_reserved_keyword(yylval, yyscanner, parser); return HLL; }
 BITMAP { un_reserved_keyword(yylval, yyscanner, parser); return BITMAP; }
 TDIGEST { un_reserved_keyword(yylval, yyscanner, parser); return TDIGEST; }
 LEARNER { un_reserved_keyword(yylval, yyscanner, parser); return LEARNER; }
+ROLLUP { un_reserved_keyword(yylval, yyscanner, parser); return ROLLUP; }
 
 ADDDATE { un_reserved_keyword(yylval, yyscanner, parser); return ADDDATE; /* The following tokens belong to builtin functions. */}
 BIT_AND { un_reserved_keyword(yylval, yyscanner, parser); return BIT_AND; }

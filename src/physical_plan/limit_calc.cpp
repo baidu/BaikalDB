@@ -53,6 +53,7 @@ void LimitCalc::_analyze_limit(QueryContext* ctx, ExecNode* node, int64_t limit)
         case pb::HAVING_FILTER_NODE: 
         case pb::SORT_NODE:
         case pb::AGG_NODE:
+        case pb::UNION_NODE:
             return;
         default:
             break;
@@ -75,6 +76,11 @@ void LimitCalc::_analyze_limit(QueryContext* ctx, ExecNode* node, int64_t limit)
             return;
         }
         if (join_node->join_type() == pb::RIGHT_JOIN) {
+            _analyze_limit(ctx, join_node->children(1), limit);
+            return;
+        }
+        if (join_node->join_type() == pb::FULL_JOIN) {
+            _analyze_limit(ctx, join_node->children(0), limit);
             _analyze_limit(ctx, join_node->children(1), limit);
             return;
         }

@@ -54,12 +54,22 @@ public:
         }
         return true;
     }
+    
+    bool is_empty_filter() {
+        //只有scan_node做索引条件的时候会用_pruned_conjuncts
+        if (_children.size() > 0 && _children[0]->node_type() == pb::SCAN_NODE) {
+            return _pruned_conjuncts.empty();
+        } else {
+            return _conjuncts.empty();
+        }
+    }
 
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state);
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
-
+    virtual bool can_use_arrow_vector();
+    virtual int build_arrow_declaration(RuntimeState* state);
     virtual void find_place_holder(std::unordered_multimap<int, ExprNode*>& placeholders) {
         ExecNode::find_place_holder(placeholders);
         for (auto& expr : _conjuncts) {
@@ -107,14 +117,7 @@ public:
         }
     }
 
-    bool is_empty_filter() {
-        //只有scan_node做索引条件的时候会用_pruned_conjuncts
-        if (_children.size() > 0 && _children[0]->node_type() == pb::SCAN_NODE) {
-            return _pruned_conjuncts.empty();
-        } else {
-            return _conjuncts.empty();
-        }
-    }
+    int arrow_steal_conjuncts(std::vector<arrow::compute::Expression>& conjuncts, int64_t& limit);
 
 private:
     bool need_copy(MemRow* row);

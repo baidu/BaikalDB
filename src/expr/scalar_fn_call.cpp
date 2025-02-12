@@ -81,7 +81,8 @@ int ScalarFnCall::type_inferer() {
     std::vector<pb::PrimitiveType> types;
     for (auto c : _children) {
         if (c->col_type() == pb::INVALID_TYPE && !c->is_row_expr()) {
-            DB_WARNING("_children is pb::INVALID_TYPE, node:%d", c->node_type());
+            DB_WARNING("_children is pb::INVALID_TYPE, fn:%s, node:%d, tuple:%d, slot:%d", 
+                    _fn.ShortDebugString().c_str(), c->node_type(), c->tuple_id(), c->slot_id());
             return -1;
         }
         if (is_logical_and_or_not()) {
@@ -235,6 +236,48 @@ ExprValue ScalarFnCall::get_value(const ExprValue& value) {
         args[i].cast_to(_fn.arg_types(i));
     }
     return _fn_call(args).cast_to(_col_type);
+}
+
+bool ScalarFnCall::can_use_arrow_vector() {
+    if (_node_type != pb::ExprNodeType::FUNCTION_CALL) {
+        return false;
+    }
+    if (_fn.fn_op() == parser::FT_MATCH_AGAINST) {
+        return true;
+    }
+    _is_row_expr = (children_size() > 0 && children(0)->is_row_expr());
+    _arrow_fn_call = ArrowFunctionManager::instance()->get_func(_fn.fn_op(), _fn.name(), _is_row_expr);
+    if (_arrow_fn_call == nullptr) {
+        return false;
+    }
+    for (auto& c : _children) {
+        if (!c->can_use_arrow_vector()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+int ScalarFnCall::transfer_to_arrow_expression() {
+    if (_fn.fn_op() == parser::FT_MATCH_AGAINST) {
+        arrow::Datum bool_null(arrow::MakeNullScalar(arrow::boolean()));
+        _arrow_expr = arrow::compute::literal(bool_null);
+        return 0;
+    }
+    if (_arrow_fn_call == nullptr) {
+        _arrow_fn_call = ArrowFunctionManager::instance()->get_func(_fn.fn_op(), _fn.name(), _is_row_expr);
+    }
+    if (_arrow_fn_call == nullptr) {
+        DB_FATAL("get arrow_fn_call failed. fn_op: %d, name: %s, is_row_expr: %d", 
+            _fn.fn_op(), _fn.name().c_str(), _is_row_expr);
+        return -1;
+    }
+    if (0 != _arrow_fn_call(_children, &_fn, _col_type, _arrow_expr)) {
+        DB_FATAL("build arrow expression failed. fn_op: %d, name: %s, is_row_expr: %d", 
+            _fn.fn_op(), _fn.name().c_str(), _is_row_expr);
+        return -1;
+    }
+    return 0;
 }
 
 }

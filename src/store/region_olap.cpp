@@ -60,7 +60,9 @@ bool Region::need_flush_to_cold_rocksdb() {
     if (get_timecost() < FLAGS_hot_rocksdb_truncate_interval_s * 1000000LL) {
         return false;
     }
-
+    if (_rollup_region_init_index != -1) {
+        return false;
+    }
     // 检查raft状态相当比较健康时再处理flush
     braft::NodeStatus status;
     _node.get_status(&status);
@@ -94,7 +96,7 @@ bool Region::need_flush_to_cold_rocksdb() {
             }
         }
     }
-    
+
     return false;
 }
 
@@ -213,80 +215,6 @@ int Region::modify_olap_region_num_table_lines() {
     return 0;
 }
 
-int Region::get_hot_sst(bool do_compaction_if_need, std::vector<rocksdb::LiveFileMetaData>& sst_file_meta) {
-    sst_file_meta.clear();
-    TimeCost cost;
-    bool need_flush = true;
-    bool need_compaction = false;
-    // 列出所有的sst
-    std::vector<rocksdb::LiveFileMetaData> metadata;
-    _rocksdb->get_db()->GetLiveFilesMetaData(&metadata);
-    for (const auto& md : metadata) {
-        if (md.column_family_name == RocksWrapper::DATA_CF) {
-            TableKey smallestkey(md.smallestkey);
-            TableKey largestkey(md.largestkey);
-            int64_t smallest_region_id = smallestkey.extract_i64(0);
-            int64_t largest_region_id  = largestkey.extract_i64(0);
-            if (smallest_region_id == largest_region_id && smallest_region_id == get_region_id()) {
-                // 只有sst数据全部属于这个region才可以拷贝
-                sst_file_meta.emplace_back(md);
-            } else if (smallest_region_id <= get_region_id() && get_region_id() <= largest_region_id) {
-                // sst混合了该region和其他region的数据，不能flush
-                sst_file_meta.emplace_back(md);
-                need_compaction = true;
-                need_flush = false;
-            }
-        }
-    }
-
-    bool doing_compaction = false;
-    for (const auto& md : sst_file_meta) {
-        print_metadata_info(md);
-        if (md.being_compacted) {
-            // 正在compaction暂时不执行
-            doing_compaction = true;
-            need_flush = false;
-        }
-
-        if (md.level != 6) {
-            // 不是在最后一层需要触发compaction后执行
-            need_compaction = true;
-            need_flush = false;
-        }
-    }
-
-    if (need_compaction && !doing_compaction && do_compaction_if_need) {
-        compact_data_in_queue();
-    }
-
-    if (!need_flush) {
-        sst_file_meta.clear();
-        return -1;
-    }
-
-    return 0;
-}
-
-int Region::check_hot_sst(const std::vector<rocksdb::LiveFileMetaData>& sst_files) {
-    std::vector<rocksdb::LiveFileMetaData> tmp_sst_files;
-    int ret = get_hot_sst(false, tmp_sst_files);
-    if (ret < 0) {
-        DB_FATAL("region_id: %ld get live sst failed", _region_id);
-        return -1;
-    }
-
-    std::set<std::string> set1;
-    std::set<std::string> set2;
-    for (const auto& info : sst_files) {
-        set1.insert(info.relative_filename);
-    }
-    for (const auto& info : tmp_sst_files) {
-        set2.insert(info.relative_filename);
-    }
-
-    return set_diff(set1, set2) ? -1 : 0;
-}
-
 // 校验cold rocksdb中的sst
 int Region::get_cold_sst(std::set<std::string>& sst_relative_filename) {
     TimeCost cost;
@@ -296,7 +224,6 @@ int Region::get_cold_sst(std::set<std::string>& sst_relative_filename) {
     std::vector<rocksdb::LiveFileMetaData> metadata;
     _rocksdb->get_cold_live_files(&metadata);
     for (const auto& md : metadata) {
-        print_metadata_info(md);
         if (md.column_family_name != RocksWrapper::COLD_DATA_CF) {
             continue;
         }
@@ -326,6 +253,51 @@ int Region::get_cold_sst(std::set<std::string>& sst_relative_filename) {
         }
 
         sst_relative_filename.insert(md.relative_filename);
+    }
+
+    return 0;
+}
+
+
+int Region::get_cold_sst(std::set<std::string>& sst_relative_filename, std::set<int64_t>& index_ids) { 
+    TimeCost cost;
+    std::vector<rocksdb::LiveFileMetaData> metadata_copy;
+    metadata_copy.reserve(5);
+    // 列出所有的sst
+    std::vector<rocksdb::LiveFileMetaData> metadata;
+    _rocksdb->get_cold_live_files(&metadata);
+    for (const auto& md : metadata) {
+        if (md.column_family_name != RocksWrapper::COLD_DATA_CF) {
+            continue;
+        }
+        TableKey smallestkey(md.smallestkey);
+        TableKey largestkey(md.largestkey);
+        int64_t smallest_region_id = smallestkey.extract_i64(0);
+        int64_t largest_region_id  = largestkey.extract_i64(0);
+        if (smallest_region_id == largest_region_id && smallest_region_id == get_region_id()) {
+            metadata_copy.emplace_back(md);
+        } else if (smallest_region_id <= get_region_id() && get_region_id() <= largest_region_id) {
+            // sst混合了该region和其他region的数据
+            print_metadata_info(md);
+            metadata_copy.clear();
+            DB_FATAL("region_id: %ld, check sst failed, sst_name: %s", _region_id, md.relative_filename.c_str());
+            return -1;
+        }
+    }
+
+    for (const auto& md : metadata_copy) {
+        print_metadata_info(md);
+        if (md.being_compacted) {
+            return -1;
+        }
+
+        if (md.level != 6) {
+            return -1;
+        }
+
+        sst_relative_filename.insert(md.relative_filename);
+        TableKey smallestkey(md.smallestkey);
+        index_ids.insert(smallestkey.extract_i64(sizeof(int64_t)));
     }
 
     return 0;
@@ -416,6 +388,60 @@ int Region::ingest_cold_sst(const std::vector<std::string>& external_files) {
     return 0;
 }
 
+int Region::ingest_cold_index_sst(std::vector<std::string>& external_files, int64_t index_id) {
+    if (external_files.empty()) {
+        DB_WARNING("region_id: %ld external_file empty", _region_id);
+        return 0;
+    }
+
+    std::set<std::string> sst_relative_filename;
+    std::set<int64_t> index_ids;
+    int ret = get_cold_sst(sst_relative_filename, index_ids);
+    if (ret < 0) {
+        DB_FATAL("region_id: %ld get cold sst failed", _region_id);
+        return -1;
+    }
+
+    std::set<std::string> tmp_external_files;
+    if (!sst_relative_filename.empty()) {
+        ret = SstExtLinker::get_instance()->list_external_full_name(sst_relative_filename, tmp_external_files);
+        if (ret < 0) {
+            DB_FATAL("region_id: %ld list external file failed", _region_id);
+            return -1;
+        }
+    }
+    if (index_ids.count(index_id) != 0) {
+        DB_FATAL("region_id: %ld, index_id: %ld need remove cold sst", _region_id, index_id);
+        ret = RegionControl::remove_cold_index_data(_region_id, index_id);
+        if (ret < 0) {
+            DB_FATAL("region_id: %ld, index_id: %ld delete files in range failed", _region_id, index_id);
+            return -1;
+        }
+    }
+
+    if (!tmp_external_files.empty()) {
+        for (const std::string& external_file : external_files) {
+            if (tmp_external_files.count(external_file) != 0) {
+                DB_FATAL("region_id: %ld, index_id: %ld need remove cold sst", _region_id, index_id);
+                ret = RegionControl::remove_cold_index_data(_region_id, index_id);
+                if (ret < 0) {
+                    DB_FATAL("region_id: %ld, index_id: %ld delete files in range failed", _region_id, index_id);
+                    return -1;
+                }
+                break;
+            }
+        }
+    }
+
+    auto s = _rocksdb->ingest_to_cold(external_files);
+    if (!s.ok()) {
+        DB_FATAL("region_id: %ld ingest files failed, err: %s", _region_id, s.ToString().c_str());
+        return -1;
+    }
+
+    return 0;
+}
+
 int Region::flush_to_cold_rocksdb() {
     if (!need_flush_to_cold_rocksdb()) {
         return -1;
@@ -435,20 +461,23 @@ int Region::flush_to_cold_rocksdb() {
     if (ret < 0) {
         DB_FATAL("region_id: %ld read olap info failed", _region_id);
         return -1;
-    } 
-
+    }
+    if (flush_index_to_cold_rocksdb(olap_info) != 0) {
+        DB_FATAL("DDL_LOG region_id: %ld flush index to cold fail", _region_id);
+    }
     if (olap_info.state() == pb::OLAP_ACTIVE) {
-        if (!has_sst_data(nullptr)) {
+        if (!has_sst_data(nullptr, nullptr)) {
             DB_WARNING("region_id: %ld no sst data", _region_id);
             return 0;
         }
         std::vector<std::string> external_files;
-        ret = sync_olap_info(pb::OLAP_IMMUTABLE, external_files);
+        std::map<int64_t, std::vector<std::string> > index_ext_paths_mapping;
+        ret = sync_olap_info(pb::OLAP_IMMUTABLE, external_files, index_ext_paths_mapping);
         if (ret < 0) {
             return -1;
         }
     } else if (olap_info.state() == pb::OLAP_IMMUTABLE) {
-        if (!has_sst_data(nullptr)) {
+        if (!has_sst_data(nullptr, nullptr)) {
             DB_FATAL("region_id: %ld no sst data", _region_id);
             return 0;
         }
@@ -458,21 +487,17 @@ int Region::flush_to_cold_rocksdb() {
             // 等待一个周期之后再执行下一个状态
             return 0;
         }
-        // std::vector<rocksdb::LiveFileMetaData> sst_files;
-        // ret = get_hot_sst(true, sst_files);
-        // if (ret < 0) {
-        //     DB_WARNING("get live sst failed");
-        //     return -1;
-        // }
 
         std::vector<std::string> external_files;
-        ret = flush_hot_to_cold(external_files);
+        std::map<int64_t, std::vector<std::string> > index_ext_paths_mapping;
+
+        ret = flush_hot_to_cold(external_files, index_ext_paths_mapping);
         if (ret < 0) {
             DB_FATAL("flush_hot_to_cold failed");
             return -1;
         }
 
-        ret = sync_olap_info(pb::OLAP_FLUSHED, external_files);
+        ret = sync_olap_info(pb::OLAP_FLUSHED, external_files, index_ext_paths_mapping);
         if (ret < 0) {
             return -1;
         }
@@ -484,114 +509,232 @@ int Region::flush_to_cold_rocksdb() {
             for (const auto& file : olap_info.external_full_path()) {
                 external_files.emplace_back(file);
             }
-            ret = sync_olap_info(pb::OLAP_TRUNCATED, external_files);
+            std::map<int64_t, std::vector<std::string> > index_ext_paths_mapping;
+            for (const auto& olap_index_info : olap_info.olap_index_info_list()) {
+                std::vector<std::string> external_path_list;
+                for (const auto& external_path: olap_index_info.external_path()) {
+                    external_path_list.emplace_back(external_path);
+                }
+                index_ext_paths_mapping[olap_index_info.index_id()] = external_path_list;
+            }
+            ret = sync_olap_info(pb::OLAP_TRUNCATED, external_files, index_ext_paths_mapping);
             if (ret < 0) {
                 return -1;
             }
         }
-    } 
+    }
 
     return 0;
 }
 
-// 暂时不用
-void Region::apply_kv_olap(const pb::StoreReq& request, braft::Closure* done, 
-                              int64_t index, int64_t term) {
-    TimeCost cost;
+int Region::doing_cold_data_rollup(int64_t index_id) {
+    MutTableKey upper_bound;
+    upper_bound.append_i64(_region_id).append_i64(get_table_id());
+    upper_bound.append_u64(UINT64_MAX);
+    upper_bound.append_u64(UINT64_MAX);
+    upper_bound.append_u64(UINT64_MAX);
+    rocksdb::Slice upper_bound_slice = upper_bound.data();
+    rocksdb::ReadOptions read_options;
+    read_options.prefix_same_as_start = true;
+    read_options.total_order_seek = false;
+    read_options.iterate_upper_bound = &upper_bound_slice;
+    
+    std::unique_ptr<myrocksdb::Iterator> iter(new myrocksdb::Iterator(
+            RocksWrapper::get_instance()->new_cold_iterator(read_options, RocksWrapper::COLD_DATA_CF)));
+    SmartTable table_info_ptr = _factory->get_table_info_ptr(get_table_id());
+    if (table_info_ptr == nullptr) {
+        DB_FATAL("DDL_LOG table: %ld table_info is not found", get_table_id());
+        return -1;
+    }
+    SmartIndex pk_info = _factory->get_index_info_ptr(get_table_id());
+    if (pk_info == nullptr) {
+        DB_FATAL("DDL_LOG table: %ld pk_info is not found", get_table_id());
+        return -1;
+    }
+    SmartIndex rollup_index_info_ptr =  _factory->get_index_info_ptr(index_id);
+    if (rollup_index_info_ptr == nullptr) {
+        DB_FATAL("DDL_LOG table: %ld rollup_index_info is not found", get_table_id());
+        return -1;
+    }
+    IndexInfo& rollup_index_info = *rollup_index_info_ptr;
 
-    rocksdb::WriteOptions write_option;
-    // write_option.disableWAL = true; // 实现raft log 异常恢复后设置为true
+    MutTableKey key;
+    key.append_i64(_region_id).append_i64(get_table_id());
+    iter->Seek(key.data());
+    int prefix_len = sizeof(int64_t) * 2;
+    TimeCost time_cost;
+    rocksdb::Status s;
+    int line_nums = 0;
+
+    // 清除索引
+    rocksdb::WriteOptions write_options;
+    MutTableKey begin_key;
+    MutTableKey end_key;
+    begin_key.append_i64(_region_id).append_i64(index_id);
+    end_key.append_i64(_region_id).append_i64(index_id).append_u64(UINT64_MAX);
+    s = _rocksdb->remove_range(write_options, _data_cf, begin_key.data(), end_key.data(), true);
+    if (!s.ok()) {
+        DB_FATAL("DDL_LOG remove_index failed: code=%d, msg=%s, region_id: %ld table_id:%ld index_id:%ld", 
+            s.code(), s.ToString().c_str(), _region_id, get_table_id(), index_id);
+        return -1;
+    }
+
+    std::set<int32_t> pri_field_ids;
+    std::map<int32_t, FieldInfo*> field_ids;
+    for (auto& field : pk_info->fields) {
+        pri_field_ids.insert(field.id);
+    }
+    for (auto& field_info : table_info_ptr->fields) {
+        if (pri_field_ids.count(field_info.id) == 0) {
+            field_ids[field_info.id] = &field_info;
+        }
+    }
     rocksdb::WriteBatch batch;
-    bool need_replace_region_id = false;
-    if (_region_id != request.region_id()) {
-        DB_WARNING("diff region_id: %ld, %ld. maybe split", _region_id, request.region_id());
-        need_replace_region_id = true;
-    }
-    int64_t put_rows = 0;
-    int64_t merge_rows = 0;
-    int64_t delete_rows = 0;
-    for (auto& kv_op : request.kv_ops()) {
-        pb::OpType op_type = kv_op.op_type();
-        int ret = 0;
-        if (BAIKALDB_LIKELY(!need_replace_region_id)) {
-            if (BAIKALDB_LIKELY(op_type == pb::OP_MERGE_KV)) {     
-                batch.Merge(_data_cf, kv_op.key(), kv_op.value());
-                merge_rows++;   
-            } else if (op_type == pb::OP_PUT_KV) {
-                batch.Put(_data_cf, kv_op.key(), kv_op.value());
-                put_rows++; 
-            } else {
-                batch.Delete(_data_cf, kv_op.key());
-                delete_rows++;
-            }
-        } else {
-            MutTableKey key(kv_op.key());
-            key.replace_i64(_region_id, 0);
-            if (BAIKALDB_LIKELY(op_type == pb::OP_MERGE_KV)) {     
-                batch.Merge(_data_cf, key.data(), kv_op.value());
-                merge_rows++;  
-            } else if (op_type == pb::OP_PUT_KV) {
-                batch.Put(_data_cf, key.data(), kv_op.value());
-                put_rows++;   
-            } else {
-                batch.Delete(_data_cf, key.data());
-                delete_rows++;   
-            }
+    // 开始加冷数据的rollup索引
+    while (iter->Valid()) {
+        int pos = prefix_len;
+        TableKey table_key(iter->key(), true);
+        SmartRecord record = _factory->new_record(get_table_id());
+        if (0 != record->decode_key(*pk_info, table_key, pos)) {
+            DB_WARNING("DDL_LOG table_id:%ld index:%ld region_id:%ld decode key failed", get_table_id(), index_id, _region_id);
+            return -1;
         }
-    }
 
-    _num_table_lines += request.kv_ops_size();
-
-    batch.Put(_meta_cf, MetaWriter::get_instance()->applied_index_key(_region_id), MetaWriter::get_instance()->encode_applied_index(index, _data_index));
-    batch.Put(_meta_cf, MetaWriter::get_instance()->num_table_lines_key(_region_id), MetaWriter::get_instance()->encode_num_table_lines(_num_table_lines));
-
-    auto status = _rocksdb->write(write_option, &batch);
-    if (!status.ok()) {
-        DB_FATAL("region_id: %ld put batch to rocksdb fail, log_index: %ld, err_msg: %s",
-                    _region_id, index, status.ToString().c_str());
-        if (done != nullptr) {
-            ((DMLClosure*)done)->response->set_errcode(pb::EXEC_FAIL);
-            ((DMLClosure*)done)->response->set_errmsg("rocksdb put failed");
-            // leader也在状态机中写入，txn直接rollback
-            SmartTransaction txn = ((DMLClosure*)done)->transaction;
-            if (txn != nullptr) {
-                txn->rollback();
-            }
+        TupleRecord tuple_record(iter->value());
+        if (0 != tuple_record.decode_fields(field_ids, record)) {
+            DB_WARNING("DDL_LOG table_id:%ld index:%ld region_id:%ld decode value failed", get_table_id(), index_id, _region_id);
+            return -1;
         }
+
+        MutTableKey rollup_key;
+        rollup_key.append_i64(_region_id).append_i64(rollup_index_info.id);
+        if(0 != rollup_key.append_index(rollup_index_info, record.get(), -1, false)) {
+            DB_FATAL("DDL_LOG table_id:%ld index:%ld region_id:%ld fail to append_index", get_table_id(), index_id, _region_id);
+            return -1;
+        }
+
+        std::string rollup_value;
+        SmartRecord rollup_record =  record->clone(true);
+        if (rollup_record == nullptr) {
+            DB_FATAL("DDL_LOG table_id:%ld index:%ld region_id:%ld fail to clone", get_table_id(), index_id, _region_id);
+            return -1;
+        }
+        if (rollup_record->encode_value_for_rollup(rollup_index_info, table_info_ptr->fields, table_info_ptr->fields_need_sum) != 0) {
+            DB_FATAL("DDL_LOG table_id:%ld index:%ld region_id:%ld fail to encode_rollup", get_table_id(), index_id, _region_id);
+            return -1;
+        }
+        if (0 != rollup_record->encode(rollup_value)) {
+            DB_FATAL("DDL_LOG table_id:%ld index:%ld region_id:%ld fail to encode_record", get_table_id(), index_id, _region_id);
+            return -1;
+        }
+        batch.Merge(_data_cf, rollup_key.data(), rollup_value);
+        if (line_nums % 100 == 0) {
+            s = _rocksdb->write(write_options, &batch);
+            if (!s.ok()) {
+                DB_FATAL("DDL_LOG table_id:%ld index:%ld region_id:%ld merge fail", get_table_id(), index_id, _region_id);
+                return -1;
+            }
+            batch.Clear();
+        }
+        iter->Next();
+        line_nums++;
+    }
+    s = _rocksdb->write(write_options, &batch);
+    if (!s.ok()) {
+        DB_FATAL("DDL_LOG table_id:%ld index:%ld region_id:%ld merge fail", get_table_id(), index_id, _region_id);
+        return -1;
+    }
+    DB_NOTICE("DDL_LOG doing cold data rollup end, cost: %ld table_id:%ld, index:%ld, region_id: %ld, num_table_lines: %d", 
+            time_cost.get_time(), get_table_id(), index_id, _region_id, line_nums);
+    return 0;
+}
+
+void Region::do_cold_index_ddl_work(const pb::OlapRegionInfo& olap_info) {
+    if (olap_info.state() != pb::OLAP_TRUNCATED) {
         return;
     }
-
-    if (done != nullptr) {
-        ((DMLClosure*)done)->response->set_errcode(pb::SUCCESS);
-        ((DMLClosure*)done)->response->set_errmsg("success");
-        // leader也在状态机中写入，txn直接rollback
-        SmartTransaction txn = ((DMLClosure*)done)->transaction;
-        if (txn != nullptr) {
-            txn->rollback();
+    std::vector<int64_t> index_ids = _factory->get_all_index_info(get_table_id());
+    for (auto index_id : index_ids) {
+        SmartIndex index_info = _factory->get_index_info_ptr(index_id);
+        if (index_info == nullptr) {
+            DB_FATAL("DDL_LOG region_id: %ld, index_id: %ld not exist", _region_id, index_id);
+            continue;
+        }
+        if (index_info->type != pb::I_ROLLUP) {
+            continue;
+        }
+        bool olap_index_exist = false;
+        for (auto olap_index_info : olap_info.olap_index_info_list()) {
+            if (olap_index_info.index_id() == index_id) {
+                olap_index_exist = true;
+                break;
+            }
+        }
+        if (olap_index_exist) {
+            continue;
+        }
+        if (doing_cold_data_rollup(index_id) != 0) {
+            DB_FATAL("DDL_LOG region_id: %ld, index_id: %ld doing cold data rollup failed", _region_id, index_id);
+            continue;
+        }
+        if (!has_index_sst_data(index_id, nullptr)) {
+            DB_FATAL("DDL_LOG region_id: %ld no index %ld sst data", _region_id, index_id);
+            continue;
+        }
+        std::map<int64_t, std::vector<std::string> > new_index_ext_paths_mapping;
+        int ret = flush_hot_index_to_cold(index_id, new_index_ext_paths_mapping);
+        if (ret < 0) {
+            DB_FATAL("DDL_LOG region_id: %ld, index %ld flush hot index to cold fail", _region_id, index_id);
+            continue;
+        }
+        if (new_index_ext_paths_mapping.size() > 0) {
+            int ret = sync_olap_index_info(olap_info, pb::OLAP_TRUNCATED, new_index_ext_paths_mapping);
+            if (ret < 0) {
+                DB_FATAL("DDL_LOG region_id: %ld, index_id: %ld sync olap index info failed", _region_id, index_id);
+                continue;
+            }
         }
     }
+}
 
-    int64_t dml_cost = cost.get_time();
-    Store::get_instance()->dml_time_cost << dml_cost;
-    // if (dml_cost > FLAGS_print_time_us) {
-        DB_NOTICE("time_cost:%ld, region_id: %ld, table_lines:%ld, put_rows: %ld, merge_rows: %ld, delete_rows: %ld, "
-            "applied_index:%ld, term:%ld", cost.get_time(), _region_id, _num_table_lines.load(), 
-            put_rows, merge_rows, delete_rows, index, term);
-    // }
-    return;
+int Region::flush_index_to_cold_rocksdb(const pb::OlapRegionInfo& olap_info) {
+    int ret = 0;
+    do_cold_index_ddl_work(olap_info);
+    if (!olap_info.has_new_olap_index_info()) {
+        return 0;
+    }
+    std::map<int64_t, std::vector<std::string> > new_index_ext_paths_mapping;
+    if (olap_info.new_olap_index_info().state() == pb::OLAP_IMMUTABLE) {
+        if (!has_index_sst_data(olap_info.new_olap_index_info().index_id(), nullptr)) {
+            DB_WARNING("DDL_LOG region_id: %ld no index %ld sst data", _region_id, olap_info.new_olap_index_info().index_id());
+            return -1;
+        }
+        ret = flush_hot_index_to_cold(olap_info.new_olap_index_info().index_id(), new_index_ext_paths_mapping);
+        if (ret < 0) {
+            DB_FATAL("DDL_LOG region_id: %ld, index %ld flush_hot_to_cold failed",  _region_id, olap_info.new_olap_index_info().index_id());
+            return -1;
+        }
+    }
+    if (new_index_ext_paths_mapping.size() > 0) {
+        ret = sync_olap_index_info(olap_info, pb::OLAP_TRUNCATED, new_index_ext_paths_mapping);
+        if (ret < 0) {
+            return -1;
+        }
+    }
+    return 0;
 }
 
 void Region::apply_olap_info(const pb::StoreReq& request, braft::Closure* done) {
     const pb::OlapRegionInfo& olap_info = request.extra_req().olap_info();
     int ret = 0;
     TimeCost cost;
-    std::vector<std::string> external_files;
-    external_files.reserve(5);
-    for (const auto& file : olap_info.external_full_path()) {
-        external_files.emplace_back(file);
-    }
     IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
     if (olap_info.state() == pb::OLAP_FLUSHED) {
+        std::vector<std::string> external_files;
+        external_files.reserve(5);
+        for (const auto& file : olap_info.external_full_path()) {
+            external_files.emplace_back(file);
+        }
         // 将external file ingest到rocksdb
         ret = ingest_cold_sst(external_files);
         if (ret < 0) {
@@ -599,13 +742,13 @@ void Region::apply_olap_info(const pb::StoreReq& request, braft::Closure* done) 
             return;
         }
     } else if (olap_info.state() == pb::OLAP_TRUNCATED) {
+        _meta_writer->clear_watt_stats_version(_region_id);
         ret = RegionControl::remove_data(_region_id);
         if (ret < 0) {
             IF_DONE_SET_RESPONSE_FATAL(done, pb::EXEC_FAIL, "remove range failed");
             return;
         }
     }
-
     std::string string_olap_info;
     if (!olap_info.SerializeToString(&string_olap_info)) {
         IF_DONE_SET_RESPONSE(done, pb::EXEC_FAIL, "serialize to string failed");
@@ -631,7 +774,62 @@ void Region::apply_olap_info(const pb::StoreReq& request, braft::Closure* done) 
     return;
 }
 
-int Region::sync_olap_info(pb::OlapRegionStat state, const std::vector<std::string>& external_files) {
+void Region::apply_olap_index_info(const pb::StoreReq& request, braft::Closure* done) {
+    pb::OlapRegionInfo olap_info = request.extra_req().olap_info();
+    int ret = 0;
+    TimeCost cost;
+    IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
+    std::vector<std::string> external_files;
+    external_files.reserve(5);
+    if (olap_info.has_new_olap_index_info()
+        && olap_info.new_olap_index_info().state() == pb::OLAP_TRUNCATED) {
+        for (const auto& external_path: olap_info.new_olap_index_info().external_path()) {
+            external_files.emplace_back(external_path);
+        }
+    }
+    // 将external file ingest到rocksdb
+    if (external_files.size() > 0) {
+        ret = ingest_cold_index_sst(external_files, olap_info.new_olap_index_info().index_id());
+        if (ret < 0) {
+            IF_DONE_SET_RESPONSE_FATAL(done, pb::EXEC_FAIL, "ingest cold index sst failed");
+            return;
+        }
+        // 删除索引热数据
+        ret = RegionControl::remove_data(_region_id, olap_info.new_olap_index_info().index_id());
+        if (ret < 0) {
+            IF_DONE_SET_RESPONSE_FATAL(done, pb::EXEC_FAIL, "remove range failed");
+            return;
+        }
+        olap_info.clear_new_olap_index_info();
+    }
+    std::string string_olap_info;
+    if (!olap_info.SerializeToString(&string_olap_info)) {
+        IF_DONE_SET_RESPONSE(done, pb::EXEC_FAIL, "serialize to string failed");
+        DB_FATAL("olap_info: %s serialize to string fail, region_id: %ld", 
+                olap_info.ShortDebugString().c_str(), _region_id); 
+        return;
+    }
+
+    rocksdb::WriteOptions write_options;
+    rocksdb::WriteBatch batch;
+    batch.Put(_meta_writer->get_handle(), 
+                _meta_writer->applied_index_key(_region_id), 
+                _meta_writer->encode_applied_index(_applied_index, _data_index));
+    batch.Put(_meta_writer->get_handle(), _meta_writer->olap_key(_region_id), string_olap_info);
+    auto s = _rocksdb->write(write_options, &batch);
+    if (!s.ok()) {
+        IF_DONE_SET_RESPONSE(done, pb::EXEC_FAIL, "write to rocksdb failed");
+        DB_FATAL("write rocksdb failed, region_id: %ld, status: %s", _region_id, s.ToString().c_str());
+        return;
+    }
+    _olap_state.store(olap_info.state());
+    DB_NOTICE("request: %s, cost: %ld", request.ShortDebugString().c_str(), cost.get_time());
+    return;
+}
+
+int Region::sync_olap_info(pb::OlapRegionStat state, 
+                        const std::vector<std::string>& external_files,
+                        std::map<int64_t, std::vector<std::string> > index_ext_paths_mapping) {
     TimeCost tc;
     pb::StoreReq req;
     pb::StoreRes res;
@@ -643,6 +841,17 @@ int Region::sync_olap_info(pb::OlapRegionStat state, const std::vector<std::stri
     olap_info->set_state_time((uint64_t)time(nullptr));
     for (const std::string& file : external_files) {
         olap_info->add_external_full_path(file);
+    }
+    for (const auto& index_ext_paths_iter : index_ext_paths_mapping) {
+        pb::OlapRegionIndexInfo* olap_index_info = olap_info->add_olap_index_info_list();
+        if (olap_index_info == nullptr) {
+            DB_FATAL("index_ext_path is nullptr");
+            return -1;
+        } 
+        olap_index_info->set_index_id(index_ext_paths_iter.first);
+        for (const std::string& ext_path : index_ext_paths_iter.second) {
+            olap_index_info->add_external_path(ext_path);
+        }
     }
     butil::IOBuf data;
     butil::IOBufAsZeroCopyOutputStream wrapper(&data);
@@ -670,46 +879,91 @@ int Region::sync_olap_info(pb::OlapRegionStat state, const std::vector<std::stri
     return 0;
 }
 
-// int Region::copy_files(const std::vector<rocksdb::LiveFileMetaData>& sst_files, std::vector<std::string>& external_files) {
-//     // 失败残留external文件由垃圾回收机制进行删除 OLAPTODO
-//     for (const auto& sst : sst_files) {
-//         std::string external_file;
-//         int ret = copy_file(sst, external_file);
-//         if (ret < 0) {
-//             DB_FATAL("regiond_id: %ld copy local file: %s failed", _region_id, sst.relative_filename.c_str());
-//             return -1;
-//         }
+int Region::sync_olap_index_info(const pb::OlapRegionInfo& old_olap_info, pb::OlapRegionStat state, 
+                        std::map<int64_t, std::vector<std::string> > new_index_ext_paths_mapping) {
+    TimeCost tc;
+    pb::StoreReq req;
+    pb::StoreRes res;
+    req.set_op_type(pb::OP_OLAP_INDEX_INFO);
+    req.set_region_id(_region_id);
+    req.set_region_version(get_version());
+    // 复制老的olap信息
+    auto olap_info = req.mutable_extra_req()->mutable_olap_info();
+    olap_info->CopyFrom(old_olap_info);
+    olap_info->set_state_time((uint64_t)time(nullptr));
+    olap_info->clear_new_olap_index_info();
 
-//         if (!need_flush_to_cold_rocksdb()) {
-//             DB_FATAL("region_id: %ld can not do flush", _region_id);
-//             return -1;
-//         }
+    std::set<std::string> old_external_paths;
+    std::set<uint64_t> index_ids;
+    for (const auto& olap_index_info : olap_info->olap_index_info_list()) {
+        for (const auto& external_path: olap_index_info.external_path()) {
+            old_external_paths.insert(external_path);
+        }
+        index_ids.insert(olap_index_info.index_id());
+    }
 
-//         // 检查状态是否处于IMMUTABLE
-//         pb::OlapRegionInfo olap_info;
-//         ret = _meta_writer->read_olap_info(_region_id, olap_info);
-//         if (ret < 0) {
-//             DB_FATAL("region_id: %ld read olap info failed", _region_id);
-//             return -1;
-//         } 
+    // 添加新索引的信息
+    for (const auto& new_index_ext_paths_iter : new_index_ext_paths_mapping) {
+        if (index_ids.count(new_index_ext_paths_iter.first)) {
+            DB_FATAL("new index %ld already added", new_index_ext_paths_iter.first);
+            return -1;
+        } 
+        pb::OlapRegionIndexInfo* new_olap_index_info = olap_info->mutable_new_olap_index_info(); // 新索引列表
+        if (new_olap_index_info == nullptr) {
+            DB_FATAL("olap_index_info is nullptr");
+            return -1;
+        } 
+        new_olap_index_info->set_index_id(new_index_ext_paths_iter.first);
+        new_olap_index_info->set_state(state);
 
-//         if (olap_info.state() != pb::OLAP_IMMUTABLE) {
-//             DB_FATAL("region_id: %ld, olap state is not OLAP_IMMUTABLE, olap_info: %s", _region_id, olap_info.ShortDebugString().c_str());
-//             return -1;
-//         }
+        pb::OlapRegionIndexInfo* olap_index_info;
+        if (state == pb::OLAP_TRUNCATED) {
+            olap_index_info = olap_info->add_olap_index_info_list(); // 老索引列表
+            if (olap_index_info == nullptr) {
+                DB_FATAL("olap_index_info is nullptr");
+                return -1;
+            } 
+            olap_index_info->set_index_id(new_index_ext_paths_iter.first);
+            olap_index_info->set_state(state);
+        }
+        for (const std::string& index_path : new_index_ext_paths_iter.second) {
+            // 如果已经出现在老索引列表中说明有问题
+            if (old_external_paths.count(index_path)) {
+                DB_FATAL("new index path %s already added", index_path.c_str());
+                return -1;
+            }
+            new_olap_index_info->add_external_path(index_path);
+            if (state == pb::OLAP_TRUNCATED && olap_index_info != nullptr) {
+                olap_index_info->add_external_path(index_path);
+                olap_info->add_external_full_path(index_path);
+            }
+        }
+    }
+    butil::IOBuf data;
+    butil::IOBufAsZeroCopyOutputStream wrapper(&data);
+    if (!req.SerializeToZeroCopyStream(&wrapper)) {
+        DB_FATAL("serializeToString fail, region_id: %ld", _region_id);  
+        return -1;
+    }
 
-//         // 检查sst是否发生变动
-//         ret = check_hot_sst(sst_files);
-//         if (ret < 0) {
-//             DB_FATAL("region_id: %ld check hot sst failed", _region_id);
-//             return -1;
-//         }
+    BthreadCond cond;
+    OlapOPClosure* c = new OlapOPClosure(&cond);
+    c->response = &res;
+    braft::Task task; 
+    task.data = &data; 
+    task.done = c;
+    cond.increase();
+    _node.apply(task);
+    cond.wait();
+    if (res.errcode() != pb::SUCCESS) {
+        DB_FATAL("region_id: %ld, sync olap index info: %s failed, response: %s", 
+                _region_id, req.ShortDebugString().c_str(), res.ShortDebugString().c_str());
+        return -1;
+    }
 
-//         external_files.emplace_back(external_file);
-//     }
-
-//     return 0;
-// }
+    DB_NOTICE("region_id: %ld sync olap index info: %s cost: %ld", _region_id, req.ShortDebugString().c_str(), tc.get_time());
+    return 0;
+}
 
 std::string make_make_relative_path_without_filename(int64_t table_id, int64_t partition_id) {
     //                                                            partition     
@@ -875,8 +1129,8 @@ void print_external_info(const rocksdb::ExternalSstFileInfo& info) {
 
 class ColdFileSstWriter {
 public:
-    ColdFileSstWriter(int64_t table_id, int64_t partition_id, int64_t region_id, int64_t count_per_sst) : 
-        _table_id(table_id), _partition_id(partition_id), _region_id(region_id), _count_per_sst(count_per_sst) {
+    ColdFileSstWriter(int64_t table_id, int64_t partition_id, int64_t region_id, int64_t index_id, int64_t count_per_sst) : 
+        _table_id(table_id), _partition_id(partition_id), _region_id(region_id), _index_id(index_id), _count_per_sst(count_per_sst) {
         _tmp_file_name.clear();
         _external_files.clear();
     }
@@ -907,6 +1161,7 @@ private:
     const int64_t _table_id;
     const int64_t _partition_id;
     const int64_t _region_id;
+    const int64_t _index_id;
     const int64_t _count_per_sst;
     TimeCost _cost;
     uint64_t _write_count = 0;
@@ -974,14 +1229,14 @@ int ColdFileSstWriter::write_kv(const rocksdb::Slice& key, const rocksdb::Slice&
         } 
         s = _writer->open(_tmp_file_name);
         if (!s.ok()) {
-            DB_FATAL("region_id: %ld open sst file: %s fail", _region_id, _tmp_file_name.c_str());
+            DB_FATAL("region_id: %ld, index_id: %ld, open sst file: %s fail", _region_id, _index_id, _tmp_file_name.c_str());
             return -1;
         }
     }
 
     s = _writer->put(key, value);
     if (!s.ok()) {
-        DB_FATAL("region_id: %ld write kv fail", _region_id);
+        DB_FATAL("region_id: %ld, index_id: %ld, write kv fail", _region_id, _index_id);
         return -1;
     }
 
@@ -993,11 +1248,139 @@ int ColdFileSstWriter::write_kv(const rocksdb::Slice& key, const rocksdb::Slice&
     // flush
     return finish();
 }
-int Region::flush_hot_to_cold(std::vector<std::string>& external_files) {
+int Region::flush_hot_to_cold(std::vector<std::string>& external_files,
+                            std::map<int64_t, std::vector<std::string>>& index_ext_paths_mapping) {
+    std::vector<int64_t> index_ids = _factory->get_all_index_info(get_table_id());    
+    SmartTable table_info_ptr = _factory->get_table_info_ptr(get_table_id());
+    SmartRecord record_template = _factory->new_record(get_table_id());
+    FieldInfo snapshot_field;
+    const FieldDescriptor* snapshot_desc = nullptr;
+    if (fits_snapshot_blacklist()) {
+        _need_snapshot_filter = true;
+        for (auto& field : table_info_ptr->fields) {
+            if (field.short_name == "__snapshot__") {
+                snapshot_field = field;
+                break;
+            }
+        }
+        snapshot_desc = record_template->get_field_by_idx(snapshot_field.pb_idx);
+    }
+    for (int64_t index_id: index_ids) {
+        TimeCost cost;
+        std::string prefix;
+        MutTableKey key;
+        key.append_i64(_region_id).append_i64(index_id);
+        prefix = key.data();
+        key.append_u64(UINT64_MAX);
+        rocksdb::Slice upper_bound_slice(key.data());
+
+        rocksdb::ReadOptions options;
+        options.total_order_seek = true;
+        options.fill_cache = false;
+        options.iterate_upper_bound = &upper_bound_slice;
+        std::unique_ptr<rocksdb::Iterator> iter(_rocksdb->new_iterator(options, _data_cf));
+        int64_t total_cnt = 0;
+        int64_t fail_cnt = 0;
+        ColdFileSstWriter sst_writer(get_table_id(), get_partition_id(), _region_id, index_id, FLAGS_num_lines_per_sst);
+        ScopeGuard auto_decrease([&sst_writer]() {
+            auto fs = SstExtLinker::get_instance()->get_exteranl_filesystem();
+            for (const std::string& external_file : sst_writer.external_files()) {
+                DB_WARNING("delete external_file: %s", external_file.c_str());
+                fs->delete_path(external_file, false);
+            }
+        });
+
+        SmartRecord record_template = _factory->new_record(get_table_id());
+        SmartIndex index_info = _factory->get_index_info_ptr(index_id);
+        int prefix_len = sizeof(int64_t) * 2;
+        for (iter->Seek(prefix); iter->Valid(); iter->Next()) {
+            total_cnt++;
+            if (!iter->key().starts_with(prefix)) {
+                fail_cnt++;
+                DB_FATAL("not starts with: %ld", _region_id);
+                continue;
+            }
+            if (_need_snapshot_filter && 0 != table_info_ptr->snapshot_blacklist.size() && snapshot_desc != nullptr) {
+                SmartRecord record = record_template->clone(false);
+                TableKey table_key(iter->key(), true);
+                int pos = prefix_len;
+                // __snapshot__ 可能在key中，也可能在value中
+                record->decode(iter->value().ToString());
+                record->decode_key(*(index_info.get()), table_key, pos);
+                ExprValue val = record->get_value(snapshot_desc);
+                if (table_info_ptr->snapshot_blacklist.count(val._u.uint64_val) != 0) {
+                    DB_DEBUG("table: %ld, flush hot to cold snapshot_blacklist filter val: %lu", get_table_id(), val._u.uint64_val);
+                    continue;
+                }
+            }
+
+            int ret = sst_writer.write_kv(iter->key(), iter->value());
+            if (ret < 0) {
+                DB_FATAL("region_id: %ld write kv failed", _region_id);
+                return -1;
+            }
+        }
+
+        int ret = sst_writer.finish();
+        if (ret < 0) {
+            DB_FATAL("region_id: %ld finish failed", _region_id);
+            return -1;
+        }
+        auto_decrease.release();
+        for (const std::string& ext_file : sst_writer.external_files()) {
+            external_files.push_back(ext_file);
+        }
+        index_ext_paths_mapping[index_id] = sst_writer.external_files();;
+        DB_NOTICE("region_id: %ld flush total_cnt: %ld, fail_cnt: %ld, cost: %ld", _region_id, total_cnt, fail_cnt, cost.get_time());
+    }
+    return 0;
+}
+
+int Region::fits_snapshot_blacklist() {
+    SmartTable table_info_ptr = _factory->get_table_info_ptr(get_table_id());
+    if (table_info_ptr->snapshot_blacklist.size() == 0) {
+        return false;
+    }
+    pb::PartitionRange partition_range;
+    for (auto it = table_info_ptr->partition_info.range_partition_infos().rbegin(); it != table_info_ptr->partition_info.range_partition_infos().rend(); ++it) {
+        if (it->partition_id() == get_partition_id()) {
+            partition_range.CopyFrom(it->range());
+            break;
+        }
+    }
+
+    ExprNode* p_left_node = nullptr;
+    ScopeGuard auto_delete([&p_left_node] () {
+        SAFE_DELETE(p_left_node);
+    });
+    if (ExprNode::create_expr_node(partition_range.left_value().nodes(0), &p_left_node) != 0) {
+        DB_FATAL("create expr node error.");
+        return false;
+    }
+    if (p_left_node == nullptr) {
+        DB_FATAL("p_left_node is nullptr");
+        return false;
+    }
+    ExprValue left_expr_value = p_left_node->get_value(nullptr);
+    left_expr_value.cast_to(pb::TIMESTAMP);
+
+    for (uint64_t snapshot : table_info_ptr->snapshot_blacklist) {
+        time_t ts = snapshot_to_timestamp(snapshot);
+        ExprValue snapshot_expr_value(pb::TIMESTAMP);
+        snapshot_expr_value._u.uint32_val = ts;
+        if (left_expr_value.compare(snapshot_expr_value) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int Region::flush_hot_index_to_cold(int64_t index_id,
+                            std::map<int64_t, std::vector<std::string>>& new_index_ext_paths_mapping) {
     TimeCost cost;
     std::string prefix;
     MutTableKey key;
-    key.append_i64(_region_id);
+    key.append_i64(_region_id).append_i64(index_id);
     prefix = key.data();
     key.append_u64(UINT64_MAX);
     rocksdb::Slice upper_bound_slice(key.data());
@@ -1009,7 +1392,27 @@ int Region::flush_hot_to_cold(std::vector<std::string>& external_files) {
     std::unique_ptr<rocksdb::Iterator> iter(_rocksdb->new_iterator(options, _data_cf));
     int64_t total_cnt = 0;
     int64_t fail_cnt = 0;
-    ColdFileSstWriter sst_writer(get_table_id(), get_partition_id(), _region_id, FLAGS_num_lines_per_sst);
+    int prefix_len = sizeof(int64_t) * 2;
+    SmartRecord record_template = _factory->new_record(get_table_id());
+    SmartIndex index_info = _factory->get_index_info_ptr(index_id);
+    SmartTable table_info_ptr = _factory->get_table_info_ptr(get_table_id());
+    if (index_info == nullptr) {
+        DB_WARNING("index_id: %ld is nullptr", index_id);
+        return -1;
+    }
+    FieldInfo snapshot_field;
+    const FieldDescriptor* snapshot_desc = nullptr;
+    if (fits_snapshot_blacklist()) {
+        _need_snapshot_filter = true;
+        for (auto& field : table_info_ptr->fields) {
+            if (field.short_name == "__snapshot__") {
+                snapshot_field = field;
+                break;
+            }
+        }
+        snapshot_desc = record_template->get_field_by_idx(snapshot_field.pb_idx);
+    }
+    ColdFileSstWriter sst_writer(get_table_id(), get_partition_id(), _region_id, index_id, FLAGS_num_lines_per_sst);
     ScopeGuard auto_decrease([&sst_writer]() {
         auto fs = SstExtLinker::get_instance()->get_exteranl_filesystem();
         for (const std::string& external_file : sst_writer.external_files()) {
@@ -1025,6 +1428,18 @@ int Region::flush_hot_to_cold(std::vector<std::string>& external_files) {
             continue;
         }
 
+        if (_need_snapshot_filter && 0 != table_info_ptr->snapshot_blacklist.size() && snapshot_desc != nullptr) {
+            SmartRecord record = record_template->clone(false);
+            TableKey table_key(iter->key(), false);
+            int pos = prefix_len;
+            record->decode_key(*(index_info.get()), table_key, pos);
+            ExprValue val = record->get_value(snapshot_desc);
+            if (table_info_ptr->snapshot_blacklist.count(val._u.uint64_val) != 0) {
+                DB_DEBUG("table: %ld, index: %ld, flush hot to cold snapshot_blacklist filter val: %lu", get_table_id(), index_id, val._u.uint64_val);
+                continue;
+            }
+        }
+
         int ret = sst_writer.write_kv(iter->key(), iter->value());
         if (ret < 0) {
             DB_FATAL("region_id: %ld write kv failed", _region_id);
@@ -1038,8 +1453,8 @@ int Region::flush_hot_to_cold(std::vector<std::string>& external_files) {
         return -1;
     }
     auto_decrease.release();
-    external_files = sst_writer.external_files();
-    DB_NOTICE("region_id: %ld flush total_cnt: %ld, fail_cnt: %ld, cost: %ld", _region_id, total_cnt, fail_cnt, cost.get_time());
+    new_index_ext_paths_mapping[index_id] = sst_writer.external_files();
+    DB_NOTICE("region_id: %ld, index_id: %ld, flush total_cnt: %ld, fail_cnt: %ld, cost: %ld", _region_id, index_id, total_cnt, fail_cnt, cost.get_time());
     return 0;
 }
 
@@ -1095,7 +1510,7 @@ int Region::manual_link_external_sst() {
         return -1;
     }
 
-    std::unique_ptr<ExtFileReader> file_reader;
+    std::shared_ptr<ExtFileReader> file_reader;
     ret = fs->open_reader(external_done_file, &file_reader);
     if (ret != 0) {
         DB_FATAL("open ext file: %s failed", external_done_file.c_str());
@@ -1108,6 +1523,7 @@ struct MemBuf : std::streambuf{
     }
 };
     std::vector<std::string> external_files;
+    std::map<int64_t, std::vector<std::string> > index_ext_paths_mapping;
     bool eof = false;
     uint32_t buf_len = 1024 * 1024;
     std::shared_ptr<char[]> buf(new (std::nothrow) char[buf_len]);
@@ -1136,13 +1552,13 @@ struct MemBuf : std::streambuf{
         return -1;
     }
 
-    ret = sync_olap_info(pb::OLAP_FLUSHED, external_files);
+    ret = sync_olap_info(pb::OLAP_FLUSHED, external_files, index_ext_paths_mapping);
     if (ret < 0) {
         DB_FATAL("region_id: %ld sync olap info failed", _region_id);
         return -1;
     }
     
-    sync_olap_info(pb::OLAP_TRUNCATED, external_files);
+    sync_olap_info(pb::OLAP_TRUNCATED, external_files, index_ext_paths_mapping);
     return 0;
 }
 

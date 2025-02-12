@@ -22,6 +22,13 @@ DEFINE_bool(delete_all_to_truncate, false,  "delete from xxx; treat as truncate"
 DECLARE_bool(open_non_where_sql_forbid);
 int DeletePlanner::plan() {
     if (_ctx->stmt_type == parser::NT_TRUNCATE) {
+        if (!_ctx->user_info->allow_ddl()) {
+            DB_WARNING("user: %s has no ddl permission", _ctx->user_info->username.c_str());
+            _ctx->stat_info.error_code = ER_PROCACCESS_DENIED_ERROR;
+            _ctx->stat_info.error_msg << "user " << _ctx->user_info->username 
+                << " has no ddl permission";
+            return -1;
+        }
         if (_ctx->client_conn->txn_id != 0) {
             if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
                 _ctx->stat_info.error_code = ER_NOT_ALLOWED_COMMAND;
@@ -74,7 +81,13 @@ int DeletePlanner::plan() {
             DB_WARNING("parse db table fail");
             return -1;
         }
-    } 
+    }
+
+    // 获取编码转换信息
+    if (get_convert_charset_info() != 0) {
+        return -1;
+    }
+
     for (int i = 0; i < _delete_stmt->delete_table_list.size(); ++i) {
         parser::TableName* del_table = _delete_stmt->delete_table_list[i];
         std::string full_table;
@@ -240,14 +253,15 @@ int DeletePlanner::reset_auto_incr_id() {
     }
 
     pb::MetaManagerRequest request;
+    pb::MetaManagerResponse response;
     request.set_op_type(pb::OP_UPDATE_FOR_AUTO_INCREMENT);
     auto auto_increment_ptr = request.mutable_auto_increment();
     auto_increment_ptr->set_table_id(table_id);
     auto_increment_ptr->set_force(true);
     auto_increment_ptr->set_start_id(0);
 
-    pb::MetaManagerResponse response;
-    if (MetaServerInteract::get_instance()->send_request("meta_manager", request, response) != 0) {
+    const int64_t meta_id = ::baikaldb::get_meta_id(table_id);
+    if (MetaServerInteract::get_instance()->send_request("meta_manager", request, response, meta_id) != 0) {
         if (response.errcode() != pb::SUCCESS && _ctx->stat_info.error_code == ER_ERROR_FIRST) {
             _ctx->stat_info.error_code = ER_TABLE_CANT_HANDLE_AUTO_INCREMENT;
             _ctx->stat_info.error_msg.str("reset auto increment failed");

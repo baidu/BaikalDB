@@ -16,6 +16,7 @@
 #include "dml.h"
 #include <unordered_map>
 #include <gflags/gflags.h>
+#include <iomanip>
 
 namespace parser {
 DEFINE_bool(normalize_case_when_to_stream, false, "whether reduce case_when/case_expr_when func's children to 2 when to_stream");
@@ -331,7 +332,7 @@ void LiteralExpr::to_stream(std::ostream& os) const {
             os << _u.int64_val;
             break;
         case LT_DOUBLE:
-            os << _u.double_val;
+            os << std::setprecision(12) << _u.double_val;
             break;
         case LT_STRING:
             os << "'" << _u.str_val.value << "'";
@@ -369,7 +370,7 @@ std::string LiteralExpr::to_string() const {
             os << _u.int64_val;
             break;
         case LT_DOUBLE:
-            os << _u.double_val;
+            os << std::setprecision(12) << _u.double_val;
             break;
         case LT_STRING:
             os << _u.str_val.value;
@@ -399,6 +400,24 @@ void LiteralExpr::find_placeholder(std::unordered_set<int>& placeholders) {
     if (placeholder_literal_type == LT_PLACE_HOLDER) {
         placeholders.insert(placeholder_id);
     }
+}
+
+void CommonTableExpr::to_stream(std::ostream& os) const {
+    os << name;
+    if (column_names.size() > 0) {
+        os << "(";
+    }
+    for (int i = 0; i < column_names.size(); ++i) {
+        column_names[i]->to_stream(os);
+        if (i != column_names.size() - 1) {
+            os << ", ";
+        }
+    }
+    if (column_names.size() > 0) {
+        os << ")";
+    }
+    os << " AS ";
+    query_expr->to_stream(os);
 }
 
 }
