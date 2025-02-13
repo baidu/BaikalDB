@@ -54,8 +54,6 @@ cc_library(
         "cpp/src/arrow/io/caching.cc",
         "cpp/src/arrow/io/compressed.cc",
         "cpp/src/arrow/io/file.cc",
-        "cpp/src/arrow/io/hdfs.cc",
-        "cpp/src/arrow/io/hdfs_internal.cc",
         "cpp/src/arrow/io/interfaces.cc",
         "cpp/src/arrow/io/memory.cc",
         "cpp/src/arrow/io/slow.cc",
