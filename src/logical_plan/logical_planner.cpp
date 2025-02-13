@@ -939,21 +939,6 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
         _partition_names.clear();
     }
     _ctx->stat_info.table_id = tableid;
-    auto tbl_ptr = _factory->get_table_info_ptr(tableid);
-    _ctx->sign_blacklist.insert(tbl_ptr->sign_blacklist.begin(), tbl_ptr->sign_blacklist.end());
-    _ctx->sign_forcelearner.insert(tbl_ptr->sign_forcelearner.begin(), tbl_ptr->sign_forcelearner.end());
-    for (auto& sign_index : tbl_ptr->sign_forceindex) {
-        std::vector<std::string> vec;
-        boost::split(vec, sign_index, boost::is_any_of(":"));
-        if (vec.size() != 2) {
-            continue;
-        }
-        uint64_t sign_num = strtoull(vec[0].c_str(), nullptr, 10);
-        auto& table_index_map = _ctx->sign_forceindex[sign_num];
-        auto& force_index_set = table_index_map[tableid];
-        force_index_set.insert(vec[1]);
-    }
-
 
     ScanTupleInfo* tuple_info = get_scan_tuple(alias_full_name, tableid);
     _ctx->current_tuple_ids.emplace(tuple_info->tuple_id);

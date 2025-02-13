@@ -337,9 +337,6 @@ public:
         return _is_get_keypoint;
     }
 
-    bool set_has_optimized(bool has_optimized) {
-        _has_optimized = has_optimized;
-    }
     bool has_optimized() {
         if (_has_optimized) {
             return true;

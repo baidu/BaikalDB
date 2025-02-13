@@ -591,7 +591,6 @@ int PacketNode::open(RuntimeState* state) {
     }
     _send_buf = state->send_buf();
 
-    int ret = 0;
     if (state->explain_type == EXPLAIN_SHOW_COST) {
         handle_show_cost(state);
         return 0;
