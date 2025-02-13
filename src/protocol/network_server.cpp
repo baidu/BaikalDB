@@ -1495,9 +1495,11 @@ int NetworkServer::make_worker_process() {
     }
 
     _conn_bvars_update_bth.run([this](){client_conn_bvars_update();});
+#ifdef BAIDU_INTERNAL
     if (FLAGS_need_ext_fs_gc) {
         _ext_fs_gc_bth.run([this]() {ExtFileSystemGC::external_filesystem_gc(&_shutdown, FLAGS_hostname);});
     }
+#endif
 
     // Create listen socket.
     _service = create_listen_socket();

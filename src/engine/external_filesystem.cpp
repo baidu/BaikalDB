@@ -761,7 +761,6 @@ int AfsFileSystem::readdir(const std::string& full_name, std::set<std::string>& 
     return -1;
 }
 
-#endif
 
 int ExtFileSystemGC::external_filesystem_gc(bool* shutdown, const std::string& hostname) {
     while(!(*shutdown)) {
@@ -1050,5 +1049,6 @@ int ExtFileSystemGC::check_partition(const std::string& partition, std::string* 
     }
     return 0;
 }
+#endif
 
 } // namespace baikaldb

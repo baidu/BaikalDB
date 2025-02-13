@@ -27,8 +27,8 @@ bind(
 new_http_archive(
     name = "com_github_apache_arrow",
     build_file = "third-party/com_github_apache_arrow/BUILD",
-    strip_prefix = "arrow-apache-arrow-0.17.1",
-    url = "https://github.com/apache/arrow/archive/apache-arrow-0.17.1.tar.gz",
+    strip_prefix = "arrow-16.1.0",
+    url = "https://github.com/baikalgroup/arrow/archive/refs/tags/16.1.0.tar.gz",
 )
 
 bind(
