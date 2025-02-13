@@ -1131,11 +1131,13 @@ void InformationSchema::init_afs_partitions() {
             }
 
             std::map<int64_t, std::map<std::string, std::set<std::string>>> table_id_name_partitions;
+#ifdef BAIDU_INTERNAL
             int ret = ExtFileSystemGC::get_all_partitions_from_store(table_id_name_partitions);
             if (ret < 0) {
                 DB_WARNING("get all partitions from store failed");
                 return records;
             }
+#endif
             for (const auto& table_id_name_partitions_pair : table_id_name_partitions) {
                 for (const auto& name_partitions_pair : table_id_name_partitions_pair.second) {
                     const std::string& table_name = name_partitions_pair.first;
