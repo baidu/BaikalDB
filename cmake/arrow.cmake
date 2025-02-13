@@ -39,4 +39,4 @@ ExternalProject_Add(
 
 ADD_LIBRARY(arrow STATIC IMPORTED GLOBAL)
 SET_PROPERTY(TARGET arrow PROPERTY IMPORTED_LOCATION ${ARROW_LIBRARIES})
-ADD_DEPENDENCIES(arrow extern_arrow)
+ADD_DEPENDENCIES(arrow extern_arrow zlib snappy zstd lz4)
