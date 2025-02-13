@@ -502,6 +502,7 @@ bool ExprNode::like_node_optimize(ExprNode** root, std::vector<ExprNode*>& new_e
         ExprNode::destroy_tree(expr);
         return true;
     }
+    return false;
 }
 
 int ExprNode::create_expr_node(const pb::ExprNode& node, ExprNode** expr_node) {
