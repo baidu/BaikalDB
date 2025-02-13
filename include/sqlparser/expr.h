@@ -279,8 +279,10 @@ struct LiteralExpr : public ExprNode {
                 break;
             case LT_PLACE_HOLDER:
                 std::cout << "?(" << _u.int64_val << ")";
+                break;
             case LT_MAXVALUE:
                 std::cout << "MAXVALUE";
+                break;
         }
         std::cout << std::endl;
     }
