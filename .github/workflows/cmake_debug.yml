@@ -1,7 +1,7 @@
-name: Cmake Compile
+name: Cmake Debug 
 
 on:
-  [push,pull_request]
+  [workflow_dispatch]
 
 jobs:
   build:
@@ -18,3 +18,5 @@ jobs:
       run: sudo apt-get update && sudo apt-get install -y flex bison libssl-dev autoconf g++ libtool make cmake libz-dev locate gfortran
     - name: Build
       run: mkdir -p buildenv && cd buildenv && cmake -DWITH_BAIKAL_CLIENT=OFF .. && make 
+    - name: Start tmate session
+      uses: mxschmitt/action-tmate@v3

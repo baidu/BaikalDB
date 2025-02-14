@@ -387,10 +387,10 @@ endif ()
 
 SET(DEP_LIB
         ${DEP_LIB}
-        ${ARROW_BUNDLED_DEP_LIB}
-        ${ARROW_LIBRARIES}
         ${ARROW_ACERO_LIB}
+        ${ARROW_LIBRARIES}
         ${ARROW_PARQUET_LIB}
+        ${ARROW_BUNDLED_DEP_LIB}
         ${PROTOBUF_LIBRARIES}
         ${PROTOBUF_PROTOC_LIBRARY}
         ${GFLAGS_LIBRARIES}
