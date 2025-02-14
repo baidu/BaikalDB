@@ -389,6 +389,7 @@ SET(DEP_LIB
         ${DEP_LIB}
         ${ARROW_ACERO_LIB}
         ${ARROW_LIBRARIES}
+        ${ARROW_ACERO_LIB}
         ${ARROW_PARQUET_LIB}
         ${ARROW_BUNDLED_DEP_LIB}
         ${PROTOBUF_LIBRARIES}

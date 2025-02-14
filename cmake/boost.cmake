@@ -41,7 +41,7 @@ set_directory_properties(PROPERTIES CLEAN_NO_CUSTOM 1)
 include_directories(${BOOST_INCLUDE_DIR})
 
 FILE(WRITE ${BOOST_DOWNLOAD_DIR}/build.sh
-        "cd ${BOOST_DOWNLOAD_DIR} && mkdir -p build && sh bootstrap.sh --prefix=${BOOST_INSTALL_DIR} --with-libraries=thread,filesystem,regex,system && ./b2 install"
+        "cd ${BOOST_DOWNLOAD_DIR} && mkdir -p build && sh bootstrap.sh --prefix=${BOOST_INSTALL_DIR} --with-libraries=thread,filesystem,regex,system && ./b2 install --quiet"
         )
 
 ExternalProject_Add(
