@@ -46,7 +46,6 @@ ExternalProject_Add(
             COMMAND mkdir -p ${ARROW_INCLUDE_DIR}
             COMMAND cp -r ${ARROW_SOURCES_DIR}/src/extern_arrow/cpp/src/arrow ${ARROW_INCLUDE_DIR}/
             COMMAND cp -r ${ARROW_SOURCES_DIR}/src/extern_arrow/cpp/src/parquet ${ARROW_INCLUDE_DIR}/
-            COMMAND cp -r ${ARROW_SOURCES_DIR}/src/extern_arrow/cpp/src/acero ${ARROW_INCLUDE_DIR}/
 )
 
 ADD_DEPENDENCIES(extern_arrow zlib snappy zstd lz4 re2 protobuf rapidjson)
