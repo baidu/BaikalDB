@@ -67,6 +67,7 @@ ExternalProject_Add(
         CMAKE_CACHE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${ROCKSDB_INSTALL_DIR}
         -DCMAKE_POSITION_INDEPENDENT_CODE:BOOL=ON
         -DCMAKE_BUILD_TYPE:STRING=${THIRD_PARTY_BUILD_TYPE}
+        BUILD_COMMAND make -j2
 )
 
 ADD_DEPENDENCIES(extern_rocksdb zlib snappy zstd lz4 gflags liburing)

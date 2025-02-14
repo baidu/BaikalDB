@@ -17,7 +17,7 @@ jobs:
     - name: Install Dependencies
       run: sudo apt-get update && sudo apt-get install -y flex bison libssl-dev autoconf g++ libtool make cmake libz-dev locate gfortran
     - name: Build
-      run: mkdir -p buildenv && cd buildenv && cmake -DWITH_BAIKAL_CLIENT=OFF .. && make 
+      run: mkdir -p buildenv && cd buildenv && cmake -DWITH_BAIKAL_CLIENT=OFF .. && make -j2
     - name: Start tmate session
       if: failure()  # 只有失败时运行
       uses: mxschmitt/action-tmate@v3
