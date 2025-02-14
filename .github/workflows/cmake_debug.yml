@@ -19,4 +19,5 @@ jobs:
     - name: Build
       run: mkdir -p buildenv && cd buildenv && cmake -DWITH_BAIKAL_CLIENT=OFF .. && make 
     - name: Start tmate session
+      if: failure()  # 只有失败时运行
       uses: mxschmitt/action-tmate@v3
