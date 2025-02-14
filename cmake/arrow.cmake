@@ -46,7 +46,7 @@ ExternalProject_Add(
             COMMAND cp -r ${ARROW_SOURCES_DIR}/src/extern_arrow/cpp/src/parquet ${ARROW_INCLUDE_DIR}/
 )
 
-ADD_DEPENDENCIES(extern_arrow zlib snappy zstd lz4 re2 protobuf rapaidjson)
+ADD_DEPENDENCIES(extern_arrow zlib snappy zstd lz4 re2 protobuf rapidjson)
 ADD_LIBRARY(arrow STATIC IMPORTED GLOBAL)
 SET_PROPERTY(TARGET arrow PROPERTY IMPORTED_LOCATION ${ARROW_LIBRARIES})
 ADD_LIBRARY(parquet STATIC IMPORTED GLOBAL)
