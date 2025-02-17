@@ -174,6 +174,7 @@ public:
     void cold_region_flush_thread();
     void cold_region_check();
     void hot_region_check();
+    void get_hot_region_size(std::map<int64_t, int64_t>& region_size_map);
     void olap_region_check_thread();
 
     void binlog_region_backup_thread();
@@ -468,6 +469,7 @@ private:
 
     bool _has_prepared_tran = true;
     bool _has_binlog_region = false;
+    bool _meta_need_report = false; // meta下发需要完全上报
     BthreadCond _get_tso_cond {-1};
     BthreadCond _multi_thread_cond;
     bthread::Mutex _lock;

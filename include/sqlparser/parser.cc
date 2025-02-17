@@ -61,19 +61,19 @@ void SqlParser::parse(const std::string& sql_) {
             }
         }
         if (!is_asc) {
-            if (is_gbk != (charset == "gbk")) {
+            if (is_gbk != (charset == baikaldb::pb::GBK)) {
                 DB_WARNING("is_utf8_strict fail, sql:%s", sql_.c_str());
             }
         }
     } else {
-        if (charset == "gbk") {
+        if (charset == baikaldb::pb::GBK) {
             is_gbk = true;
         } else {
             is_gbk = false;
         }
     }
 #else
-    if (charset == "gbk") {
+    if (charset == baikaldb::pb::GBK) {
         is_gbk = true;
     } else {
         is_gbk = false;

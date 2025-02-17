@@ -28,66 +28,6 @@ DEFINE_bool(enable_print_convert_log, false, "enable_print_convert_log");
 std::atomic_long g_statistic_insert_key_num = {0};
 std::atomic_long g_statistic_delete_key_num = {0};
 
-int Iconv::utf8_to_gbk(const char* psrc, const size_t nsrc, std::string& dst) {
-    if (_cd_utf8_to_gbk == (iconv_t)-1) {
-        DB_FATAL("Fail to iconv open, _cd_utf8_to_gbk == (iconv_t)-1");
-        return -1;
-    }
-
-    if (psrc == nullptr) {
-        DB_FATAL("psrc is Empty");
-        return -1;
-    }
-    if (nsrc <= 0) { 
-        return 0; 
-    }
-    dst.resize(nsrc + 1);
-
-    char* inbuf     = const_cast<char*>(psrc);
-    size_t in_bytes_left  = nsrc;
-    char* outbuf          = &dst[0];
-    size_t out_bytes_left = dst.size();
-
-    iconv(_cd_utf8_to_gbk, nullptr, nullptr, nullptr, nullptr);
-    size_t ret = iconv(_cd_utf8_to_gbk, &inbuf, &in_bytes_left, &outbuf, &out_bytes_left);
-    if (ret != 0) {
-        return -1;
-    }
-
-    dst.resize(dst.size() - out_bytes_left);
-    return 0;
-}
-
-int Iconv::gbk_to_utf8(const char* psrc, const size_t nsrc, std::string& dst) {
-    if (_cd_gbk_to_utf8 == (iconv_t)-1) {
-        DB_FATAL("Fail to iconv open, _cd_gbk_to_utf8 == (iconv_t)-1");
-        return -1;
-    }
-
-    if (psrc == nullptr) {
-        DB_FATAL("psrc is Empty");
-        return -1;
-    }
-    if (nsrc <= 0) { 
-        return 0; 
-    }
-    dst.resize(nsrc / 2 * 3 + 1);
-
-    char* inbuf     = const_cast<char*>(psrc);
-    size_t in_bytes_left  = nsrc;
-    char* outbuf          = &dst[0];
-    size_t out_bytes_left = dst.size();
-
-    iconv(_cd_gbk_to_utf8, nullptr, nullptr, nullptr, nullptr);
-    size_t ret = iconv(_cd_gbk_to_utf8, &inbuf, &in_bytes_left, &outbuf, &out_bytes_left);
-    if (ret != 0) {
-        return -1;
-    }
-
-    dst.resize(dst.size() - out_bytes_left);
-    return 0;
-}
-
 int Tokenizer::init() {
     {
         std::ifstream fp(FLAGS_punctuation_path);
@@ -482,7 +422,7 @@ int Tokenizer::utf8_to_gbk(std::string& word) {
     }
 
     std::string word_tmp;
-    if (iconv_tls.utf8_to_gbk(&word[0] + bom_len, word.size() - bom_len, word_tmp) != 0) {
+    if (iconv_convert<pb::GBK, pb::UTF8>(word_tmp, &word[0] + bom_len, word.size() - bom_len) != 0) {
         if (FLAGS_enable_print_convert_log) {
             DB_WARNING("Fail to convert utf8 to gbk, %s|%s", word.c_str(), word_tmp.c_str());
         }
@@ -498,7 +438,7 @@ int Tokenizer::gbk_to_utf8(std::string& word) {
     }
 
     std::string word_tmp;
-    if (iconv_tls.gbk_to_utf8(&word[0], word.size(), word_tmp) != 0) {
+    if (iconv_convert<pb::UTF8, pb::GBK>(word_tmp, &word[0], word.size()) != 0) {
         if (FLAGS_enable_print_convert_log) {
             DB_WARNING("Fail to convert gbk to utf8, %s|%s", word.c_str(), word_tmp.c_str());
         }

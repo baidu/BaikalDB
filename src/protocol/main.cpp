@@ -28,6 +28,8 @@
 #include "schema_factory.h"
 #include "information_schema.h"
 #include "memory_profile.h"
+#include "arrow_function.h"
+#include "arrow_io_excutor.h"
 
 namespace baikaldb {
 
@@ -71,8 +73,16 @@ int main(int argc, char **argv) {
 
     // init singleton
     baikaldb::FunctionManager::instance()->init();
-    if (baikaldb::SchemaFactory::get_instance()->init() != 0) {
+    if (baikaldb::SchemaFactory::get_instance()->init(true, false) != 0) {
         DB_FATAL("SchemaFactory init failed");
+        return -1;
+    }
+    if (baikaldb::ArrowFunctionManager::instance()->RegisterAllArrowFunction() != 0) {
+        DB_FATAL("RegisterAllArrowFunction failed");
+        return -1;
+    }
+    if (baikaldb::GlobalArrowExecutor::init() != 0) {
+        DB_FATAL("GlobalArrowExecutor init failed");
         return -1;
     }
     if (baikaldb::InformationSchema::get_instance()->init() != 0) {
@@ -101,7 +111,7 @@ int main(int argc, char **argv) {
         return -1;
     }
     if (baikaldb::MetaServerInteract::get_backup_instance()->is_inited()) {
-        if (baikaldb::SchemaFactory::get_backup_instance()->init() != 0) {
+        if (baikaldb::SchemaFactory::get_backup_instance()->init(true, true) != 0) {
             DB_FATAL("SchemaFactory init failed");
             return -1;
         }

@@ -108,18 +108,6 @@ else ()
     include(rapidjson)
 endif ()
 
-#apache arrow
-if (WITH_SYSTEM_LIBS)
-    find_path(ARROW_INCLUDE_DIR NAMES arrow/api.h)
-    find_library(ARROW_LIBRARIES NAMES arrow)
-    if ((NOT ARROW_INCLUDE_DIR) OR (NOT ARROW_LIBRARIES))
-        message(FATAL_ERROR "Fail to find arrow")
-    endif ()
-    ADD_LIBRARY(arrow SHARED IMPORTED GLOBAL)
-else ()
-    include(arrow)
-endif ()
-
 #openblas
 if (WITH_SYSTEM_LIBS)
     find_path(OPENBLAS_INCLUDE_DIR NAMES openblas/api.h)
@@ -308,6 +296,18 @@ if (WITH_GPERF)
     endif ()
 endif ()
 
+#apache arrow
+if (WITH_SYSTEM_LIBS)
+    find_path(ARROW_INCLUDE_DIR NAMES arrow/api.h)
+    find_library(ARROW_LIBRARIES NAMES arrow)
+    if ((NOT ARROW_INCLUDE_DIR) OR (NOT ARROW_LIBRARIES))
+        message(FATAL_ERROR "Fail to find arrow")
+    endif ()
+    ADD_LIBRARY(arrow SHARED IMPORTED GLOBAL)
+else ()
+    include(arrow)
+endif ()
+
 message(CUR_DIR : ${CMAKE_CURRENT_BINARY_DIR}, SRC_DIR : ${CMAKE_SOURCE_DIR})
 
 file(GLOB PROTO_FILES ${CMAKE_SOURCE_DIR}/proto/*.proto)
@@ -387,6 +387,11 @@ endif ()
 
 SET(DEP_LIB
         ${DEP_LIB}
+        ${ARROW_ACERO_LIB}
+        ${ARROW_LIBRARIES}
+        ${ARROW_ACERO_LIB}
+        ${ARROW_PARQUET_LIB}
+        ${ARROW_BUNDLED_DEP_LIB}
         ${PROTOBUF_LIBRARIES}
         ${PROTOBUF_PROTOC_LIBRARY}
         ${GFLAGS_LIBRARIES}
@@ -396,12 +401,10 @@ SET(DEP_LIB
         ${LZ4_LIBRARIES}
         ${LIBURING_LIBRARIES}
         ${RE2_LIBRARIES}
-        ${ARROW_LIBRARIES}
         ${FAISS_LIBRARIES}
         ${OPENBLAS_LIBRARIES}
         ${CROARING_LIBRARIES}
         ${Boost_LIBRARIES}
-        #        ${BZ2_LIBRARIES}
         )
 
 if (WITH_GPERF)

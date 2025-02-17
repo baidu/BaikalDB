@@ -41,9 +41,20 @@ std::string TableRecord::get_index_value(IndexInfo& index) {
 
 int TableRecord::get_reverse_word(IndexInfo& index_info, std::string& word) {
     //int ret = 0;
-    auto field = get_field_by_idx(index_info.fields[0].pb_idx);
+    if (index_info.type == pb::I_FULLTEXT && index_info.fields.size() != 1) {
+        return -1;
+    }
+    if (index_info.type == pb::I_VECTOR && index_info.fields.size() != 1 && index_info.fields.size() != 2) {
+        return -1;
+    }
+    int field_idx = 0;
+    // 向量隔离索引场景
+    if (index_info.type == pb::I_VECTOR && index_info.fields.size() > 1) {
+        field_idx = 1;
+    }
+    auto field = get_field_by_idx(index_info.fields[field_idx].pb_idx);
     //DB_WARNING("index_info:%d id:%d", index_info.fields[0].type, index_info.fields[0].id);
-    if (index_info.fields[0].type == pb::STRING) {
+    if (index_info.fields[field_idx].type == pb::STRING) {
         return get_string(field, word);
     } else {
         /*
@@ -149,7 +160,7 @@ int TableRecord::encode_key(IndexInfo& index, MutTableKey& key, int field_cnt, b
         DB_WARNING("unknown table index type: %ld", index.id);
         return -1;
     }
-    if (index.type == pb::I_KEY || index.type == pb::I_UNIQ) {
+    if (index.type == pb::I_KEY || index.type == pb::I_UNIQ || index.type == pb::I_ROLLUP) {
         key.append_u8(null_flag);
     }
     uint32_t col_cnt = (field_cnt == -1)? index.fields.size() : field_cnt;
@@ -174,7 +185,7 @@ int TableRecord::encode_key(IndexInfo& index, MutTableKey& key, int field_cnt, b
                 return -2;
             }
             res = encode_field(_reflection, field, info, key, clear, last_field_like_prefix);
-        } else if (index.type == pb::I_KEY || index.type == pb::I_UNIQ) {
+        } else if (index.type == pb::I_KEY || index.type == pb::I_UNIQ || index.type == pb::I_ROLLUP) {
             if (!_reflection->HasField(*_message, field)) {
                 // this field is null
                 //DB_DEBUG("missing index field: %u, set null-flag", idx);
@@ -235,6 +246,49 @@ int TableRecord::encode_primary_key(IndexInfo& index, MutTableKey& key, int fiel
     return 0;
 }
 
+int TableRecord::encode_value_for_rollup(IndexInfo& index, const std::vector<FieldInfo>& total_fields, 
+                    const std::vector<FieldInfo>& fields_need_sum, bool is_delete) {
+    if (index.type != pb::I_ROLLUP) {
+        DB_WARNING("table index type: %ld invalid rollup type", index.id);
+        return -1;
+    }
+    
+    std::unordered_set<int> fields_need_sum_pbidx_set;
+    for (auto field: fields_need_sum) {
+        fields_need_sum_pbidx_set.insert(field.pb_idx);
+    }
+    const Reflection* _reflection = _message->GetReflection();
+    for (auto field : total_fields) {
+        const FieldDescriptor* field_desc = get_field_by_idx(field.pb_idx);
+        if (!_reflection->HasField(*_message, field_desc)) {
+            ExprValue default_val(pb::INT64);
+            MessageHelper::set_value(field_desc, _message, default_val);
+        }
+        if (fields_need_sum_pbidx_set.count(field.pb_idx) != 0) {
+            if (is_delete) {
+                pb::PrimitiveType field_type = field.type;
+                switch (field_type) {
+                    case pb::INT32: {
+                        int32_t val = _reflection->GetInt32(*_message, field_desc);
+                        _reflection->SetInt32(_message, field_desc, -val);
+                    } break;
+                    case pb::INT64: {
+                        int64_t val = _reflection->GetInt64(*_message, field_desc);
+                        _reflection->SetInt64(_message, field_desc, -val);
+                    } break;
+                    default: {
+                        DB_FATAL("rollup %s not support type: %s", index.name.c_str(), pb::PrimitiveType_Name(field_type).c_str());
+                        return -1;
+                    }
+                }
+            }
+            continue;
+        }
+        _reflection->ClearField(_message, field_desc);
+    }
+    return 0;
+}
+
 //decode and fill into *this (primary/secondary) starting from 0
 int TableRecord::decode_key(IndexInfo& index, const std::string& key) {
     TableKey pkey(key, true);
@@ -258,7 +312,7 @@ int TableRecord::decode_key(IndexInfo& index, const TableKey& key, int& pos) {
     }
     uint8_t null_flag = 0;
     const Reflection* _reflection = _message->GetReflection();
-    if (index.type == pb::I_KEY || index.type == pb::I_UNIQ) {
+    if (index.type == pb::I_KEY || index.type == pb::I_UNIQ || index.type == pb::I_ROLLUP) {
         null_flag = key.extract_u8(pos);
         pos += sizeof(uint8_t);
     }

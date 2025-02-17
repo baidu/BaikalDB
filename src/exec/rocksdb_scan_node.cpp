@@ -22,13 +22,18 @@
 #include "runtime_state.h"
 #include "parser.h"
 #include "qos.h"
+#include <arrow/acero/options.h>
+#include "arrow_io_excutor.h"
+#include "vectorize_helpper.h"
 
 namespace baikaldb {
 
 DEFINE_bool(reverse_seek_first_level, false, "reverse index seek first level, default(false)");
 DEFINE_bool(scan_use_multi_get, true, "use MultiGet API, default(true)");
 DEFINE_int32(in_predicate_check_threshold, 4096, "in predicate threshold to check memory, default(4096)");
+DEFINE_bool(auto_ajust_topk, true, "auto_ajust_topk");
 DECLARE_int64(print_time_us);
+DECLARE_int32(chunk_size);
 
 int RocksdbScanNode::choose_index(RuntimeState* state) {
     // 做完logical plan还没有索引
@@ -43,7 +48,6 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
     if (_pb_node.derive_node().scan_node().has_fulltext_index()) {
         _new_fulltext_tree = true;
     }
-    bool use_fulltext = false;
     if (pos_index.has_range_key_sorted()) {
         _range_key_sorted = pos_index.range_key_sorted();
     }
@@ -55,9 +59,7 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
         return -1;
     }
     bool use_vector = _index_info->type == pb::I_VECTOR;
-    if (_index_info->type == pb::I_FULLTEXT) {
-        use_fulltext = true;
-    }
+    bool use_fulltext = _index_info->type == pb::I_FULLTEXT;
 
     int ret = 0;
     for (auto& expr : pos_index.index_conjuncts()) {
@@ -95,6 +97,9 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
             _sort_use_index = true;
         }
         _scan_forward = pos_index.sort_index().is_asc();
+    }
+    if (use_vector) {
+        _sort_use_index = true;
     }
 
     for (auto& f : _pri_info->fields) {
@@ -142,6 +147,7 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
             for (auto& range : pos_index.ranges()) {
                 _vector_word = range.left_key();
                 _topk = std::max(range.topk(), _topk);
+                _separate_value = range.separate_value();
             }
         }
         _vector_index = state->vector_index_map()[_index_id];
@@ -271,7 +277,6 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
             return ret;
         }
     }
-
     //DB_WARNING_STATE(state, "start search");
     return 0;
 }
@@ -302,6 +307,7 @@ int RocksdbScanNode::init(const pb::PlanNode& node) {
     _is_ddl_work = node.derive_node().scan_node().is_ddl_work();
     _ddl_work_type = node.derive_node().scan_node().ddl_work_type();
     _ddl_index_id = node.derive_node().scan_node().ddl_index_id();
+    _watt_stats_version = node.derive_node().scan_node().watt_stats_version();
     if (_ddl_work_type == pb::DDL_LOCAL_INDEX || _is_ddl_work) {
         _ddl_index_info = _factory->get_index_info_ptr(_ddl_index_id);
         if (_ddl_index_info == nullptr) {
@@ -436,6 +442,84 @@ int RocksdbScanNode::index_condition_pushdown() {
     return 0;
 }
 
+int RocksdbScanNode::build_arrow_declaration(RuntimeState* state) {
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
+    for (auto c : _children) {
+        if (c->build_arrow_declaration(state) != 0) {
+            return -1;
+        }
+    }
+    // transfer acero source Declaration
+    std::function<arrow::Iterator<std::shared_ptr<arrow::RecordBatch>>()> iter_maker = [this] () {
+        arrow::Iterator<std::shared_ptr<arrow::RecordBatch>> batch_it = arrow::MakeIteratorFromReader(_arrow_vectorized_reader);
+        return batch_it;
+    };
+    arrow::acero::Declaration dec{"record_batch_source",
+            arrow::acero::RecordBatchSourceNodeOptions{state->arrow_input_schemas[_tuple_id], std::move(iter_maker)}}; 
+    //auto io_executor = BthreadArrowExecutor::Make(1);
+    //arrow::acero::Declaration dec{"record_batch_reader_source",
+    //        arrow::acero::RecordBatchReaderSourceNodeOptions{vectorized_reader, /*io_executor*/(*io_executor).get()}};
+    LOCAL_TRACE_ARROW_PLAN_WITH_SCHEMA(dec, state->arrow_input_schemas[_tuple_id], nullptr);
+    state->append_acero_declaration(dec);
+
+    std::vector<arrow::compute::Expression> sub_exprs;
+    // append scan index filter
+    if (!_scan_conjuncts.empty()) {
+        sub_exprs.reserve(_scan_conjuncts.size());
+        for (int i = 0; i < _scan_conjuncts.size(); ++i) {
+            if (_scan_conjuncts[i]->transfer_to_arrow_expression() != 0) {
+                DB_FATAL_STATE(state, "expr transfer arrow fail");
+                return -1;
+            }
+            sub_exprs.emplace_back(_scan_conjuncts[i]->arrow_expr());
+        }
+        _arrow_scan_conjuncts = arrow::compute::and_(sub_exprs);
+        arrow::Result<arrow::compute::Expression> bind_expr = _arrow_scan_conjuncts.Bind(*(state->arrow_input_schemas[_tuple_id]));
+        if (!bind_expr.ok()) {
+            // bind失败的, 无法scan的时候执行filter
+            DB_FATAL("bind expr fail:%s", bind_expr.status().ToString().c_str());
+            return -1;
+        } 
+        _arrow_scan_conjuncts = *bind_expr;
+        _arrow_vectorized_reader->set_arrow_scan_conjuncts(&_arrow_scan_conjuncts);
+        LOCAL_TRACE_ARROW_FILTER(&_arrow_scan_conjuncts, _limit);
+    }
+
+    sub_exprs.clear();
+    // arrow pushdown all filter into scan, for limit support
+    ExecNode* parent = _parent;
+    int64_t filter_limit = get_limit();
+    for (; parent != nullptr; parent = parent->get_parent()) {
+        if (parent->node_type() == pb::WHERE_FILTER_NODE 
+            || parent->node_type() == pb::TABLE_FILTER_NODE
+            || parent->node_type() == pb::HAVING_FILTER_NODE) {
+            if (static_cast<FilterNode*>(parent)->arrow_steal_conjuncts(sub_exprs, filter_limit) != 0) {
+                DB_FATAL("arrow steal conjuncts fail");
+                return -1;
+            }
+        }
+    }
+    arrow::Expression* filter_expr = nullptr;
+    if (!sub_exprs.empty()) {
+        _arrow_filter_conjuncts = arrow::compute::and_(sub_exprs);
+        arrow::Result<arrow::compute::Expression> bind_expr = _arrow_filter_conjuncts.Bind(*(state->arrow_input_schemas[_tuple_id]));
+        if (!bind_expr.ok()) {
+            // bind失败的, 无法scan的时候执行filter
+            DB_FATAL("bind expr fail:%s", bind_expr.status().ToString().c_str());
+            return -1;
+        }
+        _arrow_filter_conjuncts = *bind_expr;
+        filter_expr = &_arrow_filter_conjuncts;
+    }
+    _arrow_vectorized_reader->set_arrow_filter_conjuncts(filter_expr, filter_limit);
+    LOCAL_TRACE_ARROW_FILTER(filter_expr, filter_limit);
+    _arrow_filter_batch_size = 1024;
+    if (get_limit() > 0) {
+        _arrow_filter_batch_size = get_limit();
+    }
+    return 0;
+}
+
 int RocksdbScanNode::open(RuntimeState* state) {
     START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, ([this](TraceLocalNode& local_node) {
         if (_table_info != nullptr) {
@@ -454,6 +538,7 @@ int RocksdbScanNode::open(RuntimeState* state) {
         DB_WARNING_STATE(state, "ExecNode::open fail:%d", ret);
         return ret;
     }
+    set_node_exec_type(pb::EXEC_ROW);
     _mem_row_desc = state->mem_row_desc();
     if (_is_explain) {
         return 0;
@@ -498,7 +583,7 @@ int RocksdbScanNode::open(RuntimeState* state) {
                 field->short_name != "__querywords") {
                 _field_ids[slot.field_id()] = field;
             } else {
-                _has_s_wordrank = true;
+                _has__weight = true;
                 // 倒排__weight也能index过滤
                 _index_slot_field_map[slot.slot_id()] = field->id;
             }
@@ -525,7 +610,15 @@ int RocksdbScanNode::open(RuntimeState* state) {
     auto reverse_index_map = state->reverse_index_map();
     //DB_WARNING_STATE(state, "_is_covering_index:%d", _is_covering_index);
     if (_vector_index != nullptr) {
-        int ret = _vector_index->search(txn->get_txn(), _pri_info, _table_info, _vector_word, _topk, _left_records);
+        int ret = _vector_index->search_vector(txn->get_txn(), 
+                                               _separate_value,
+                                               _pri_info, 
+                                               _table_info, 
+                                               _vector_word, 
+                                               _topk, 
+                                               _left_records, 
+                                               _vector_retry++, 
+                                               _vector_eos);
         if (ret < 0) {
             DB_FATAL("vector_index search fail, index:%ld, table:%ld", _index_info->id, _table_info->id);
             return -1;
@@ -639,6 +732,10 @@ int RocksdbScanNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         DB_WARNING_STATE(state, "sql exec reach timeout");
         return -1;
     }
+    if (state->execute_type == pb::EXEC_ARROW_ACERO && batch->use_memrow() && _arrow_vectorized_reader != nullptr) {
+        set_node_exec_type(pb::EXEC_ARROW_ACERO);
+        return 0;
+    }
     ON_SCOPE_EXIT(([this, state]() {
         state->set_num_scan_rows(_scan_rows);
         state->set_read_disk_size(_read_disk_size);
@@ -650,10 +747,10 @@ int RocksdbScanNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
     }
     if (_is_get_keypoint) {
         return get_key_points(state, batch, eos);
-    }
+    } 
     
     int ret = 0;
-    if (_index_id == _table_id) {
+    if (_index_id == _table_id || _index_info->type == pb::I_ROLLUP) {
         if (_use_get) {
             ret =  get_next_by_table_get(state, batch, eos);
         } else {
@@ -672,8 +769,29 @@ int RocksdbScanNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         return ret;
     }
 
-    if (0 != state->memory_limit_exceeded(_scan_rows, batch->used_bytes_size())) {
+    if (state->execute_type == pb::EXEC_ROW 
+            && 0 != state->memory_limit_exceeded(_scan_rows, batch->used_bytes_size())) {
+        // [ARROW TODO] 列存不感知上面filter和agg, 先不支持memory_limit
         return -1;
+    }
+    if (state->execute_type == pb::EXEC_ARROW_ACERO && _arrow_vectorized_reader == nullptr) {
+        // 处理第一个rowbatch
+        // [ARROW TODO] filter+limit ; 第一个batch的eos=false, 可能会在这里多转一次列存但是不使用
+        if (*eos == false || state->force_vectorize) {
+            // 将第一个rowbatch转chunk arrow
+            _arrow_vectorized_reader = std::make_shared<RocksdbVectorizedReader>();
+            ret = _arrow_vectorized_reader->init(this, state);
+            if (ret != 0) {
+                return -1;
+            }
+            ret = _arrow_vectorized_reader->add_first_row_batch(batch);
+            if (ret != 0) {
+                return -1;
+            }
+        }
+        if (state->force_vectorize) {
+            set_node_exec_type(pb::EXEC_ARROW_ACERO);
+        }
     }
     return 0;
 }
@@ -692,37 +810,45 @@ void RocksdbScanNode::close(RuntimeState* state) {
     _right_opens.clear();
     _like_prefixs.clear();
     _topk = 10;
+    _vector_retry = 0;
+    _vector_eos = false;
     _reverse_infos.clear();
     _query_words.clear();
     _match_modes.clear();
     _reverse_indexes.clear();
     _vector_index = nullptr;
     _vector_word.clear();
-
+    _filter_chunk.reset();
+    _arrow_vectorized_reader.reset();
+    _separate_value = 0;
 }
 
 int64_t RocksdbScanNode::copy_multiget_rows(RowBatch* output_batch, std::vector<ExprNode*>* conjuncts) {
     int64_t index_filter_cnt = 0;
-    while (!_multiget_row_batch.is_traverse_over()) {
-        if (output_batch->is_full()) {
-            return index_filter_cnt;
+    if (output_batch->use_memrow()) {
+        while (!_multiget_row_batch.is_traverse_over()) {
+            if (output_batch->is_full()) {
+                return index_filter_cnt;
+            }
+            if (reached_limit()) {
+                return index_filter_cnt;
+            }
+            std::unique_ptr<MemRow>& row = _multiget_row_batch.get_row();
+            bool do_copy = true;
+            if (conjuncts != nullptr) {
+                do_copy = need_copy(row.get(), *conjuncts);
+            }
+            if (do_copy) {
+                output_batch->move_row(std::move(row));
+                ++_num_rows_returned;
+                ++_num_rows_returned_by_range;
+            } else {
+                ++index_filter_cnt;
+            }
+            _multiget_row_batch.next();
         }
-        if (reached_limit()) {
-            return index_filter_cnt;
-        }
-        std::unique_ptr<MemRow>& row = _multiget_row_batch.get_row();
-        bool do_copy = true;
-        if (conjuncts != nullptr) {
-            do_copy = need_copy(row.get(), *conjuncts);
-        }
-        if (do_copy) {
-            output_batch->move_row(std::move(row));
-            ++_num_rows_returned;
-            ++_num_rows_returned_by_range;
-        } else {
-            ++index_filter_cnt;
-        }
-        _multiget_row_batch.next();
+    } else {
+        _multiget_row_batch.add_row_batch_to_chunk({get_tuple()}, output_batch->get_chunk());
     }
     _multiget_row_batch.clear();
     return index_filter_cnt;
@@ -736,6 +862,11 @@ int RocksdbScanNode::get_next_by_table_get(RuntimeState* state, RowBatch* batch,
     }));
     auto txn = state->txn();
     SmartRecord record = _factory->new_record(_table_id);
+    bool use_mem_row = batch->use_memrow();
+    RowBatch* multiget_row_batch = &_multiget_row_batch;
+    if (!use_mem_row) {
+        multiget_row_batch = batch;
+    }
     while (1) {
         if (state->is_cancelled()) {
             DB_WARNING_STATE(state, "cancelled");
@@ -776,24 +907,38 @@ int RocksdbScanNode::get_next_by_table_get(RuntimeState* state, RowBatch* batch,
                 }
                 _read_disk_size += txn->read_disk_size;
             }
-            std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
-            for (auto slot : _tuple_desc->slots()) {
-                auto field = record->get_field_by_tag(slot.field_id());
-                row->set_value(slot.tuple_id(), slot.slot_id(),
-                        record->get_value(field));
+            if (use_mem_row) {
+                std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
+                for (auto slot : _tuple_desc->slots()) {
+                    auto field = record->get_field_by_tag(slot.field_id());
+                    row->set_value(slot.tuple_id(), slot.slot_id(),
+                            record->get_value(field));
+                }
+                if (!need_copy(row.get(), _scan_conjuncts)) {
+                    state->inc_num_filter_rows();
+                    ++index_filter_cnt;
+                    continue;
+                }
+                batch->move_row(std::move(row));
+                ++_num_rows_returned;
+            } else {
+                for (auto slot : _tuple_desc->slots()) {
+                    auto field = record->get_field_by_tag(slot.field_id());
+                    if (0 != batch->set_chunk_tmp_row_value(slot.tuple_id(), slot.slot_id(), record->get_value(field))) {
+                        DB_FATAL_STATE(state, "add chunk row fail");
+                        return -1;
+                    }
+                }
+                if (0 != batch->add_chunk_row()) {
+                    DB_FATAL_STATE(state, "add chunk row fail");
+                    return -1;
+                }
             }
-            if (!need_copy(row.get(), _scan_conjuncts)) {
-                state->inc_num_filter_rows();
-                ++index_filter_cnt;
-                continue;
-            }
-            batch->move_row(std::move(row));
-            ++_num_rows_returned;
         } else {
             auto key_pairs = _scan_range_keys.get_next_batch();
             _idx += key_pairs.size();
             _scan_rows += key_pairs.size();
-            int ret = txn->multiget_primary(_region_id, *_pri_info, key_pairs, _tuple_id, _mem_row_desc, &_multiget_row_batch,
+            int ret = txn->multiget_primary(_region_id, *_pri_info, key_pairs, _tuple_id, _mem_row_desc, multiget_row_batch,
                                 _field_ids, _field_slot, state->need_check_region(), _range_key_sorted);
             _read_disk_size += txn->read_disk_size;
             if (ret < 0) {
@@ -813,7 +958,11 @@ int RocksdbScanNode::get_next_by_index_get(RuntimeState* state, RowBatch* batch,
         local_node.set_scan_rows(_scan_rows);
         local_node.add_index_filter_rows(index_filter_cnt);
     }));
-
+    bool use_mem_row = batch->use_memrow();
+    RowBatch* multiget_row_batch = &_multiget_row_batch;
+    if (!use_mem_row) {
+        multiget_row_batch = batch;
+    }
     auto txn = state->txn();
     SmartRecord record = _factory->new_record(_table_id);
     while (1) {
@@ -867,25 +1016,39 @@ int RocksdbScanNode::get_next_by_index_get(RuntimeState* state, RowBatch* batch,
                 }
                 _read_disk_size += txn->read_disk_size;
             }
-            std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
-            for (auto slot : _tuple_desc->slots()) {
-                auto field = record->get_field_by_tag(slot.field_id());
-                row->set_value(slot.tuple_id(), slot.slot_id(),
-                        record->get_value(field));
+            if (use_mem_row) {
+                std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
+                for (auto slot : _tuple_desc->slots()) {
+                    auto field = record->get_field_by_tag(slot.field_id());
+                    row->set_value(slot.tuple_id(), slot.slot_id(),
+                            record->get_value(field));
+                }
+                if (!need_copy(row.get(), _scan_conjuncts)) {
+                    state->inc_num_filter_rows();
+                    ++index_filter_cnt;
+                    continue;
+                }
+                batch->move_row(std::move(row));
+                ++_num_rows_returned;
+            } else {
+                for (auto slot : _tuple_desc->slots()) {
+                    auto field = record->get_field_by_tag(slot.field_id());
+                    if (0 != batch->set_chunk_tmp_row_value(slot.tuple_id(), slot.slot_id(), record->get_value(field))) {
+                        DB_FATAL_STATE(state, "add chunk row fail");
+                        return -1;
+                    }
+                }
+                if (0 != batch->add_chunk_row()) {
+                    DB_FATAL_STATE(state, "add chunk row fail");
+                    return -1;
+                }
             }
-            if (!need_copy(row.get(), _scan_conjuncts)) {
-                state->inc_num_filter_rows();
-                ++index_filter_cnt;
-                continue;
-            }
-            batch->move_row(std::move(row));
-            ++_num_rows_returned;
         } else {
             auto key_pairs = _scan_range_keys.get_next_batch();
             _idx += key_pairs.size();
             _scan_rows += key_pairs.size();
             int ret = txn->multiget_secondary(_region_id, *_pri_info, *_index_info, key_pairs, record, _multiget_records,
-                                    _tuple_id, _mem_row_desc, &_multiget_row_batch, _field_slot,
+                                    _tuple_id, _mem_row_desc, multiget_row_batch, _field_slot,
                                     !_is_covering_index && !_is_global_index, state->need_check_region(), _range_key_sorted);
             if (ret < 0) {
                 DB_FATAL("get secondary:%ld fail, not exist, ret:%d, record: %s",
@@ -898,7 +1061,7 @@ int RocksdbScanNode::get_next_by_index_get(RuntimeState* state, RowBatch* batch,
             }
             if (!_is_covering_index && !_is_global_index) {
                 int ret = txn->multiget_primary(_region_id, *_pri_info, _tuple_id, _mem_row_desc,
-                                 &_multiget_row_batch, _multiget_records, _field_ids, _field_slot, false);
+                                 multiget_row_batch, _multiget_records, _field_ids, _field_slot, false);
                 if (ret < 0) {
                     DB_FATAL("get primary:%ld fail, not exist, ret:%d, record: %s",
                             _table_id, ret, record->to_string().c_str());
@@ -981,12 +1144,22 @@ int RocksdbScanNode::column_ddl_work(RuntimeState* state, MemRow* row) {
 
 
 int RocksdbScanNode::index_ddl_work(RuntimeState* state, MemRow* row) {
+    std::set<int32_t> pri_field_ids;
     SmartRecord record = TableRecord::new_record(_table_id);
     for (auto& field : _pri_info->fields) {
         int32_t field_id = field.id;
         int32_t slot_id = _field_slot[field_id];
+        pri_field_ids.insert(field_id);
         record->set_value(record->get_field_by_idx(field.pb_idx), row->get_value(_tuple_id, slot_id));
     }
+    if (_ddl_index_info->type == pb::I_ROLLUP) {
+        for (auto& field_info : _table_info->fields) {
+            if (pri_field_ids.count(field_info.id) == 0) {
+                _field_ids[field_info.id] = &field_info;
+            }
+        }
+    }
+    
     auto txn = state->txn();
     if (txn == nullptr) {
         DB_FATAL("txn is nullptr");
@@ -1002,6 +1175,7 @@ int RocksdbScanNode::index_ddl_work(RuntimeState* state, MemRow* row) {
         DB_FATAL("lock key error.");
         return -1;
     }
+
     txn->set_write_ttl_timestamp_us(ttl_duration);
     if (_ddl_index_info->type == pb::I_FULLTEXT) {
         auto& reverse_index_map = state->reverse_index_map();
@@ -1045,40 +1219,45 @@ int RocksdbScanNode::index_ddl_work(RuntimeState* state, MemRow* row) {
         row->set_value(_tuple_id, slot_id, record->get_value(record->get_field_by_idx(pair.second->pb_idx)));
     }
     SmartRecord exist_record = record->clone();
-    ret = txn->get_update_secondary(_region_id, *_pri_info, *_ddl_index_info, exist_record, GET_LOCK, true);
-    if (ret == 0) {
-        MutTableKey key;
-        MutTableKey exist_key;
-        if (record->encode_key(*_pri_info, key, -1, false, false) == 0 && 
-            exist_record->encode_key(*_pri_info, exist_key, -1, false, false) == 0) {
+    if (_ddl_index_info->type != pb::I_ROLLUP) {
+        ret = txn->get_update_secondary(_region_id, *_pri_info, *_ddl_index_info, exist_record, GET_LOCK, true);
+        if (ret == 0) {
+            MutTableKey key;
+            MutTableKey exist_key;
+            if (record->encode_key(*_pri_info, key, -1, false, false) == 0 && 
+                exist_record->encode_key(*_pri_info, exist_key, -1, false, false) == 0) {
 
-            if (key.data().compare(exist_key.data()) == 0) {
-                DB_NOTICE("same pk val.");
-                return 0;
-            } else if (_ddl_index_info->type == pb::I_UNIQ) {
-                DB_WARNING("not same pk value record %s exist_record %s.", record->to_string().c_str(), 
+                if (key.data().compare(exist_key.data()) == 0) {
+                    DB_NOTICE("same pk val.");
+                    return 0;
+                } else if (_ddl_index_info->type == pb::I_UNIQ) {
+                    DB_WARNING("not same pk value record %s exist_record %s.", record->to_string().c_str(), 
+                        exist_record->to_string().c_str());
+                    state->error_code = ER_DUP_ENTRY;
+                    state->error_msg << "Duplicate entry: '" << 
+                            record->get_index_value(*_ddl_index_info) << "' for key '" << _ddl_index_info->short_name << "'";
+                    return -1;
+                }
+            } else {
+                DB_FATAL("encode key error record %s exist_record %s.", record->to_string().c_str(), 
                     exist_record->to_string().c_str());
                 state->error_code = ER_DUP_ENTRY;
                 state->error_msg << "Duplicate entry: '" << 
                         record->get_index_value(*_ddl_index_info) << "' for key '" << _ddl_index_info->short_name << "'";
                 return -1;
             }
-        } else {
-            DB_FATAL("encode key error record %s exist_record %s.", record->to_string().c_str(), 
-                exist_record->to_string().c_str());
-            state->error_code = ER_DUP_ENTRY;
-            state->error_msg << "Duplicate entry: '" << 
-                    record->get_index_value(*_ddl_index_info) << "' for key '" << _ddl_index_info->short_name << "'";
+        }
+        // ret == -3 means the primary_key returned by get_update_secondary is out of the region
+        // (dirty data), this does not affect the insertion
+        if (ret != -2 && ret != -3 && ret != -4) {
+            DB_WARNING_STATE(state, "insert rocksdb failed, index:%ld, ret:%d", _ddl_index_info->id, ret);
             return -1;
         }
-    }
-    // ret == -3 means the primary_key returned by get_update_secondary is out of the region
-    // (dirty data), this does not affect the insertion
-    if (ret != -2 && ret != -3 && ret != -4) {
-        DB_WARNING_STATE(state, "insert rocksdb failed, index:%ld, ret:%d", _ddl_index_info->id, ret);
-        return -1;
-    }
-    ret = txn->put_secondary(_region_id, *_ddl_index_info, record);
+    } else {
+        txn->set_leader_merge_in_raft(FLAGS_leader_merge_in_raft);
+
+    } 
+    ret = txn->put_secondary(_region_id, *_ddl_index_info, record, _ddl_index_info->type == pb::I_ROLLUP);
     if (ret < 0) {
         DB_WARNING_STATE(state, "put index:%ld fail:%d, table_id:%ld", _ddl_index_info->id, ret, _table_id);
         return ret;
@@ -1122,6 +1301,7 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
         local_node.set_scan_rows(_scan_rows);
     }));
     state->ttl_timestamp_vec.clear();
+    state->txn()->set_watt_stats_version(_watt_stats_version);
     while (1) {
         if (state->is_cancelled()) {
             DB_WARNING_STATE(state, "cancelled");
@@ -1178,55 +1358,70 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
                 }
                 _num_rows_returned_by_range = 0;
                 _idx++;
+                ++_scan_rows;
                 continue;
             }
         }
         if (!_table_iter->is_cstore()) {
             ++_scan_rows;
-            std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
-            int ret = _table_iter->get_next(_tuple_id, row);
+            std::unique_ptr<MemRow> row;
+            int ret = 0;
+            if (batch->use_memrow()) {
+                row = _mem_row_desc->fetch_mem_row();
+                ret = _table_iter->get_next(_tuple_id, row);
+            } else {
+                ret = _table_iter->get_next_for_chunk(_tuple_id, batch->get_chunk());
+            }
             if (ret < 0) {
                 continue;
             }
             _read_disk_size += _table_iter->last_read_disk_size;
-            if (_lock != pb::LOCK_GET) {
-                if (_lock == pb::LOCK_GET_ONLY_PRIMARY) {
-                    // select ... for update
-                    if (lock_primary(state, row.get()) != 0) {
-                        return -1;
+            if (row != nullptr) {
+                if (_lock != pb::LOCK_GET) {
+                    if (_lock == pb::LOCK_GET_ONLY_PRIMARY) {
+                        // select ... for update
+                        if (lock_primary(state, row.get()) != 0) {
+                            return -1;
+                        }
+                    }
+                    if (!need_copy(row.get(), _scan_conjuncts)) {
+                        state->inc_num_filter_rows();
+                        ++index_filter_cnt;
+                        continue;
+                    }
+                } else if (need_copy(row.get(), _scan_conjuncts)) {
+                    if (_is_ddl_work) {
+                        // 加局部索引
+                        if (index_ddl_work(state, row.get()) != 0) {
+                            return -1;
+                        }
+                    } else if (_ddl_work_type == pb::DDL_NONE) {
+                        // 加全局二级索引
+                        if (lock_primary(state, row.get()) != 0) {
+                            return -1;
+                        }
+                    } else {
+                        if (process_ddl_work(state, row.get()) !=0) {
+                            return -1;
+                        }
                     }
                 }
-                if (!need_copy(row.get(), _scan_conjuncts)) {
-                    state->inc_num_filter_rows();
-                    ++index_filter_cnt;
-                    continue;
-                }
-            } else if (need_copy(row.get(), _scan_conjuncts)) {
-                if (_is_ddl_work) {
-                    // 加局部索引
-                    if (index_ddl_work(state, row.get()) != 0) {
-                        return -1;
-                    }
-                } else if (_ddl_work_type == pb::DDL_NONE) {
-                    // 加全局二级索引
-                    if (lock_primary(state, row.get()) != 0) {
-                        return -1;
-                    }
+                if (_lock == pb::LOCK_GET &&
+                    (_ddl_work_type == pb::DDL_COLUMN || _ddl_work_type == pb::DDL_LOCAL_INDEX)) {
+                        // local index or column返回最大一条数据
+                        batch->replace_row(std::move(row), 0);
                 } else {
-                    if (process_ddl_work(state, row.get()) !=0) {
-                        return -1;
-                    }
+                    batch->move_row(std::move(row));
+                }
+                ++_num_rows_returned;
+                ++_num_rows_returned_by_range;
+            } else {
+                ret = batch->add_chunk_row();
+                if (ret != 0) {
+                    DB_FATAL_STATE(state, "add chunk row fail");
+                    return -1;
                 }
             }
-            if (_lock == pb::LOCK_GET &&
-                (_ddl_work_type == pb::DDL_COLUMN || _ddl_work_type == pb::DDL_LOCAL_INDEX)) {
-                    // local index or column返回最大一条数据
-                    batch->replace_row(std::move(row), 0);
-            } else {
-                batch->move_row(std::move(row));
-            }
-            ++_num_rows_returned;
-            ++_num_rows_returned_by_range;
         } else {
             // scan primary
             RowBatch row_batch;
@@ -1316,6 +1511,51 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
     }
 }
 
+int RocksdbScanNode::vectorize_filter(RuntimeState* state, std::shared_ptr<Chunk> chunk) {
+    // 先做一次filter, 再反查主表
+    int filter_cnt = 0;
+    if (_scan_conjuncts.empty() || !_vectorized_filtered || chunk ==  nullptr || chunk->size() == 0) {
+        return 0;
+    }
+    std::shared_ptr<arrow::RecordBatch> record_batch;
+    int ret = chunk->finish_and_make_record_batch(&record_batch);
+    if (ret < 0) {
+        DB_FATAL_STATE(state, "chunk finish and make record batch fail");
+        return -1;
+    }
+    arrow::ExecBatch exec_batch(*record_batch);
+    arrow::Result<arrow::Datum> filter_result = arrow::compute::ExecuteScalarExpression(_arrow_scan_conjuncts, exec_batch, /*ExecContext* = */nullptr);
+    if (!filter_result.ok()) {
+        DB_FATAL("filter fail, %s", filter_result.status().ToString().c_str());
+        return -1;
+    }
+    if (filter_result->is_scalar()) {
+        const auto& mask_scalar = filter_result->scalar_as<arrow::BooleanScalar>();
+        if (mask_scalar.is_valid && mask_scalar.value == true) {
+            _multiget_records.insert(_multiget_filter_records);
+        } else {
+            filter_cnt = _multiget_filter_records.size();
+            state->inc_num_filter_rows(_multiget_filter_records.size());
+        }
+        _multiget_filter_records.clear();
+        return filter_cnt;
+    } 
+    int i = 0;
+    auto boolean_arr = filter_result->array_as<arrow::BooleanArray>();
+    while (!_multiget_filter_records.is_traverse_over()) {
+        auto record = _multiget_filter_records.get_next();
+        if (boolean_arr->Value(i++) == false) {
+            ++filter_cnt;
+            continue;
+        }
+        _multiget_records.emplace_back(record);
+    }
+    state->inc_num_filter_rows(filter_cnt);
+    _multiget_filter_records.clear();
+    _arrow_filter_batch_size = std::min(_arrow_filter_batch_size * 2, 1024);
+    return filter_cnt;
+}
+
 int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch, bool* eos) {
     int64_t index_filter_cnt = 0;
     int64_t get_primary_cnt = 0;
@@ -1325,10 +1565,15 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
         local_node.add_get_primary_rows(get_primary_cnt);
         local_node.set_scan_rows(_scan_rows);
     }));
+    // 是否需要反查主表
+    bool need_multiget_primary = true;
+    if (_is_covering_index || _is_global_index) {
+        need_multiget_primary = false;
+    }
 
     // 只普通索引扫描并且不会反查主表的省略record
     bool use_record = false;
-    if ((!_is_covering_index && !_is_global_index) ||
+    if (need_multiget_primary ||
             !_reverse_indexes.empty() || _reverse_index != nullptr || _vector_index != nullptr) {
         use_record = true;
     }
@@ -1337,6 +1582,26 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
     _multiget_records.set_capacity(batch->capacity());
     bool multiget_last_records = false;
     auto txn = state->txn();
+    bool use_chunk = !(batch->use_memrow());
+    RowBatch* multiget_row_batch = nullptr;
+    std::shared_ptr<Chunk> index_data_chunk;
+
+    if (!use_chunk) {
+        multiget_row_batch = &_multiget_row_batch;
+    } else {
+        if (_filter_chunk == nullptr) {
+            _filter_chunk = std::make_shared<Chunk>();
+            _filter_chunk->init({get_tuple()});
+        }
+        multiget_row_batch = batch;
+        if (need_multiget_primary) {
+            // 要反查主表, 通过filter_chunk列式filter过滤后, 再反查主表
+            index_data_chunk = _filter_chunk;
+            _vectorized_filtered = true;
+        } else {
+            index_data_chunk = batch->get_chunk();
+        }
+    }
     while (1) {
         if (state->is_cancelled()) {
             DB_WARNING_STATE(state, "cancelled");
@@ -1354,24 +1619,49 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
             return 0;
         }
         if (multiget_last_records) {
-            if (_multiget_records.size() > 0) {
-                get_primary_cnt += _multiget_records.size();
-                int ret = txn->multiget_primary(_region_id, *_pri_info, _tuple_id, _mem_row_desc,
-                                &_multiget_row_batch, _multiget_records, _field_ids, _field_slot, false);
-                if (ret < 0) {
-                    DB_FATAL("get primary:%ld fail, not exist, ret:%d, record: %s",
-                            _table_id, ret, record->to_string().c_str());
+            if (need_multiget_primary) {
+                filter_cnt = vectorize_filter(state, index_data_chunk);
+                if (filter_cnt < 0) {
+                    return -1;
                 }
-                _read_disk_size += txn->read_disk_size;
-                continue;
-            } else {
-                *eos = true;
-                return 0;
+                index_filter_cnt += filter_cnt;
+                if (_multiget_records.size() > 0) {
+                    get_primary_cnt += _multiget_records.size();
+                    int ret = txn->multiget_primary(_region_id, *_pri_info, _tuple_id, _mem_row_desc,
+                                    multiget_row_batch, _multiget_records, _field_ids, _field_slot, false);
+                    if (ret < 0) {
+                        DB_FATAL("get primary:%ld fail, not exist, ret:%d, record: %s",
+                                _table_id, ret, record->to_string().c_str());
+                    }
+                    _read_disk_size += txn->read_disk_size;
+                    continue;
+                }
             }
+            *eos = true;
+            return 0;
         }
         if (_vector_index != nullptr) {
             if (_idx >= _left_records.size()) {
-                multiget_last_records = true;
+                if (FLAGS_auto_ajust_topk && !_vector_eos) {
+                    _left_records.clear();
+                    _topk *= 10;
+                    int ret = _vector_index->search_vector(txn->get_txn(), 
+                                                           _separate_value, 
+                                                           _pri_info, 
+                                                           _table_info, 
+                                                           _vector_word, 
+                                                           _topk, 
+                                                           _left_records, 
+                                                           _vector_retry++, 
+                                                           _vector_eos);
+                    if (ret < 0) {
+                        DB_FATAL("vector_index search fail, index:%ld, table:%ld", _index_info->id, _table_info->id);
+                        return -1;
+                    }
+                    DB_WARNING("vector_index search, index:%ld, table:%ld, size:%lu", _index_info->id, _table_info->id, _left_records.size());
+                } else {
+                    multiget_last_records = true;
+                }
                 continue;
             }
         } else if (_reverse_indexes.size() > 0) {
@@ -1423,6 +1713,7 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
                     }
                     _num_rows_returned_by_range = 0;
                     _idx++;
+                    ++_scan_rows;
                     continue;
                 }
             }
@@ -1431,8 +1722,11 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
         ++_scan_rows;
         if (use_record) {
             record->clear();
-        }
-        std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
+        } 
+        std::unique_ptr<MemRow> row = nullptr;
+        if (!use_chunk) {
+            row = _mem_row_desc->fetch_mem_row();
+        } 
         if (_vector_index != nullptr) {
             record = _left_records[_idx++];
         } else if (_reverse_indexes.size() > 0) {
@@ -1449,9 +1743,14 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
             }
         } else {
             if (use_record) {
+                // 要反查主表
                 ret = _index_iter->get_next(record);
-            } else {
+            } else if (!use_chunk) {
+                // 索引完全覆盖, 使用memrow
                 ret = _index_iter->get_next(_tuple_id, row);
+            } else {
+                // 索引完全覆盖, 使用chunk
+                ret = _index_iter->get_next_for_chunk(_tuple_id, index_data_chunk);
             }
             //DB_DEBUG("rocksdb_scan region_%ld record[%s]", _region_id, record->to_string().c_str());
             if (ret < 0) {
@@ -1466,18 +1765,49 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
         if (use_record) {
             for (auto& pair : _index_slot_field_map) {
                 auto field = record->get_field_by_tag(pair.second);
-                row->set_value(_tuple_id, pair.first, record->get_value(field));
+                if (!use_chunk) {
+                    row->set_value(_tuple_id, pair.first, record->get_value(field));
+                } else {
+                    if (0 != index_data_chunk->set_tmp_field_value(_tuple_id, pair.first, record->get_value(field))) {
+                        DB_FATAL_STATE(state, "set tmp field value fail, tuple:%d, slot:%d", _tuple_id, pair.first);
+                        return -1;
+                    }
+                }
             }
         }
-        if (!need_copy(row.get(), _scan_conjuncts)) {
+        if (row != nullptr && !need_copy(row.get(), _scan_conjuncts)) {
             state->inc_num_filter_rows();
             ++index_filter_cnt;
             continue;
         }
+
+        if (use_record && use_chunk && !_has__weight) {
+            if (need_multiget_primary) {
+                // 列式执行, 需要反查主表
+                // 攒一批进行列式filter
+                if (0 != index_data_chunk->add_tmp_row()) {
+                    DB_FATAL_STATE(state, "add filter chunk row fail");
+                    return -1;
+                }
+                if (_scan_conjuncts.empty()) {
+                    _multiget_records.emplace_back(record->clone(true));
+                } else {
+                    _multiget_filter_records.emplace_back(record->clone(true));
+                }
+                if (index_data_chunk->size() < _arrow_filter_batch_size) {
+                    continue;
+                } 
+                filter_cnt = vectorize_filter(state, index_data_chunk);
+                if (filter_cnt < 0) {
+                    return -1;
+                }
+                index_filter_cnt += filter_cnt;
+            }
+        }
         //DB_NOTICE("get index: %ld", cost.get_time());
         //cost.reset();
-        if (!FLAGS_scan_use_multi_get || _has_s_wordrank || _get_mode != GET_ONLY) {
-            if (!_is_covering_index && !_is_global_index) {
+        if (!FLAGS_scan_use_multi_get || _has__weight || _get_mode != GET_ONLY) {
+            if (need_multiget_primary) {
                 ++get_primary_cnt;
                 // todo: 反查直接用encode_key
                 ret = txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, _get_mode, false);
@@ -1492,20 +1822,33 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
                 //DB_NOTICE("record_after:%s", record->debug_string().c_str());
                 for (auto slot : _tuple_desc->slots()) {
                     auto field = record->get_field_by_tag(slot.field_id());
-                    row->set_value(slot.tuple_id(), slot.slot_id(),
-                            record->get_value(field));
+                    if (!use_chunk) {
+                        row->set_value(slot.tuple_id(), slot.slot_id(), record->get_value(field));
+                    } else {
+                        batch->set_chunk_tmp_row_value(slot.tuple_id(), slot.slot_id(), record->get_value(field));
+                    }
                 }
             }
-            batch->move_row(std::move(row));
-            ++_num_rows_returned;
-            ++_num_rows_returned_by_range;
+            if (!use_chunk) {
+                batch->move_row(std::move(row));
+                ++_num_rows_returned;
+                ++_num_rows_returned_by_range;
+            } else {
+                ret = batch->add_chunk_row();
+                if (ret != 0) {
+                    DB_FATAL_STATE(state, "add chunk row fail");
+                    return -1;
+                }
+            }
         } else {
-            if (!_is_covering_index && !_is_global_index) {
-                _multiget_records.emplace_back(record->clone(true));
+            if (need_multiget_primary) {
+                if (!use_chunk) {
+                    _multiget_records.emplace_back(record->clone(true));
+                }
                 if (_multiget_records.is_full() || will_reach_limit(_multiget_records.size())) {
                     get_primary_cnt += _multiget_records.size();
                     int ret = txn->multiget_primary(_region_id, *_pri_info, _tuple_id, _mem_row_desc,
-                                 &_multiget_row_batch, _multiget_records, _field_ids, _field_slot, false);
+                                 multiget_row_batch, _multiget_records, _field_ids, _field_slot, false);
                     if (ret < 0) {
                         DB_FATAL("get primary:%ld fail, not exist, ret:%d, record: %s",
                                 _table_id, ret, record->to_string().c_str());
@@ -1514,9 +1857,17 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
                 }
 
             } else {
-                batch->move_row(std::move(row));
-                ++_num_rows_returned;
-                ++_num_rows_returned_by_range;
+                if (!use_chunk) {
+                    batch->move_row(std::move(row));
+                    ++_num_rows_returned;
+                    ++_num_rows_returned_by_range;
+                } else {
+                    ret = batch->add_chunk_row();
+                    if (ret != 0) {
+                        DB_FATAL_STATE(state, "add chunk tmp row fail");
+                        return -1;
+                    }
+                }
             }
         }
     }
@@ -1558,7 +1909,6 @@ void RocksdbScanNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
             }
         }
     }
-
 }
 
 int RocksdbScanNode::decode_key_points(RuntimeState* state, RowBatch* batch, const rocksdb::Slice& key) {
@@ -1667,6 +2017,114 @@ int RocksdbScanNode::get_key_points(RuntimeState* state, RowBatch* batch, bool* 
     }
     *eos = true;
     return num;
+}
+
+int RocksdbVectorizedReader::init(RocksdbScanNode* scan_node, RuntimeState* state) {
+    if (scan_node == nullptr) {
+        return -1;
+    }
+    _scan_node = scan_node;
+    _state = state;
+    
+    _batch.init_chunk({scan_node->get_tuple()}, &_schema);
+    if (_schema == nullptr) {
+        return -1;
+    }
+    state->arrow_input_schemas[scan_node->tuple_id()] = _schema;
+    return 0;
+}
+
+int RocksdbVectorizedReader::add_first_row_batch(RowBatch* first_batch) {
+    if (first_batch->add_row_batch_to_chunk({_scan_node->get_tuple()}, _batch.get_chunk()) != 0) {
+        return -1;
+    }
+    _first_batch_need_handle = true;
+    if (first_batch->size() > 0) {
+        _batch.set_capacity(first_batch->size());
+    }
+    return 0;
+}
+
+void RocksdbVectorizedReader::set_arrow_filter_conjuncts(arrow::Expression* expr, int64_t limit) {
+    _arrow_filter_conjuncts = expr;
+    _filter_node_limit = limit;
+}
+
+arrow::Status RocksdbVectorizedReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* out) {
+    int ret = 0;
+    TimeCost t;
+    int64_t index_filter_cnt = 0;
+    int64_t where_filter_cnt = 0;
+    START_LOCAL_TRACE(_scan_node->get_trace(), _state->get_trace_cost(), GET_NEXT_TRACE, ([&](TraceLocalNode& local_node) {
+        local_node.add_index_filter_rows(index_filter_cnt);
+        local_node.add_where_filter_rows(where_filter_cnt);
+    }));
+    while (1) {
+        if (_eos) {
+            out->reset();
+            return arrow::Status::OK();
+        }
+        if (_filter_node_limit != -1 && _pass_filter_count >= _filter_node_limit) {
+            out->reset();
+            return arrow::Status::OK();
+        }
+        if (!_first_batch_need_handle) {
+            _batch.set_capacity(std::min(FLAGS_chunk_size, 2 * (int32_t)_batch.capacity()));
+            ret = _scan_node->get_next(_state, &_batch, &_eos);
+            if (ret < 0) {
+                DB_FATAL("rocksdb scan node get_next fail in arrow mode");
+                return arrow::Status::IOError("RocksdbVectorizedReader read fail");
+            }
+        }
+        // build output arrow recordBatch
+        std::shared_ptr<arrow::RecordBatch> record_batch;
+        ret = _batch.finish_and_make_record_batch(&record_batch);
+        if (ret < 0) {
+            DB_FATAL("arrow chunk finish and make record batch fail");
+            return arrow::Status::IOError("chunk finish and make record batch fail");
+        }
+        int64_t in_filter_cnt = record_batch->num_rows();
+        if (_first_batch_need_handle) {
+            _first_batch_need_handle = false;
+            *out = record_batch;
+        } else {
+            // step1: handle scan conjuncts
+            if (_arrow_scan_conjuncts != nullptr && !_scan_node->vectorized_filtered() && !_first_batch_need_handle) {
+                // [ARROW TODO] ExecContext 复用
+                if (0 != VectorizeHelpper::vectorize_filter(record_batch, _arrow_scan_conjuncts, out)) {
+                    DB_FATAL_STATE(_state, "arrow_scan_conjuncts: vectorize filter fail");
+                    return arrow::Status::IOError("vectorize filter fail");
+                }
+            } else {
+                *out = record_batch;
+            }
+            int64_t out_row = (*out)->num_rows();
+            _scan_node->inc_num_rows_returned(out_row);
+            index_filter_cnt += in_filter_cnt - out_row;
+            _state->inc_num_filter_rows(in_filter_cnt - out_row);
+            if (out_row == 0) {
+                continue;
+            }
+        }      
+        
+        // step2: handle filter conjuncts
+        if (_arrow_filter_conjuncts != nullptr) {
+            in_filter_cnt = (*out)->num_rows();
+            if (0 != VectorizeHelpper::vectorize_filter(*out, _arrow_filter_conjuncts, out)) {
+                DB_FATAL_STATE(_state, "arrow_filter_conjuncts: vectorize filter fail");
+                return arrow::Status::IOError("vectorize filter fail");
+            }
+            int64_t out_row = (*out)->num_rows();
+            where_filter_cnt += in_filter_cnt - out_row;
+            _state->inc_num_filter_rows(in_filter_cnt - out_row);
+            if (out_row == 0) {
+                continue;
+            }
+        }
+        _pass_filter_count += (*out)->num_rows();
+        break;
+    }
+    return arrow::Status::OK();
 }
 }
 

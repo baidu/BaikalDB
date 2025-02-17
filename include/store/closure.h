@@ -16,6 +16,7 @@
 
 #include "common.h"
 #include "region.h"
+#include "store.h"
 
 namespace baikaldb {
 
@@ -56,6 +57,8 @@ struct BinlogClosure : public braft::Closure {
         if (done) {
             done->Run();
         }
+        int64_t raft_cost = cost.get_time();
+        Store::get_instance()->raft_total_cost << raft_cost;
         delete this;
     }
 

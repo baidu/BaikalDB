@@ -128,6 +128,7 @@ protected:
     int64_t _ttl_timestamp_us = 0; //ttl写入时间，0表示无ttl
     bool  _ddl_need_write = false;
     int64_t  _ddl_index_id = -1;
+    uint64_t _watt_stats_version = 0;
 };
 }
 

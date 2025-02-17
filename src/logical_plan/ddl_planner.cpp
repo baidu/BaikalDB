@@ -63,6 +63,13 @@ int DDLPlanner::plan() {
             DB_WARNING("parser create database command failed");
             return -1;
         }
+        // 用于为创建账号授权读写权限
+        pb::UserPrivilege* pri = request.mutable_user_privilege();
+        pri->set_username(_ctx->user_info->username);
+        pri->set_namespace_name(_ctx->user_info->namespace_);
+        pb::PrivilegeDatabase* add_db = pri->add_privilege_database();
+        add_db->set_database(database->database());
+        add_db->set_database_rw(pb::WRITE);
         error_code = ER_CANT_CREATE_DB;
     } else if (_ctx->stmt_type == parser::NT_DROP_DATABASE) {
         request.set_op_type(pb::OP_DROP_DATABASE);
@@ -142,6 +149,28 @@ int DDLPlanner::plan() {
             return -1;
         }
         error_code = ER_CANNOT_USER;
+    } else if (_ctx->stmt_type == parser::NT_CREATE_VIEW) {
+        request.set_op_type(pb::OP_CREATE_VIEW);
+        pb::SchemaInfo *view = request.mutable_table_info();
+        if (0 != parse_create_view(*view)) {
+            DB_WARNING("parser create view command failed");
+            return -1;
+        }
+    } else if (_ctx->stmt_type == parser::NT_DROP_VIEW) {
+        request.set_op_type(pb::OP_DROP_VIEW);
+        pb::SchemaInfo *view = request.mutable_table_info();
+        if (0 != parse_drop_view(*view)) {
+            DB_WARNING("parser drop table command failed");
+            return -1;
+        }
+    } else if (_ctx->stmt_type == parser::NT_ALTER_VIEW) {
+        request.set_op_type(pb::OP_CREATE_VIEW);
+        pb::SchemaInfo *view = request.mutable_table_info();
+        int ret = parse_alter_view(*view);
+        if (ret == -1) {
+            DB_WARNING("parser alter table command failed");
+            return -1;
+        } 
     } else {
         DB_WARNING("unsupported DDL command: %d", _ctx->stmt_type);
         return -1;
@@ -216,15 +245,33 @@ int DDLPlanner::plan() {
             DB_WARNING("db process create_table_response: %s", response.create_table_response().ShortDebugString().c_str());
         }
     }
+    if (response.errcode() == pb::SUCCESS 
+        && (_ctx->stmt_type == parser::NT_CREATE_VIEW
+            || _ctx->stmt_type == parser::NT_ALTER_VIEW)) {
+        _factory->update_table(response.create_table_response().schema_info());
+        DB_WARNING("db process create_view_response: %s", response.ShortDebugString().c_str());
+    }
     return 0;
 }
 
 int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column,
-                               bool is_unique_indicator, const std::string& old_field_name) {
+                               bool is_unique_indicator, bool is_modify_field, const std::string& old_field_name) {
     pb::FieldInfo* field = table.add_fields();
     if (column->name == nullptr || column->name->name.empty()) {
         DB_WARNING("column_name is empty");
         return -1;
+    }
+    std::string col_name = column->name->name.to_string();
+    for (int i = 0; i < col_name.size(); i++) {
+        if ((col_name[i] < 'a' || 'z' < col_name[i]) &&
+                (col_name[i] < 'A' || 'Z' < col_name[i]) &&
+                (col_name[i] < '0' || '9' < col_name[i]) &&
+                (col_name[i] != '_')) {
+            DB_WARNING("column name %s is not vaild", col_name.c_str());
+            _ctx->stat_info.error_code = ER_INVALID_DEFAULT;
+            _ctx->stat_info.error_msg << "column name '"  << col_name << "' is not vaild";
+            return -1;
+        }
     }
     field->set_field_name(column->name->name.value);
     if (old_field_name != "") {
@@ -235,13 +282,12 @@ int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column,
         DB_WARNING("data_type is empty for column: %s", column->name->name.value);
         return -1;
     }
-
     pb::PrimitiveType data_type = to_baikal_type(column->type);
     if (data_type == pb::INVALID_TYPE) {
         DB_WARNING("data_type is unsupported: %s", column->name->name.value);
         return -1;
     }
-    if (data_type == pb::FLOAT || data_type == pb::DOUBLE || pb::DATETIME) {
+    if (data_type == pb::FLOAT || data_type == pb::DOUBLE || data_type == pb::DATETIME) {
         if (column->type->total_len != -1) {
             field->set_float_total_len((int8_t)column->type->total_len);
         }
@@ -251,6 +297,12 @@ int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column,
     }
     field->set_mysql_type(data_type);
     int option_len = column->options.size();
+    if (is_modify_field) {
+        // 只有modify field时才需要清空，其他的按照默认值走
+        // 如果设置默认值和on update，下面会覆盖
+        field->set_on_update_value("__NULL__");
+        field->set_default_value("__NULL__");
+    }
     for (int opt_idx = 0; opt_idx < option_len; ++opt_idx) {
         parser::ColumnOption* col_option = column->options[opt_idx];
         if (col_option->type == parser::COLUMN_OPT_NOT_NULL) {
@@ -333,6 +385,7 @@ int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column,
     // can_null default is true
     if (!field->has_can_null()) {
         field->set_can_null(true);
+        _column_can_null[column->name->name.value] = true;
     }
     field->set_flag(column->type->flag);
     if (is_unique_indicator) {
@@ -637,14 +690,9 @@ int DDLPlanner::parse_partition_pre_split_keys(const std::string& partition_spli
             index_field_names = pk_field_names;
             index_fields = pk_fields;
         } else if (index_info.is_global()) {
-            for (const auto& field_name : index_info.field_names()) {
-                if (fields.find(field_name) == fields.end()) {
-                    DB_WARNING("no matching filed: %s, table: %s", field_name.c_str(), table.ShortDebugString().c_str());
-                    return -1;
-                }
-                index_field_names.emplace(field_name);
-                index_fields.emplace_back(fields[field_name]);
-            }
+            // 不支持全局索引的pre split
+            DB_WARNING("has gloable index, not support pre split");
+            return -1;
         }
         if (index_fields.empty()) {
             continue;
@@ -653,10 +701,7 @@ int DDLPlanner::parse_partition_pre_split_keys(const std::string& partition_spli
             DB_WARNING("index_fields[0] is nullptr");
             return -1;
         }
-        // 只支持索引第一列为userid的场景
-        if (!boost::algorithm::iequals(index_fields[0]->field_name(), PARITITON_PRE_SPLIT_FIELD)) {
-            continue;
-        }
+ 
         if (index_field_names.empty()) {
             continue;
         }
@@ -796,8 +841,12 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
         } else if (constraint->type == parser::CONSTRAINT_FULLTEXT) {
             index->set_index_type(pb::I_FULLTEXT);
             can_support_ttl = false;
+            index->set_storage_type(pb::ST_ARROW);
         } else if (constraint->type == parser::CONSTRAINT_VECTOR) {
             index->set_index_type(pb::I_VECTOR);
+            can_support_ttl = false;
+        } else if (constraint->type == parser::CONSTRAINT_ROLLUP) {
+            index->set_index_type(pb::I_ROLLUP);
             can_support_ttl = false;
         } else {
             DB_WARNING("unsupported constraint_type: %d", constraint->type);
@@ -821,10 +870,10 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
             try {
                 root.Parse<0>(value);
                 if (root.HasParseError()) {
+                    // 非合法json, 处理时忽略
                     rapidjson::ParseErrorCode code = root.GetParseError();
-                    DB_WARNING("parse create table json comments error [code:%d][%s]", 
+                    DB_WARNING("parse create table json comments error [code:%d][%s], comments will be ignored.", 
                         code, value);
-                    return -1;
                 } else if (root.IsObject()) {
                     auto iter = root.FindMember("segment_type");
                     if (iter != root.MemberEnd()) {
@@ -863,6 +912,13 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                         MetricType_Parse(metric_type_str, &metric_type);
                         index->set_metric_type(metric_type);
                     }
+                    iter = root.FindMember("rollup_type");
+                    pb::RollupType rollup_type = pb::SUM;
+                    if (iter != root.MemberEnd()) {
+                        std::string rollup_type_str = iter->value.GetString();
+                        RollupType_Parse(rollup_type_str, &rollup_type);
+                        index->set_rollup_type(rollup_type);
+                    }
                 }
             } catch (...) {
                 DB_WARNING("parse create table json comments error [%s]", value);
@@ -894,6 +950,9 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                 table.set_engine(pb::ROCKSDB_CSTORE);
             } else if (boost::algorithm::iequals(str_val, "binlog")) {
                 table.set_engine(pb::BINLOG);
+                can_support_ttl = false;
+            } else if (boost::algorithm::iequals(str_val, "dblink")) {
+                table.set_engine(pb::DBLINK);
                 can_support_ttl = false;
             }
         } else if (option->type == parser::TABLE_OPT_CHARSET) {
@@ -1020,7 +1079,6 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                     int32_t region_num = json_iter->value.GetInt64();
                     table.set_region_num(region_num);
                 }
-
                 json_iter = root.FindMember("learner_resource_tag");
                 if (json_iter != root.MemberEnd()) {
                     if (root["learner_resource_tag"].IsString()) {
@@ -1035,6 +1093,33 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                             if (learner_value.IsString()) {
                                 table.add_learner_resource_tags(learner_value.GetString());
                             }
+                        }
+                    }
+                }
+                json_iter = root.FindMember("binlog_infos");
+                if (json_iter != root.MemberEnd() && root["binlog_infos"].IsArray()) {
+                    for (size_t i = 0; i < json_iter->value.Size(); i++) {
+                        const rapidjson::Value& value = json_iter->value[i];
+                        auto* binlog_info = table.add_binlog_infos(); // 建表复用，Meta建表后需清空该字段
+                        auto iter = value.FindMember("database");
+                        if (iter != value.MemberEnd() && value["database"].IsString()) {
+                            binlog_info->set_database(value["database"].GetString());
+                        }
+                        iter = value.FindMember("table_name");
+                        if (iter != value.MemberEnd() && value["table_name"].IsString()) {
+                            binlog_info->set_table_name(value["table_name"].GetString());
+                        }
+                        iter = value.FindMember("link_field");
+                        if (iter != value.MemberEnd()) {
+                            const rapidjson::Value& link_field_value = iter->value;
+                            auto link_field_iter = link_field_value.FindMember("field_name"); 
+                            if (link_field_iter != link_field_value.MemberEnd() && link_field_value["field_name"].IsString()) { 
+                                binlog_info->mutable_link_field()->set_field_name(link_field_value["field_name"].GetString());
+                            }
+                        }
+                        iter = value.FindMember("partition_is_same_hint");
+                        if (iter != value.MemberEnd() && value["partition_is_same_hint"].IsBool()) {
+                            binlog_info->set_partition_is_same_hint(value["partition_is_same_hint"].GetBool());
                         }
                     }
                 }
@@ -1098,6 +1183,45 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                 }
                 // 动态分区相关参数
                 parse_dynamic_partition_attr(table, root);
+                // DBLINK表相关参数
+                json_iter = root.FindMember("dblink_info");
+                if (json_iter != root.MemberEnd()) {
+                    const rapidjson::Value& value = json_iter->value;
+                    pb::DBLinkInfo* dblink_info = table.mutable_dblink_info();
+                    auto iter = value.FindMember("type");
+                    if (iter != value.MemberEnd() && iter->value.IsString()) {
+                        const std::string& type_str = iter->value.GetString();
+                        pb::DBLinkType type = pb::LT_BAIKALDB;
+                        if (!pb::DBLinkType_Parse(type_str, &type)) {
+                            DB_WARNING("Invalid dblink type: %s", type_str.c_str());
+                            return -1;
+                        }
+                        dblink_info->set_type(type);
+                    } else {
+                        DB_WARNING("dblink type is not set or invalid");
+                        return -1;
+                    }
+                    iter = value.FindMember("meta_name");
+                    if (iter != value.MemberEnd() && iter->value.IsString()) {
+                        dblink_info->set_meta_name(iter->value.GetString());
+                    }
+                    iter = value.FindMember("namespace_name");
+                    if (iter != value.MemberEnd() && iter->value.IsString()) {
+                        dblink_info->set_namespace_name(iter->value.GetString());
+                    }
+                    iter = value.FindMember("database_name");
+                    if (iter != value.MemberEnd() && iter->value.IsString()) {
+                        dblink_info->set_database_name(iter->value.GetString());
+                    }
+                    iter = value.FindMember("table_name");
+                    if (iter != value.MemberEnd() && iter->value.IsString()) {
+                        dblink_info->set_table_name(iter->value.GetString());
+                    }
+                    if (check_dblink_table_valid(*dblink_info) != 0) {
+                        DB_WARNING("invalid dblink table, dblink_info: %s", dblink_info->ShortDebugString().c_str());
+                        return -1;
+                    }
+                }
             } catch (...) {
                 // 兼容mysql语法
                 table.set_comment(option->str_value.value);
@@ -1106,91 +1230,28 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
             }
         } else if (option->type == parser::TABLE_OPT_PARTITION) {
             // 分区信息配置
-            parser::TablePartitionOption* p_option = static_cast<parser::TablePartitionOption*>(option);
-            auto partition_ptr = table.mutable_partition_info();
-
-            if (p_option->expr == nullptr || p_option->expr->to_string().empty()) {
-                DB_WARNING("partition expr not set.");
-                return -1;
-            }
-            partition_ptr->set_expr_string(p_option->expr->to_string());
-            std::set<std::string> expr_field_names;
-            auto get_expr_field_name = [&expr_field_names](const pb::Expr* expr) {
-                for (size_t i = 0; i < expr->nodes_size(); i++) {
-                    auto& node = expr->nodes(i);
-                    if (node.has_derive_node() && node.derive_node().has_field_name()) {
-                        expr_field_names.insert(node.derive_node().field_name());
-                    }
-                }
-            };
-            auto field_ptr = partition_ptr->mutable_field_info();
-            CreateExprOptions expr_options;
-            expr_options.partition_expr = true;
-            if (p_option->type == parser::PARTITION_RANGE) {
-                partition_ptr->set_type(pb::PT_RANGE);
-                if (p_option->expr->node_type == parser::NT_COLUMN_DEF) {
-                    std::string filed_name = static_cast<parser::ColumnName*>(p_option->expr)->name.value;
-                    field_ptr->set_field_name(filed_name);
-                    expr_field_names.insert(filed_name);
-                } else {
-                    auto expr = partition_ptr->mutable_range_partition_field();
-                    if (0 != create_expr_tree(p_option->expr, *expr, expr_options)) {
-                        DB_WARNING("error pasing common expression");
-                        return -1;
-                    }
-                    get_expr_field_name(expr);
-                }
-                for (size_t i = 0; i < p_option->ranges.size(); ++i) {
-                    const parser::PartitionRange* p_partition_range = p_option->ranges[i];
-                    if (parse_partition_range(table, p_partition_range) != 0) {
-                        DB_WARNING("Fail to parse_partition_range");
-                        return -1;
-                    }
-                }
-            } else if (p_option->type == parser::PARTITION_HASH) {
-                partition_ptr->set_type(pb::PT_HASH);
-                if (p_option->expr->node_type == parser::NT_COLUMN_DEF) {
-                    std::string filed_name = static_cast<parser::ColumnName*>(p_option->expr)->name.value;
-                    field_ptr->set_field_name(filed_name);
-                    expr_field_names.insert(filed_name);
-                } else {
-                    auto expr = partition_ptr->mutable_hash_expr_value();
-                    if (0 != create_expr_tree(p_option->expr, *expr, expr_options)) {
-                        DB_WARNING("error pasing common expression");
-                        return -1;
-                    }
-                    get_expr_field_name(expr);
-                }
-                if (p_option->partition_num <= 1) {
-                    DB_WARNING("partition_num need > 1");
-                    return -1;
-                }
-                table.set_partition_num(p_option->partition_num);
-            }
-            if (expr_field_names.size() != 1) {
-                DB_WARNING("paritition multiple fields not support.");
-                _ctx->stat_info.error_code = ER_PARTITION_FUNC_NOT_ALLOWED_ERROR;
-                _ctx->stat_info.error_msg << "partition multiple fields not support";
-            }
-            std::string field_name = *expr_field_names.begin();
-            field_ptr->set_field_name(field_name);
-            if (check_partition_key_constraint(table, field_name) != 0) {
+            if (parse_partition(option, table) != 0) {
+                DB_WARNING("parse partition failed");
                 return -1;
             }
         } else {
 
         }
     }
-    //set default values if not specified by user
-    if (!table.has_byte_size_per_record()) {
-        DB_WARNING("no avg_row_length set in comments, use default:50");
-        table.set_byte_size_per_record(50);
-    }
+
     if (!table.has_namespace_name()) {
         DB_WARNING("no namespace set, use default: %s", 
             _ctx->user_info->namespace_.c_str());
         table.set_namespace_name(_ctx->user_info->namespace_);
     }
+
+    if (!table.has_partition_info()) {
+        if (add_default_partition_info(table) != 0) {
+            DB_WARNING("add default partition info failed");
+            return -1;
+        }
+    }
+
     if (split_region_num > 0) {
         int ret = parse_pre_split_keys(split_start_key, split_end_key,
                 global_split_start_key, global_split_end_key, split_region_num, table);
@@ -1230,6 +1291,36 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
         }
     }
     table.set_if_exist(!stmt->if_not_exist);
+    return 0;
+}
+
+int DDLPlanner::parse_create_view(pb::SchemaInfo& view) {
+    parser::CreateViewStmt* stmt = (parser::CreateViewStmt*)(_ctx->stmt);
+    if (stmt->view_name == nullptr) {
+        DB_WARNING("error: no table name specified");
+        return -1;
+    }
+    if (stmt->view_name->db.empty()) {
+        if (_ctx->cur_db.empty()) {
+            _ctx->stat_info.error_code = ER_NO_DB_ERROR;
+            _ctx->stat_info.error_msg << "No database selected";
+            return -1;
+        }
+        view.set_database(_ctx->cur_db);
+    } else {
+        view.set_database(stmt->view_name->db.value);
+    }
+    view.set_table_name(stmt->view_name->table.value);
+    view.set_namespace_name(_ctx->user_info->namespace_);
+    int column_names_len = stmt->column_names.size();
+    view.set_or_replace(stmt->or_replace);
+    _ctx->is_create_view = true;
+
+    if (0 != parse_view_select(stmt->view_select_stmt, 
+            stmt->column_names, view)) {
+        DB_WARNING("parse view select failed");
+        return -1;
+    }  
     return 0;
 }
 
@@ -1284,6 +1375,31 @@ int DDLPlanner::parse_drop_table(pb::SchemaInfo& table) {
     return 0;
 }
 
+int DDLPlanner::parse_drop_view(pb::SchemaInfo& view) {
+    parser::DropViewStmt* stmt = (parser::DropViewStmt*)(_ctx->stmt);
+    parser::TableName* view_name = stmt->view_name;
+    if (view_name == nullptr) {
+        DB_WARNING("error: no view name specified");
+        return -1;
+    }
+    if (view_name->db.empty()) {
+        if (_ctx->cur_db.empty()) {
+            _ctx->stat_info.error_code = ER_NO_DB_ERROR;
+            _ctx->stat_info.error_msg << "No database selected";
+            return -1;
+        }
+        view.set_database(_ctx->cur_db);
+    } else {
+        view.set_database(view_name->db.value);
+    }
+    view.set_table_name(view_name->table.value);
+    view.set_namespace_name(_ctx->user_info->namespace_);
+    view.set_if_exist(stmt->if_exist);
+    DB_WARNING("drop view: %s.%s.%s", 
+        view.namespace_name().c_str(), view.database().c_str(), view.table_name().c_str());
+    return 0;
+}
+
 int DDLPlanner::parse_restore_table(pb::SchemaInfo& table) {
     parser::RestoreTableStmt* stmt = (parser::RestoreTableStmt*)(_ctx->stmt);
     if (stmt->table_names.size() > 1) {
@@ -1321,6 +1437,168 @@ int DDLPlanner::parse_create_database(pb::DataBaseInfo& database) {
     }
     database.set_database(stmt->db_name.value);
     database.set_namespace_name(_ctx->user_info->namespace_);
+
+    for (int idx = 0; idx < stmt->options.size(); ++idx) {
+        parser::DatabaseOption* option = stmt->options[idx];
+        if (option == nullptr) {
+            DB_WARNING("option is nullptr");
+            return -1;
+        }
+        if (option->str_value.empty()) {
+            DB_WARNING("option str_value is empty");        
+            return -1;
+        }
+        const std::string& str_val = option->str_value.value;
+        if (option->type == parser::DATABASE_OPT_CHARSET) {
+            if (boost::algorithm::iequals(str_val, "gbk")) {
+                database.set_charset(pb::GBK);
+            } else {
+                database.set_charset(pb::UTF8);
+            }
+        } else if (option->type == parser::DATABASE_OPT_COLLATE) {
+            // TODO
+        } else if (option->type == parser::DATABASE_OPT_COMMENT) {
+            rapidjson::Document root;
+            try {
+                root.Parse<0>(option->str_value.value);
+                if (root.HasParseError()) {
+                    rapidjson::ParseErrorCode code = root.GetParseError();
+                    DB_WARNING("parse create database json comments error_code: %d, error: %s", code, str_val.c_str());
+                    return -1;
+                }
+                auto json_iter = root.FindMember("engine");
+                if (json_iter != root.MemberEnd() && root["engine"].IsString()) {
+                    std::string engine = json_iter->value.GetString();
+                    if (boost::algorithm::iequals(engine, "redis")) {
+                        database.set_engine(pb::REDIS);
+                    } else if (boost::algorithm::iequals(engine, "rocksdb_cstore")) {
+                        database.set_engine(pb::ROCKSDB_CSTORE);
+                    } else if (boost::algorithm::iequals(engine, "binlog")) {
+                        database.set_engine(pb::BINLOG);
+                    } else {
+                        database.set_engine(pb::ROCKSDB);
+                    }
+                }
+                json_iter = root.FindMember("byte_size_per_record");
+                if (json_iter != root.MemberEnd() && root["byte_size_per_record"].IsInt64()) {
+                    database.set_byte_size_per_record(json_iter->value.GetInt64());
+                }
+                std::string database_resource_tag;
+                json_iter = root.FindMember("resource_tag");
+                if (json_iter != root.MemberEnd() && root["resource_tag"].IsString()) {
+                    database_resource_tag = json_iter->value.GetString();
+                    database.set_resource_tag(database_resource_tag);
+                }
+                json_iter = root.FindMember("replica_num");
+                if (json_iter != root.MemberEnd() && root["replica_num"].IsInt64()) {
+                    database.set_replica_num(json_iter->value.GetInt64());
+                }
+                json_iter = root.FindMember("region_split_lines");
+                if (json_iter != root.MemberEnd() && root["region_split_lines"].IsInt64()) {
+                    database.set_region_split_lines(json_iter->value.GetInt64());
+                }
+                json_iter = root.FindMember("dists");
+                std::set<std::string> logical_room_set;
+                if (json_iter != root.MemberEnd() && root["dists"].IsArray()) {
+                    for (size_t i = 0; i < json_iter->value.Size(); i++) {
+                        const rapidjson::Value& dist_value = json_iter->value[i];
+                        auto* dist = database.add_dists();
+                        auto iter = dist_value.FindMember("count");
+                        if (iter != dist_value.MemberEnd() && dist_value["count"].IsInt64()) {
+                            dist->set_count(iter->value.GetInt64());
+                        }
+                        std::string dist_resource_tag;
+                        iter = dist_value.FindMember("resource_tag");
+                        if (iter != dist_value.MemberEnd() && dist_value["resource_tag"].IsString()) {
+                            dist_resource_tag = iter->value.GetString();
+                            dist->set_resource_tag(dist_resource_tag);
+                        }
+                        iter = dist_value.FindMember("logical_room");
+                        if (iter != dist_value.MemberEnd() && dist_value["logical_room"].IsString()) {
+                            std::string logical_room = iter->value.GetString();
+                            dist->set_logical_room(logical_room);
+                            if (dist_resource_tag.empty()) {
+                                dist_resource_tag = database_resource_tag;
+                            }
+                            logical_room_set.emplace(dist_resource_tag + ":" + logical_room);
+                        }
+                        iter = dist_value.FindMember("physical_room");
+                        if (iter != dist_value.MemberEnd() && dist_value["physical_room"].IsString()) {
+                            dist->set_physical_room(iter->value.GetString());
+                        }
+                    }
+                }
+                json_iter = root.FindMember("main_logical_room");
+                if (json_iter != root.MemberEnd() && root["main_logical_room"].IsString()) {
+                    std::string main_logical_room = json_iter->value.GetString();
+                    if (logical_room_set.count(database_resource_tag + ":" + main_logical_room) == 0) {
+                        DB_WARNING("Invalid param, main_logical_room: %s", main_logical_room.c_str());
+                        _ctx->stat_info.error_code = ER_SP_LABEL_MISMATCH;
+                        _ctx->stat_info.error_msg << "main_logical_room: " << main_logical_room << " mismatch";
+                        return -1;
+                    }
+                    database.set_main_logical_room(main_logical_room);
+                }
+                json_iter = root.FindMember("learner_resource_tag");
+                if (json_iter != root.MemberEnd()) {
+                    if (root["learner_resource_tag"].IsString()) {
+                        if (database.resource_tag() == json_iter->value.GetString()) {
+                            DB_FATAL("learner must use different resource tag.");
+                            return -1;
+                        }
+                        database.add_learner_resource_tags(json_iter->value.GetString());
+                    } else if (root["learner_resource_tag"].IsArray()) {
+                        for (size_t i = 0; i < json_iter->value.Size(); i++) {
+                            const rapidjson::Value& learner_value = json_iter->value[i];
+                            if (learner_value.IsString()) {
+                                database.add_learner_resource_tags(learner_value.GetString());
+                            }
+                        }
+                    }
+                }
+                json_iter = root.FindMember("binlog_infos");
+                if (json_iter != root.MemberEnd() && root["binlog_infos"].IsArray()) {
+                    for (size_t i = 0; i < json_iter->value.Size(); i++) {
+                        const rapidjson::Value& value = json_iter->value[i];
+                        auto* binlog_info = database.add_binlog_infos();
+                        auto iter = value.FindMember("database");
+                        if (iter != value.MemberEnd() && value["database"].IsString()) {
+                            binlog_info->set_database(value["database"].GetString());
+                        }
+                        iter = value.FindMember("table_name");
+                        if (iter != value.MemberEnd() && value["table_name"].IsString()) {
+                            binlog_info->set_table_name(value["table_name"].GetString());
+                        }
+                        iter = value.FindMember("link_field");
+                        if (iter != value.MemberEnd()) {
+                            const rapidjson::Value& link_field_value = iter->value;
+                            auto link_field_iter = link_field_value.FindMember("field_name");
+                            if (link_field_iter != link_field_value.MemberEnd() && link_field_value["field_name"].IsString()) { 
+                                binlog_info->mutable_link_field()->set_field_name(link_field_value["field_name"].GetString());
+                            }
+                        }
+                        iter = value.FindMember("partition_is_same_hint");
+                        if (iter != value.MemberEnd() && value["partition_is_same_hint"].IsBool()) {
+                            binlog_info->set_partition_is_same_hint(value["partition_is_same_hint"].GetBool());
+                        }
+                    }
+                }
+                json_iter = root.FindMember("partition_info_str");
+                if (json_iter != root.MemberEnd() && root["partition_info_str"].IsString()) {
+                    database.set_partition_info_str(json_iter->value.GetString());
+                }
+            } catch (...) {
+                DB_WARNING("parse create database json comments error [%s]", str_val.c_str());
+                return -1;
+            }
+        } else {
+            DB_WARNING("Invalid database option type: %d", (int)(option->type));
+            return -1;
+        }
+    }
+
+    DB_WARNING("database_info: %s", database.ShortDebugString().c_str());
+
     return 0;
 }
 
@@ -1386,6 +1664,26 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
     if (spec == nullptr) {
         _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
         _ctx->stat_info.error_msg << "empty alter_specification";
+        return -1;
+    }
+    std::string table_full_name = table->namespace_name() + "." + table->database() + "." + table->table_name();
+    int64_t tableid = -1;
+    if (0 != _factory->get_table_id(table_full_name, tableid)) {
+        _ctx->stat_info.error_code = ER_NO_SUCH_TABLE;
+        _ctx->stat_info.error_msg << "table: " << table->database() << "." << table->table_name() << " not exist";
+        return -1;
+    }
+    auto tbl_ptr = _factory->get_table_info_ptr(tableid);
+    if (tbl_ptr == nullptr) {
+        DB_WARNING("no table found with id: %ld", tableid);
+        _ctx->stat_info.error_code = ER_NO_SUCH_TABLE;
+        _ctx->stat_info.error_msg << "table: " << table->database() << "." << table->table_name() << " not exist";
+        return -1;
+    }
+    if (tbl_ptr->engine == pb::DBLINK) {
+        DB_WARNING("dblink table not support alter");
+        _ctx->stat_info.error_code = ER_BAD_TABLE_ERROR;
+        _ctx->stat_info.error_msg << "dblink table not support alter";
         return -1;
     }
     if (spec->spec_type == parser::ALTER_SPEC_TABLE_OPTION) {
@@ -1521,7 +1819,7 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
                 DB_WARNING("column is nullptr");
                 return -1;
             }
-            if (0 != add_column_def(*table, column, spec->is_unique_indicator)) {
+            if (0 != add_column_def(*table, column, spec->is_unique_indicator, true)) {
                 DB_WARNING("add column to table failed.");
                 return -1;
             }
@@ -1546,7 +1844,7 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
                 DB_WARNING("column is nullptr");
                 return -1;
             }
-            if (0 != add_column_def(*table, column, spec->is_unique_indicator, old_field_name)) {
+            if (0 != add_column_def(*table, column, spec->is_unique_indicator, true, old_field_name)) {
                 DB_WARNING("add column to table failed.");
                 return -1;
             }
@@ -1610,26 +1908,13 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
     } else if (spec->spec_type == parser::ALTER_SPEC_ADD_INDEX) {
         alter_request.set_op_type(pb::OP_ADD_INDEX);
         int constraint_len = spec->new_constraints.size();
-        std::string table_full_name = table->namespace_name() + "." + table->database() + "." + table->table_name();
-        int64_t tableid = -1;
-        if (0 != _factory->get_table_id(table_full_name, tableid)) {
-            _ctx->stat_info.error_code = ER_NO_SUCH_TABLE;
-            _ctx->stat_info.error_msg << "table: " << table->database() << "." << table->table_name() << " not exist";
-            return -1;
-        }
-        auto tbl_ptr = _factory->get_table_info_ptr(tableid);
-        if (tbl_ptr == nullptr) {
-            DB_WARNING("no table found with id: %ld", tableid);
-            _ctx->stat_info.error_code = ER_NO_SUCH_TABLE;
-            _ctx->stat_info.error_msg << "table: " << table->database() << "." << table->table_name() << " not exist";
-            return -1;
-        }
+        bool has_ttl = tbl_ptr->ttl_info.ttl_duration_s > 0;
         for (auto& field : tbl_ptr->fields) {
             if (field.can_null) {
-                // 设置了默认值允许加索引
-                if (field.default_value.size() > 0) {
-                    continue;
-                }
+                //// 设置了默认值允许加索引
+                //if (field.default_value.size() > 0) {
+                //    continue;
+                //}
                 _column_can_null[field.short_name] = true;
             }
         }
@@ -1639,7 +1924,7 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
                 DB_WARNING("constraint is nullptr");
                 return -1;
             }
-            if (0 != add_constraint_def(*table, constraint,spec)) {
+            if (0 != add_constraint_def(*table, constraint, spec, has_ttl)) {
                 DB_WARNING("add constraint to table failed.");
                 return -1;
             }
@@ -1710,6 +1995,38 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
         _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;
         _ctx->stat_info.error_msg << "alter_specification type (" 
                                 << spec->spec_type << ") not supported in this version";
+        return -1;
+    }
+    return 0;
+}
+
+int DDLPlanner::parse_alter_view(pb::SchemaInfo& view) {
+    // alter view 本质上就是 or_replace为true
+    parser::AlterViewStmt* stmt = (parser::AlterViewStmt*)(_ctx->stmt);
+    if (stmt->view_name == nullptr) {
+        DB_WARNING("error: no table name specified");
+        return -1;
+    }
+    if (stmt->view_name->db.empty()) {
+        if (_ctx->cur_db.empty()) {
+            _ctx->stat_info.error_code = ER_NO_DB_ERROR;
+            _ctx->stat_info.error_msg << "No database selected";
+            return -1;
+        }
+        view.set_database(_ctx->cur_db);
+    } else {
+        view.set_database(stmt->view_name->db.value);
+    }
+    view.set_table_name(stmt->view_name->table.value);
+    view.set_namespace_name(_ctx->user_info->namespace_);
+    int column_names_len = stmt->column_names.size();
+    view.set_or_replace(true);
+    _ctx->is_create_view = true;
+
+    if (0 != parse_view_select(stmt->view_select_stmt, 
+                    stmt->column_names,
+                    view)) {
+        DB_WARNING("parse view select failed");
         return -1;
     }
     return 0;
@@ -1913,7 +2230,7 @@ pb::PrimitiveType DDLPlanner::to_baikal_type(parser::FieldType* field_type) {
     return pb::INVALID_TYPE;
 }
 
-int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* constraint,parser::AlterTableSpec* spec) {
+int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* constraint,parser::AlterTableSpec* spec, bool has_ttl) {
     pb::IndexInfo* index = table.add_indexs();
     pb::IndexType index_type;
     switch (constraint->type) {
@@ -1931,17 +2248,25 @@ int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* co
             break;
         case parser::CONSTRAINT_FULLTEXT:
             index_type = pb::I_FULLTEXT;
+            index->set_storage_type(pb::ST_ARROW);
             if (constraint->columns.size() > 1) {
                 DB_WARNING("fulltext index only support one field.");
+                return -1;
+            }
+            if (has_ttl) {
+                DB_WARNING("fulltext index can't support ttl.");
                 return -1;
             }
             break;
         case parser::CONSTRAINT_VECTOR:
             index_type = pb::I_VECTOR;
-            if (constraint->columns.size() > 1) {
-                DB_WARNING("vector index only support one field.");
+            if (constraint->columns.size() > 2) {
+                DB_WARNING("vector index only support one or two field.");
                 return -1;
             }
+            break;
+        case parser::CONSTRAINT_ROLLUP:
+            index_type = pb::I_ROLLUP;
             break;
         default:
             DB_WARNING("only support uniqe、key index type");
@@ -2198,6 +2523,11 @@ int DDLPlanner::parse_partition_range(
                     }
                     p_range_partition_info->set_type(range_partition_type);
                 }
+                // is_pre_split
+                json_iter = root.FindMember("is_pre_split");
+                if (json_iter != root.MemberEnd() && root["is_pre_split"].IsBool()) {
+                    p_range_partition_info->set_is_pre_split(json_iter->value.GetBool());
+                }
             } catch (...) {
                 DB_WARNING("parse partition json comments error [%s]", p_partition_option->str_value.value);
                 return -1;
@@ -2263,6 +2593,11 @@ int DDLPlanner::parse_dynamic_partition_attr(
     if (json_inner_iter != dynamic_partition_value.MemberEnd() && 
             dynamic_partition_value["start_day_of_month"].IsInt()) {
         p_dynamic_partition_attr->set_start_day_of_month(json_inner_iter->value.GetInt());
+    }
+    json_inner_iter = dynamic_partition_value.FindMember("isolation");
+    if (json_inner_iter != dynamic_partition_value.MemberEnd() && 
+            dynamic_partition_value["isolation"].IsString()) {
+        p_dynamic_partition_attr->set_isolation(json_inner_iter->value.GetString());
     }
     return 0;
 }
@@ -2472,6 +2807,187 @@ int DDLPlanner::add_user_specs(pb::UserPrivilege& user_privilege, parser::Vector
     } else {
         user_privilege.set_username(spec->user->username.value);
         user_privilege.add_ip(spec->user->hostname.value);
+    }
+    return 0;
+}
+int DDLPlanner::parse_partition(const parser::TableOption* option, pb::SchemaInfo& table) {
+    if (option == nullptr) {
+        DB_WARNING("option is nullptr");
+        return -1;
+    }
+    const parser::TablePartitionOption* p_option = static_cast<const parser::TablePartitionOption*>(option);
+    if (p_option->expr == nullptr || p_option->expr->to_string().empty()) {
+        DB_WARNING("partition expr not set.");
+        return -1;
+    }
+    auto partition_ptr = table.mutable_partition_info();
+    partition_ptr->set_expr_string(p_option->expr->to_string());
+    std::set<std::string> expr_field_names;
+    auto get_expr_field_name = [&expr_field_names](const pb::Expr* expr) {
+        for (size_t i = 0; i < expr->nodes_size(); i++) {
+            auto& node = expr->nodes(i);
+            if (node.has_derive_node() && node.derive_node().has_field_name()) {
+                expr_field_names.insert(node.derive_node().field_name());
+            }
+        }
+    };
+    auto field_ptr = partition_ptr->mutable_field_info();
+    CreateExprOptions expr_options;
+    expr_options.partition_expr = true;
+    if (p_option->type == parser::PARTITION_RANGE) {
+        partition_ptr->set_type(pb::PT_RANGE);
+        if (p_option->expr->node_type == parser::NT_COLUMN_DEF) {
+            std::string filed_name = static_cast<parser::ColumnName*>(p_option->expr)->name.value;
+            field_ptr->set_field_name(filed_name);
+            expr_field_names.insert(filed_name);
+        } else {
+            auto expr = partition_ptr->mutable_range_partition_field();
+            if (0 != create_expr_tree(p_option->expr, *expr, expr_options)) {
+                DB_WARNING("error pasing common expression");
+                return -1;
+            }
+            get_expr_field_name(expr);
+        }
+        for (size_t i = 0; i < p_option->ranges.size(); ++i) {
+            const parser::PartitionRange* p_partition_range = p_option->ranges[i];
+            if (parse_partition_range(table, p_partition_range) != 0) {
+                DB_WARNING("Fail to parse_partition_range");
+                return -1;
+            }
+        }
+    } else if (p_option->type == parser::PARTITION_HASH) {
+        partition_ptr->set_type(pb::PT_HASH);
+        if (p_option->expr->node_type == parser::NT_COLUMN_DEF) {
+            std::string filed_name = static_cast<parser::ColumnName*>(p_option->expr)->name.value;
+            field_ptr->set_field_name(filed_name);
+            expr_field_names.insert(filed_name);
+        } else {
+            auto expr = partition_ptr->mutable_hash_expr_value();
+            if (0 != create_expr_tree(p_option->expr, *expr, expr_options)) {
+                DB_WARNING("error pasing common expression");
+                return -1;
+            }
+            get_expr_field_name(expr);
+        }
+        if (p_option->partition_num <= 1) {
+            DB_WARNING("partition_num need > 1");
+            return -1;
+        }
+        table.set_partition_num(p_option->partition_num);
+    }
+    if (expr_field_names.size() != 1) {
+        DB_WARNING("paritition multiple fields not support.");
+        _ctx->stat_info.error_code = ER_PARTITION_FUNC_NOT_ALLOWED_ERROR;
+        _ctx->stat_info.error_msg << "partition multiple fields not support";
+    }
+    std::string field_name = *expr_field_names.begin();
+    field_ptr->set_field_name(field_name);
+    if (check_partition_key_constraint(table, field_name) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+// 建表SQL拼接DB默认配置中的分区信息后，再走一遍SQLParser获取PartitionInfo
+int DDLPlanner::add_default_partition_info(pb::SchemaInfo& table) {
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    if (factory == nullptr) {
+        DB_WARNING("SchemaFactory is nullptr");
+        return -1;
+    }
+    const std::string& full_name = table.namespace_name() + "." + table.database();
+    int64_t db_id = -1;
+    if (factory->get_db_id(full_name, db_id) != 0) {
+        DB_WARNING("Fail to get_database_id: %s", full_name.c_str());
+        return -1;
+    }
+    DatabaseInfo info = factory->get_db_info(db_id);
+    if (info.partition_info_str.empty()) {
+        // db没有默认分区
+        return 0;
+    }
+    // _ctx->sql最后面没有分号
+    const std::string& create_table_sql = _ctx->sql + " " + info.partition_info_str;
+    parser::SqlParser parser;
+    parser.charset = _ctx->charset;
+    parser.parse(create_table_sql);
+    if (parser.error != parser::SUCC) {
+        DB_WARNING("Fail to parse sql, error: %s", parser.syntax_err_str.c_str());
+        return -1;
+    }
+    if (parser.result.size() != 1) {
+        DB_WARNING("parse result size is not 1");
+        return -1;
+    }
+    if (parser.result[0] == nullptr) {
+        DB_WARNING("parser.result[0] is nullptr");
+        return -1;
+    }
+    if (parser.result[0]->node_type != parser::NT_CREATE_TABLE) {
+        DB_WARNING("Invalid node type, %d", parser.result[0]->node_type);
+        return -1;
+    }
+    parser::CreateTableStmt* create_stmt = static_cast<parser::CreateTableStmt*>(parser.result[0]);
+    int option_len = create_stmt->options.size();
+    for (int idx = 0; idx < option_len; ++idx) {
+        parser::TableOption* option = create_stmt->options[idx];
+        if (option->type == parser::TABLE_OPT_PARTITION) {
+            if (parse_partition(option, table) != 0) {
+                DB_WARNING("parse partition failed");
+                return -1;
+            }
+            break;
+        }
+    }
+    return 0;
+}
+
+// 请求对应MetaServer检查外部映射表是否存在
+int DDLPlanner::check_dblink_table_valid(const pb::DBLinkInfo& dblink_info) {
+    if (_ctx == nullptr) {
+        DB_WARNING("_ctx is nullptr");
+        return -1;
+    }
+
+    MetaServerInteract meta_server_interact;
+    if (meta_server_interact.init_internal(dblink_info.meta_name()) != 0) {
+        DB_WARNING("Fail to init meta_server_interact, meta_name: %s", dblink_info.meta_name().c_str());
+        return -1;
+    }
+    pb::QueryRequest request;
+    pb::QueryResponse response;
+
+    request.set_op_type(pb::QUERY_SCHEMA_FLATTEN);
+    request.set_namespace_name(dblink_info.namespace_name());
+    request.set_database(dblink_info.database_name());
+    request.set_table_name(dblink_info.table_name());
+
+    int ret = meta_server_interact.send_request("query", request, response);
+    if (ret != 0) {
+        DB_WARNING("Fail to send_request, request:%s, response:%s",
+                   request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
+        _ctx->stat_info.error_code = ER_BAD_TABLE_ERROR;
+        _ctx->stat_info.error_msg << "Invalid meta_name/namespace_name/database_name/table_name";
+        return -1;
+    }
+    if (response.errcode() != pb::SUCCESS) {
+        DB_WARNING("response errcode is not SUCCESS, request:%s, response:%s",
+                   request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
+        _ctx->stat_info.error_code = ER_BAD_TABLE_ERROR;
+        _ctx->stat_info.error_msg << "Invalid meta_name/namespace_name/database_name/table_name";
+        return -1;
+    }
+    if (response.schema_infos_size() != 1) {
+        DB_WARNING("Invalid schema_infos size, request:%s, response:%s",
+                   request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
+        return -1;
+    }
+    const pb::SchemaInfo& schema_info = response.schema_infos(0);
+    if (schema_info.engine() == pb::DBLINK) {
+        DB_WARNING("Not support link dblink table");
+        _ctx->stat_info.error_code = ER_BAD_TABLE_ERROR;
+        _ctx->stat_info.error_msg << "Not support link dblink table";
+        return -1;
     }
     return 0;
 }

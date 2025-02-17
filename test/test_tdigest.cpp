@@ -34,6 +34,7 @@ int main(int argc, char* argv[])
 }
 
 namespace baikaldb {
+DEFINE_int32(first_batch_size_for_vector, 1024, "first_batch_size_for_vector, default: 1024, max: 1024");
 namespace tdigest {
 
 TEST(test_tdigest, case_all) {

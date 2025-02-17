@@ -21,10 +21,11 @@
 #include "reverse_index.h"
 #include "reverse_interface.h"
 #include "select_manager_node.h"
+#include "arrow_io_excutor.h"
 
 namespace baikaldb {
 class ReverseIndexBase;
-
+class RocksdbVectorizedReader;
 class BatchTableKey {
 public:
     BatchTableKey() {
@@ -77,6 +78,13 @@ public:
     RocksdbScanNode(pb::Engine engine): ScanNode(engine) {
         _is_rocksdb_scan_node = true;
     }
+    void inc_num_rows_returned(int64_t num) {
+        _num_rows_returned += num;
+        _num_rows_returned_by_range += num;
+    }
+    bool vectorized_filtered() {
+        return _vectorized_filtered;
+    }
     virtual ~RocksdbScanNode() {
         for (auto expr : _scan_conjuncts) {
             ExprNode::destroy_tree(expr);
@@ -98,6 +106,10 @@ public:
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state);
+    virtual bool can_use_arrow_vector() {
+        return true;
+    }
+    virtual int build_arrow_declaration(RuntimeState* state);
     bool contain_condition(ExprNode* expr) {
         std::unordered_set<int32_t> related_tuple_ids;
         expr->get_all_tuple_ids(related_tuple_ids);
@@ -141,7 +153,6 @@ public:
 
     int get_key_points(RuntimeState* state, RowBatch* batch, bool* eos);
 
-
 private:
     int get_next_by_table_get(RuntimeState* state, RowBatch* batch, bool* eos);
     int get_next_by_table_seek(RuntimeState* state, RowBatch* batch, bool* eos);
@@ -152,6 +163,7 @@ private:
     int column_ddl_work(RuntimeState* state, MemRow* row);
     int process_ddl_work(RuntimeState* state, MemRow* row);
     int choose_index(RuntimeState* state);
+    int vectorize_filter(RuntimeState* state, std::shared_ptr<Chunk> chunk);
 
     int multi_get_next(pb::StorageType st, SmartRecord record) {
         if (st == pb::ST_PROTOBUF_OR_FORMAT1) {
@@ -192,7 +204,7 @@ private:
     bool _use_get = false;
     bool _is_ddl_work = false;
     bool _is_global_index = false;
-    bool _has_s_wordrank = false;
+    bool _has__weight = false;
     pb::DDLType _ddl_work_type = pb::DDL_NONE;
     int64_t _ddl_index_id = -1;
 
@@ -200,6 +212,10 @@ private:
     bool _sort_use_index = false;
     bool _scan_forward = true; //scan的方向
     bool _sort_use_index_by_range = false;
+    bool _use_encoded_key = false;
+    bool _range_key_sorted = false;
+    bool _bool_and = false;
+    bool _vector_eos = false;
     int64_t _sort_limit_by_range = 0;
     int64_t _num_rows_returned_by_range = 0;
     
@@ -216,8 +232,6 @@ private:
     std::vector<bool> _like_prefixs;
     std::vector<pb::SlotDescriptor> _update_slots;
     std::vector<ExprNode*> _update_exprs;
-    bool _use_encoded_key = false;
-    bool _range_key_sorted = false;
     // trace使用
     int _scan_rows = 0;
     int64_t _read_disk_size = 0;
@@ -230,6 +244,8 @@ private:
     VectorIndex* _vector_index = nullptr;
     std::string _vector_word;
     int _topk = 10;
+    int _vector_retry = 0;
+    uint64_t _separate_value = 0;
 
     SmartTable       _table_info;
     SmartIndex       _pri_info;
@@ -242,12 +258,54 @@ private:
     std::vector<ReverseIndexBase*> _reverse_indexes;
     MutilReverseIndex<CommonSchema> _m_index;
     MutilReverseIndex<ArrowSchema> _m_arrow_index;
-    bool _bool_and = false;
 
     std::map<int32_t, int32_t> _index_slot_field_map;
     pb::StorageType _storage_type = pb::ST_UNKNOWN;
     bool _new_fulltext_tree = false;
+
+    // vectorized
+    // std::shared_ptr<BthreadArrowExecutor> _arrow_io_executor;
+    std::shared_ptr<Chunk> _filter_chunk;
+    std::shared_ptr<RocksdbVectorizedReader> _arrow_vectorized_reader;
+    arrow::Expression _arrow_scan_conjuncts;
+    arrow::Expression _arrow_filter_conjuncts;
+    BatchRecord   _multiget_filter_records;
+    int _arrow_filter_batch_size = 1024;
+    bool _vectorized_filtered = false; 
 };
-}
+
+class RocksdbVectorizedReader : public arrow::RecordBatchReader {
+public:
+    RocksdbVectorizedReader() {}
+    virtual ~RocksdbVectorizedReader() {}
+
+    void set_arrow_scan_conjuncts(arrow::Expression* expr) {
+        _arrow_scan_conjuncts = expr;
+    }
+
+    void set_arrow_filter_conjuncts(arrow::Expression* expr, int64_t limit);
+
+    // for streaming output use
+    std::shared_ptr<arrow::Schema> schema() const override { return _schema; }
+
+    int init(RocksdbScanNode* scan_node, RuntimeState* state);
+    
+    arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* out) override;
+
+    int add_first_row_batch(RowBatch* batch);
+
+private:
+    RocksdbScanNode* _scan_node;
+    RuntimeState* _state;
+    bool _eos = false;
+    bool _first_batch_need_handle = false;
+    std::shared_ptr<arrow::Schema> _schema; // acero输入数据schema
+    RowBatch _batch;
+    arrow::Expression* _arrow_scan_conjuncts = nullptr; // scannode的index conjuncts
+    arrow::Expression* _arrow_filter_conjuncts = nullptr;// filternode的conjuncts
+    int64_t _filter_node_limit = -1;
+    int64_t _pass_filter_count = 0;
+};
+} // end of namespace
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

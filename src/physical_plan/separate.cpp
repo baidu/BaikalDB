@@ -113,19 +113,10 @@ int Separate::analyze(QueryContext* ctx) {
 int Separate::separate_union(QueryContext* ctx) {
     ExecNode* plan = ctx->root;
     UnionNode* union_node = static_cast<UnionNode*>(plan->get_node(pb::UNION_NODE));
-    for (size_t i = 0; i < ctx->sub_query_plans.size(); i++) {
-        auto select_ctx = ctx->sub_query_plans[i];
-        ExecNode* select_plan = select_ctx->root;
-        PacketNode* packet_node = static_cast<PacketNode*>(select_plan->get_node(pb::PACKET_NODE));
-        union_node->steal_projections(packet_node->mutable_projections());
-        union_node->add_child(packet_node->children(0));
-        packet_node->clear_children();
-        auto state = select_ctx->get_runtime_state();
-        if (state->init(select_ctx.get(), nullptr) < 0) {
-            DB_WARNING("init runtime_state failed");
-            return -1;
-        }
-        union_node->mutable_select_runtime_states()->emplace_back(state.get());
+    std::vector<ExecNode*> dual_scan_nodes;
+    union_node->get_node(pb::DUAL_SCAN_NODE, dual_scan_nodes);
+    for (auto* dual_scan : dual_scan_nodes) {
+        separate_subquery(ctx, dual_scan);
     }
     return 0;
 }
@@ -224,35 +215,15 @@ int Separate::separate_simple_select(QueryContext* ctx, ExecNode* plan) {
         manager_node->set_region_infos(region_infos);
         static_cast<RocksdbScanNode*>(scan_nodes[0])->set_related_manager_node(manager_node.get());
     }
-
-    if (ctx->sub_query_plans.size() == 1) {
-        auto sub_query_ctx = ctx->sub_query_plans[0];
-        int ret = sub_query_ctx->get_runtime_state()->init(sub_query_ctx.get(), nullptr);
-        if (ret < 0) {
+    std::vector<ExecNode*> dual_scan_nodes;
+    plan->get_node(pb::DUAL_SCAN_NODE, dual_scan_nodes);
+    if (dual_scan_nodes.size() == 1) {
+        if (separate_subquery(ctx, dual_scan_nodes[0]) != 0) {
+            DB_WARNING("Fail to separate_subquery");
             return -1;
         }
-        manager_node->set_sub_query_runtime_state(sub_query_ctx->get_runtime_state().get());
-        auto iter = ctx->derived_table_ctx_mapping.begin();
-        int32_t tuple_id = iter->first;
-        manager_node->set_slot_column_mapping(ctx->slot_column_mapping[tuple_id]);
-        manager_node->set_derived_tuple_id(tuple_id);
-        ExecNode* sub_query_plan = sub_query_ctx->root;
-        PacketNode* packet_node = static_cast<PacketNode*>(sub_query_plan->get_node(pb::PACKET_NODE));
-        manager_node->steal_projections(packet_node->mutable_projections());
-        manager_node->set_sub_query_node(packet_node->children(0));
-        packet_node->clear_children();
-        FilterNode* filter_node = static_cast<FilterNode*>(plan->get_node(pb::WHERE_FILTER_NODE));
-        if (filter_node != nullptr) {
-            manager_node->add_child(filter_node->children(0));
-            filter_node->clear_children();
-            filter_node->add_child(manager_node.release());
-            return 0;
-        }
-    } else if (ctx->sub_query_plans.size() != 0) {
-        DB_WARNING("illegal plan, has multiple sub query ctx");
-        for (auto iter : ctx->sub_query_plans) {
-            DB_WARNING("sql:%s", iter->sql.c_str());
-        }
+    } else if (dual_scan_nodes.size() != 0) {
+        DB_WARNING("Invalid dual_scan_nodes size[%d]", (int)dual_scan_nodes.size());
         return -1;
     }
 
@@ -264,16 +235,6 @@ int Separate::separate_simple_select(QueryContext* ctx, ExecNode* plan) {
         pb_node.set_limit(-1);
         std::unique_ptr<AggNode> merge_agg_node(new (std::nothrow) AggNode);
         merge_agg_node->init(pb_node);
-
-       if (ctx->sub_query_plans.size() > 0) {
-            parent->replace_child(agg_node, merge_agg_node.get());
-            merge_agg_node->add_child(agg_node);
-            merge_agg_node.release();
-            manager_node->add_child(agg_node->children(0));
-            agg_node->clear_children();
-            agg_node->add_child(manager_node.release());
-            return 0;
-        }
         manager_node->add_child(agg_node);
         merge_agg_node->add_child(manager_node.release());
         parent->replace_child(agg_node, merge_agg_node.release());
@@ -281,12 +242,6 @@ int Separate::separate_simple_select(QueryContext* ctx, ExecNode* plan) {
     }
     if (sort_node != nullptr) {
         manager_node->init_sort_info(sort_node);
-        if (ctx->sub_query_plans.size() > 0) {
-            manager_node->add_child(sort_node->children(0));
-            sort_node->clear_children();
-            sort_node->add_child(manager_node.release());
-            return 0;
-        }
         ExecNode* parent = sort_node->get_parent();
         manager_node->add_child(sort_node);
         parent->replace_child(sort_node, manager_node.release());
@@ -397,55 +352,37 @@ int Separate::separate_join(QueryContext* ctx, const std::vector<ExecNode*>& joi
             manager_node.release();
         }
         for (auto& scan_node_ptr : dual_scan_nodes) {
-            DualScanNode* dual = static_cast<DualScanNode*>(scan_node_ptr);
-            auto iter = ctx->derived_table_ctx_mapping.find(dual->tuple_id());
-            if (iter == ctx->derived_table_ctx_mapping.end()) {
-                DB_WARNING("illegal plan table_id:%ld _tuple_id:%d", dual->table_id(), dual->tuple_id());
+            if (separate_subquery(ctx, scan_node_ptr) != 0) {
+                DB_WARNING("Fail to separate_subquery");
                 return -1;
             }
-            int32_t tuple_id = iter->first;
-            auto sub_query_ctx = iter->second;
-            int ret = sub_query_ctx->get_runtime_state()->init(sub_query_ctx.get(), nullptr);
-            if (ret < 0) {
-                return -1;
-            }
-            ExecNode* manager_node_parent = scan_node_ptr->get_parent();
-            ExecNode* manager_node_child = scan_node_ptr;
-            if (manager_node_parent == nullptr) {
-                DB_WARNING("fether node children is null");
-                return -1;
-            }
-
             std::unique_ptr<SelectManagerNode> manager_node(create_select_manager_node());
             if (manager_node == nullptr) {
                 DB_WARNING("create manager_node failed");
                 return -1;
             }
+            ExecNode* manager_node_parent = scan_node_ptr->get_parent();
+            if (manager_node_parent == nullptr) {
+                DB_WARNING("manager_node_parent is nullptr");
+                return -1;
+            }
+            ExecNode* manager_node_child = scan_node_ptr;
             manager_node_parent->replace_child(manager_node_child, manager_node.get());
             manager_node->add_child(manager_node_child);
-            manager_node->set_sub_query_runtime_state(sub_query_ctx->get_runtime_state().get());
-            manager_node->set_slot_column_mapping(ctx->slot_column_mapping[tuple_id]);
-            manager_node->set_derived_tuple_id(tuple_id);
-            ExecNode* sub_query_plan = sub_query_ctx->root;
-            PacketNode* packet_node = static_cast<PacketNode*>(sub_query_plan->get_node(pb::PACKET_NODE));
-            manager_node->steal_projections(packet_node->mutable_projections());
-            manager_node->set_sub_query_node(packet_node->children(0));
-            packet_node->clear_children();
             manager_node.release();
         }
 
-        // sort_node, limit_node pushdown,暂不考虑子查询
+        // sort_node, limit_node pushdown
         JoinNode* join_node = static_cast<JoinNode*>(join);
-        if ((join_node->join_type() != pb::LEFT_JOIN
-                && join_node->join_type() != pb::RIGHT_JOIN)
-                || ctx->sub_query_plans.size() > 0) {
+        if (join_node->join_type() != pb::LEFT_JOIN && join_node->join_type() != pb::RIGHT_JOIN) {
             continue;
         }
         LimitNode* limit_node = nullptr;
         AggNode* agg_node = nullptr;
         SortNode* sort_node = nullptr;
         ExecNode* parent = join_node->get_parent();
-        FilterNode* filter_node = nullptr;
+
+        std::vector<FilterNode*> filter_nodes; // 多次sort_node, limit_node pushdown,可能有多个filter_node
         while (parent->node_type() != pb::JOIN_NODE &&
                parent != ctx->root) {
             if (parent->node_type() == pb::LIMIT_NODE) {
@@ -457,8 +394,10 @@ int Separate::separate_join(QueryContext* ctx, const std::vector<ExecNode*>& joi
             if (parent->node_type() == pb::SORT_NODE) {
                 sort_node = static_cast<SortNode*>(parent);
             }
-            if (parent->node_type() == pb::WHERE_FILTER_NODE) {
-                filter_node = static_cast<FilterNode*>(parent);
+
+            if (parent->node_type() == pb::WHERE_FILTER_NODE
+                    || parent->node_type() == pb::TABLE_FILTER_NODE) {
+                filter_nodes.emplace_back(static_cast<FilterNode*>(parent));
             }
             parent = parent->get_parent();
         }
@@ -491,9 +430,11 @@ int Separate::separate_join(QueryContext* ctx, const std::vector<ExecNode*>& joi
             }
             node = node->children(0);
         }
-        if (filter_node != nullptr) {
+
+        for (auto filter_node : filter_nodes) {
             if (!filter_node->is_empty_filter()) {
                 need_pushdown = false;
+                break;
             }
         }
         if (sort_node != nullptr) {
@@ -1255,6 +1196,43 @@ SelectManagerNode* Separate::create_select_manager_node() {
     }
     manager_node->init(pb_manager_node);
     return manager_node;
+}
+
+int Separate::separate_subquery(QueryContext* ctx, ExecNode* exec_node) {
+    DualScanNode* dual_scan_node = static_cast<DualScanNode*>(exec_node);
+    if (dual_scan_node == nullptr) {
+        DB_WARNING("dual_scan_node is nullptr");
+        return -1;
+    }
+    const int32_t derived_tuple_id = dual_scan_node->tuple_id();
+    auto iter = ctx->derived_table_ctx_mapping.find(derived_tuple_id);
+    if (iter == ctx->derived_table_ctx_mapping.end()) {
+        DB_WARNING("Fail to find subquery, tuple_id: %d", derived_tuple_id);
+        return -1;
+    }
+    auto sub_query_ctx = iter->second;
+    if (sub_query_ctx == nullptr) {
+        DB_WARNING("sub_query_ctx is nullptr");
+        return -1;
+    }
+    int ret = sub_query_ctx->get_runtime_state()->init(sub_query_ctx.get(), nullptr);
+    if (ret < 0) {
+        DB_WARNING("Fail to init subquery runtime state");
+        return -1;
+    }
+    ExecNode* sub_query_plan = sub_query_ctx->root;
+    if (sub_query_plan == nullptr) {
+        DB_WARNING("sub_query_plan is nullptr");
+        return -1;
+    }
+    PacketNode* packet_node = static_cast<PacketNode*>(sub_query_plan->get_node(pb::PACKET_NODE));
+    if (packet_node == nullptr) {
+        DB_WARNING("packet_node is nullptr");
+        return -1;
+    }
+    dual_scan_node->set_sub_query_runtime_state(sub_query_ctx->get_runtime_state().get());
+    dual_scan_node->steal_projections(packet_node->mutable_projections());
+    return 0;
 }
 
 }  // namespace baikaldb

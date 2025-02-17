@@ -13,11 +13,14 @@
 // limitations under the License.
 
 #include "baikal_heartbeat.h"
+#include "proto_process.hpp"
 #include "schema_factory.h"
 #include "task_fetcher.h"
 
 namespace baikaldb {
 
+DEFINE_bool(enable_dblink, false, "enable dblink");
+DEFINE_bool(can_do_ddlwork, true, "can_do_ddlwork");
 DECLARE_int32(baikal_heartbeat_interval_us);
 
 void BaikalHeartBeat::construct_heart_beat_request(pb::BaikalHeartBeatRequest& request, bool is_backup) {
@@ -30,9 +33,20 @@ void BaikalHeartBeat::construct_heart_beat_request(pb::BaikalHeartBeatRequest& r
     if (!factory->is_inited()) {
         return;
     }
-
     auto schema_read_recallback = [&request, factory](const SchemaMapping& schema){
         for (auto& info_pair : schema.table_info_mapping) {
+            const int64_t meta_id = ::baikaldb::get_meta_id(info_pair.second->id);
+            if (meta_id != 0) {
+                // 跳过非主Meta数据
+                continue;
+            }
+            if (info_pair.second->engine == pb::DBLINK) {
+                // DBLINK表没有索引信息，单独处理
+                auto req_info = request.add_schema_infos();
+                req_info->set_table_id(info_pair.second->id);
+                req_info->set_version(info_pair.second->version);
+                continue;
+            }
             if (info_pair.second->engine != pb::ROCKSDB &&
                     info_pair.second->engine != pb::ROCKSDB_CSTORE && 
                     info_pair.second->engine != pb::BINLOG) {
@@ -44,46 +58,173 @@ void BaikalHeartBeat::construct_heart_beat_request(pb::BaikalHeartBeatRequest& r
                 if (index_info_mapping.count(index_id) == 0) {
                     continue;
                 }
-                IndexInfo index = *index_info_mapping.at(index_id);
+                const IndexInfo& index = *index_info_mapping.at(index_id);
                 //主键索引
                 if (index.type != pb::I_PRIMARY && !index.is_global) {
                     continue;
                 }
-                auto req_info = request.add_schema_infos();
+                auto* req_info = request.add_schema_infos();
                 req_info->set_table_id(index_id);
                 req_info->set_version(1);
-
                 if (index_id == info_pair.second->id) {
                     req_info->set_version(info_pair.second->version);
                 }
-            }  
+            }
         }
     };
-    request.set_last_updated_index(factory->last_updated_index());
     factory->schema_info_scope_read(schema_read_recallback);
+    request.set_last_updated_index(factory->last_updated_index());
     TaskFactory<pb::RegionDdlWork>::get_instance()->construct_heartbeat(request, 
         &pb::BaikalHeartBeatRequest::add_region_ddl_works);
     TaskFactory<pb::DdlWorkInfo>::get_instance()->construct_heartbeat(request, 
         &pb::BaikalHeartBeatRequest::add_ddl_works);
-    request.set_can_do_ddlwork(is_backup ? false : true);
+    request.set_can_do_ddlwork(is_backup ? false : FLAGS_can_do_ddlwork);
     //定时将request当中消息体更新 等待process_baikal_heartbeat处理更新至TableManager中的virtual_Index_sql_map
     auto sample = factory->get_virtual_index_info();
     auto index_id_name_map = sample.index_id_name_map;
     auto index_id_sample_sqls_map = sample.index_id_sample_sqls_map;
     //遍历map 更新至request 
     for (auto& it1 : index_id_name_map) {
+        const int64_t meta_id = ::baikaldb::get_meta_id(it1.first);
+        if (meta_id != 0) {
+            // 跳过非主Meta数据
+            continue;
+        }
         for (auto& it2 : index_id_sample_sqls_map[it1.first]) {
             pb::VirtualIndexInfluence virtual_index_influence;
             virtual_index_influence.set_virtual_index_id(it1.first);
             virtual_index_influence.set_virtual_index_name(it1.second);
             virtual_index_influence.set_influenced_sql(it2);
             pb::VirtualIndexInfluence* info_affect = request.add_info_affect();
-            *info_affect = virtual_index_influence ;
+            *info_affect = virtual_index_influence;
         }
     }
 }
 
-void BaikalHeartBeat::process_heart_beat_response(const pb::BaikalHeartBeatResponse& response, bool is_backup) {
+// 处理非主Meta的心跳
+void BaikalHeartBeat::construct_heart_beat_request(
+        std::unordered_map<int64_t, pb::BaikalHeartBeatRequest>& meta_request_map) {
+    if (!FLAGS_enable_dblink) {
+        return;
+    }
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    if (factory == nullptr) {
+        DB_WARNING("factory is nullptr");
+        return;
+    }
+    // 用于存储所有DBLINK表对应的外部表
+    std::unordered_set<int64_t> exist_external_table_ids;
+    // 用于存储没有DBLINK表对应的外部表
+    std::unordered_set<int64_t> non_exist_external_table_ids;
+
+    // 获取所有的DBLINK表信息
+    std::vector<pb::DBLinkInfo> dblink_infos;
+    factory->get_all_dblink_infos(dblink_infos);
+    // 获取所有外部映射表信息
+    for (auto& dblink_info : dblink_infos) {
+        const int64_t meta_id = dblink_info.meta_id();
+        if (meta_id == 0) {
+            // 外部表为主Meta表不需要重新同步，跳过
+            continue;
+        }
+        pb::BaikalHeartBeatRequest& request = meta_request_map[meta_id];
+        pb::BaikalHeartBeatTable* heartbeat_table = request.add_heartbeat_tables();
+        heartbeat_table->set_namespace_name(dblink_info.namespace_name());
+        heartbeat_table->set_database(dblink_info.database_name());
+        heartbeat_table->set_table_name(dblink_info.table_name());
+        std::string external_table_name = 
+            dblink_info.namespace_name() + "." + dblink_info.database_name() + "." + dblink_info.table_name();
+        external_table_name = ::baikaldb::get_add_meta_name(meta_id, external_table_name);
+        int64_t external_table_id = -1;
+        if (factory->get_table_id(external_table_name, external_table_id) == 0) {
+            // 填充db侧的外部表id，用于表删除或表重命名场景的旧表信息同步
+            exist_external_table_ids.emplace(external_table_id);
+            heartbeat_table->set_table_id(external_table_id);
+        } else {
+            // 新增外部映射表，需要获取心跳基准数据
+            heartbeat_table->set_is_new(true);
+        }
+    }
+    auto schema_read_recallback = [&meta_request_map, &exist_external_table_ids, 
+                                   &non_exist_external_table_ids, factory] (const SchemaMapping& schema) {
+        for (auto& info_pair : schema.table_info_mapping) {
+            const int64_t meta_id = ::baikaldb::get_meta_id(info_pair.second->id);
+            if (meta_id == 0) {
+                // 跳过主Meta数据
+                continue;
+            }
+            if (exist_external_table_ids.find(info_pair.second->id) == exist_external_table_ids.end()) {
+                // 获取没有DBLINK表对应的外部表
+                non_exist_external_table_ids.insert(info_pair.second->id);
+                continue;
+            }
+            // 非主Meta不处理DBLINK表
+            if (info_pair.second->engine != pb::ROCKSDB &&
+                    info_pair.second->engine != pb::ROCKSDB_CSTORE && 
+                    info_pair.second->engine != pb::BINLOG) {
+                continue;
+            }
+            pb::BaikalHeartBeatRequest& request = meta_request_map[meta_id];
+            // 主键索引和全局二级索引都需要传递region信息
+            for (auto& index_id : info_pair.second->indices) {
+                auto& index_info_mapping = schema.index_info_mapping;
+                if (index_info_mapping.count(index_id) == 0) {
+                    continue;
+                }
+                const IndexInfo& index = *index_info_mapping.at(index_id);
+                if (index.type != pb::I_PRIMARY && !index.is_global) {
+                    continue;
+                }
+                auto* req_info = request.add_schema_infos();
+                req_info->set_table_id(index_id);
+                req_info->set_version(1);
+                if (index_id == info_pair.second->id) {
+                    req_info->set_version(info_pair.second->version);
+                }
+            }
+        }
+    };
+    factory->schema_info_scope_read(schema_read_recallback);
+
+    // 删除没有DBLINK表对应的外部表
+    for (const auto& non_exist_table_id : non_exist_external_table_ids) {
+        factory->delete_table(non_exist_table_id);
+    }
+
+    auto sample = factory->get_virtual_index_info();
+    auto index_id_name_map = sample.index_id_name_map;
+    auto index_id_sample_sqls_map = sample.index_id_sample_sqls_map;
+    for (auto& kv : meta_request_map) {
+        const int64_t meta_id = kv.first;
+        pb::BaikalHeartBeatRequest& request = kv.second;
+        // 非主Meta不处理Online DDL任务
+        request.set_can_do_ddlwork(false);
+        // 非主Meta上次更新的index
+        request.set_last_updated_index(factory->last_updated_index(meta_id));
+        // 非主Meta虚拟索引信息
+        for (auto& it1 : index_id_name_map) {
+            const int64_t meta_id_tmp = ::baikaldb::get_meta_id(it1.first);
+            if (meta_id != meta_id_tmp) {
+                // 处理对应Meta数据
+                continue;
+            }
+            for (auto& it2 : index_id_sample_sqls_map[it1.first]) {
+                pb::VirtualIndexInfluence virtual_index_influence;
+                virtual_index_influence.set_virtual_index_id(it1.first);
+                virtual_index_influence.set_virtual_index_name(it1.second);
+                virtual_index_influence.set_influenced_sql(it2);
+                pb::VirtualIndexInfluence* info_affect = request.add_info_affect();
+                *info_affect = virtual_index_influence;
+            }
+        }
+        // 非主Meta按需返回，获取主表和全局索引信息（目前未获取Binlog表信息）
+        request.set_need_heartbeat_table(true);
+        request.set_need_global_index_heartbeat(true);
+    }
+}
+
+void BaikalHeartBeat::process_heart_beat_response(
+        const pb::BaikalHeartBeatResponse& response, bool is_backup, const int64_t meta_id) {
     SchemaFactory* factory = nullptr;
     if (is_backup) {
         factory = SchemaFactory::get_backup_instance();
@@ -93,57 +234,63 @@ void BaikalHeartBeat::process_heart_beat_response(const pb::BaikalHeartBeatRespo
     if (!factory->is_inited()) {
         return;
     }
-
+    if (response.has_last_updated_index() && 
+            response.last_updated_index() > factory->last_updated_index(meta_id)) {
+        factory->set_last_updated_index(response.last_updated_index(), meta_id);
+    }
     for (auto& info : response.schema_change_info()) {
         factory->update_table(info);
     }
     factory->update_regions(response.region_change_info());
     if (response.has_idc_info()) {
-        factory->update_idc(response.idc_info());
+        factory->update_idc(response.idc_info(), meta_id);
     }
-    factory->update_show_db(response.db_info());
-    for (auto& info : response.privilege_change_info()) {
-        factory->update_user(info);
+
+    if (meta_id == 0) {
+        factory->update_show_db(response.db_info());
+        for (auto& info : response.privilege_change_info()) {
+            factory->update_user(info);
+        }
+        if (response.statistics().size() > 0) {
+            factory->update_statistics(response.statistics());
+        }
+        TaskFactory<pb::RegionDdlWork>::get_instance()->process_heartbeat(response, 
+            static_cast<
+                const google::protobuf::RepeatedPtrField<pb::RegionDdlWork>& (pb::BaikalHeartBeatResponse::*)() const
+            >(&pb::BaikalHeartBeatResponse::region_ddl_works));
+        TaskFactory<pb::DdlWorkInfo>::get_instance()->process_heartbeat(response, 
+            static_cast<
+                const google::protobuf::RepeatedPtrField<pb::DdlWorkInfo>& (pb::BaikalHeartBeatResponse::*)() const
+            >(&pb::BaikalHeartBeatResponse::ddl_works));
     }
-    if (response.statistics().size() > 0) {
-        factory->update_statistics(response.statistics());
+
+    if (meta_id != 0) {
+        DB_NOTICE("for dblink, region_change_info size: %d", response.region_change_info().size());
     }
-    if (response.has_last_updated_index() && 
-        response.last_updated_index() > factory->last_updated_index()) {
-        factory->set_last_updated_index(response.last_updated_index());
-    }
-    
-    TaskFactory<pb::RegionDdlWork>::get_instance()->process_heartbeat(response, 
-        static_cast<
-            const google::protobuf::RepeatedPtrField<pb::RegionDdlWork>& (pb::BaikalHeartBeatResponse::*)() const
-        >(&pb::BaikalHeartBeatResponse::region_ddl_works));
-    TaskFactory<pb::DdlWorkInfo>::get_instance()->process_heartbeat(response, 
-        static_cast<
-            const google::protobuf::RepeatedPtrField<pb::DdlWorkInfo>& (pb::BaikalHeartBeatResponse::*)() const
-        >(&pb::BaikalHeartBeatResponse::ddl_works));
 }
 
-void BaikalHeartBeat::process_heart_beat_response_sync(const pb::BaikalHeartBeatResponse& response) {
+void BaikalHeartBeat::process_heart_beat_response_sync(
+        const pb::BaikalHeartBeatResponse& response, const int64_t meta_id) {
     TimeCost cost;
     SchemaFactory* factory = SchemaFactory::get_instance();
-    factory->update_tables_double_buffer_sync(response.schema_change_info());
-
-    if (response.has_idc_info()) {
-        factory->update_idc(response.idc_info());
-    }
-    factory->update_show_db(response.db_info());
-    for (auto& info : response.privilege_change_info()) {
-        factory->update_user(info);
-    }
-    if (response.statistics().size() > 0) {
-        factory->update_statistics(response.statistics());
-    }
-
-    factory->update_regions_double_buffer_sync(response.region_change_info());
     if (response.has_last_updated_index() && 
-        response.last_updated_index() > factory->last_updated_index()) {
-        factory->set_last_updated_index(response.last_updated_index());
+        response.last_updated_index() > factory->last_updated_index(meta_id)) {
+        factory->set_last_updated_index(response.last_updated_index(), meta_id);
     }
+    factory->update_tables_double_buffer_sync(response.schema_change_info());
+    if (response.has_idc_info()) {
+        factory->update_idc(response.idc_info(), meta_id);
+    }
+    if (meta_id == 0) {
+        factory->update_show_db(response.db_info());
+        for (auto& info : response.privilege_change_info()) {
+            factory->update_user(info);
+        }
+        if (response.statistics().size() > 0) {
+            factory->update_statistics(response.statistics());
+        }
+    }
+    factory->update_regions_double_buffer_sync(response.region_change_info());
     DB_NOTICE("sync time:%ld", cost.get_time());
 }
 
@@ -326,8 +473,6 @@ void BinlogNetworkServer::process_heart_beat_response(const pb::BaikalHeartBeatR
         factory->update_table(info);
     }
 
-    update_table_infos();
-
     RegionVec rv;
     auto& region_change_info = response.region_change_info();
     for (auto& region_info : region_change_info) {
@@ -431,14 +576,21 @@ int BinlogNetworkServer::update_table_infos() {
     if (common_binlog_ids.size() == 0) {
         DB_FATAL("get binlog id error.");
         return -1;
-    }
-    if (common_binlog_ids.size() > 1) {
-        DB_WARNING("selected multi binlog_ids: %ld maybe config error", common_binlog_ids.size());
-    }
-    for (SmartTable table : table_ptrs) {
-        if (table != nullptr && common_binlog_ids.count(table->binlog_id) != 0) {
-            _binlog_id = table->binlog_id;
+    } else if (common_binlog_ids.size() == 1) {
+        _binlog_id = *common_binlog_ids.begin();
+    } else if (common_binlog_ids.size() > 1) {
+        int64_t min_partition_num = INT64_MAX;
+        for (int64_t id : common_binlog_ids) {
+            auto binlog_info = factory->get_table_info_ptr(id);
+            if (binlog_info != nullptr) {
+                if (binlog_info->partition_num < min_partition_num) {
+                    min_partition_num = binlog_info->partition_num;
+                    _binlog_id = id;
+                }
+            }
         }
+        DB_WARNING("selected multi binlog_ids: %ld maybe config error. binlog_id: %ld, partition_num: %ld", 
+                common_binlog_ids.size(), _binlog_id, min_partition_num);
     }
 
     if (_binlog_id == -1) {

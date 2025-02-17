@@ -221,8 +221,10 @@ int create_dynamic_range_partition_info(
     std::string right_value_str;
     
     // Partition range left/right expr
-    get_specified_timestamp(current_ts, offset, time_unit, left_ts);
-    get_specified_timestamp(current_ts, offset + 1, time_unit, right_ts);
+    left_ts = current_ts;
+    date_add_interval(left_ts, offset, time_unit);
+    right_ts = current_ts;
+    date_add_interval(right_ts, offset + 1, time_unit);
     if (partition_col_type == pb::DATE) {
         timestamp_to_format_str(left_ts, DATE_FORMAT, left_value_str);
         timestamp_to_format_str(right_ts, DATE_FORMAT, right_value_str);
@@ -374,6 +376,10 @@ int get_specifed_partitions(
         ::google::protobuf::RepeatedPtrField<pb::RangePartitionInfo>& specified_partitions_vec,
         bool is_cold) {
     for (const auto& range_partition_info : partitions_vec) {
+        if (range_partition_info.type() == pb::RPT_ADDITIONAL) {
+            // 外挂分区不转冷、不删除
+            continue;
+        }
         if (!range_partition_info.has_range()) {
             continue;
         }

@@ -157,6 +157,13 @@ public:
         return _txn_db->Put(options, column_family, key, value);
     }
 
+    rocksdb::Status merge(const rocksdb::WriteOptions& options,
+                        rocksdb::ColumnFamilyHandle* column_family, 
+                        const rocksdb::Slice& key,
+                        const rocksdb::Slice& value) {
+        return _txn_db->Merge(options, column_family, key, value);
+    }
+
     rocksdb::Transaction* begin_transaction(
             const rocksdb::WriteOptions& write_options,
             const rocksdb::TransactionOptions& txn_options) {
@@ -388,6 +395,9 @@ public:
     }
     void close() {
         delete _txn_db;
+        if (_cold_txn_db != nullptr) {
+            delete _cold_txn_db;
+        }
     }
     bool is_any_stall() {
         uint64_t value = 0;

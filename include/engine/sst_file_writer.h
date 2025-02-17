@@ -26,7 +26,10 @@ public:
             _options.bottommost_compression = rocksdb::kLZ4Compression;
             _options.bottommost_compression_opts = rocksdb::CompressionOptions();
         }
-        _sst_writer.reset(new rocksdb::SstFileWriter(rocksdb::EnvOptions(), _options, nullptr, true));
+        //ingest到L6后会保留filter，因此需要去除
+        bool skip_filters = _options.optimize_filters_for_hits;
+        _sst_writer.reset(new rocksdb::SstFileWriter(rocksdb::EnvOptions(), _options, nullptr, 
+                    true, rocksdb::Env::IOPriority::IO_TOTAL, skip_filters));
     }
     rocksdb::Status open(const std::string& sst_file) {
         return _sst_writer->Open(sst_file);

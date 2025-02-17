@@ -107,6 +107,8 @@ void TaskManager::process_ddl_work(pb::RegionDdlWork work) {
     ret = planner_ptr->execute();
     if (ret == 0) {
         DB_NOTICE("process ddlwork %s success.", work.ShortDebugString().c_str());
+    } else {
+        DB_FATAL("process ddlwork %s failed.", work.ShortDebugString().c_str());
     }
 
     if (TaskFactory<pb::RegionDdlWork>::get_instance()->finish_task(planner_ptr->get_ddlwork()) != 0) {

@@ -176,10 +176,15 @@ private:
 };
 
 struct FollowerReadCond {
+    int64_t ask_leader_read_index_cost = 0;
+    int64_t wait_read_index_cost = 0;
+    int64_t read_index = 0;
+    uint64_t log_id = 0;
+    TimeCost t;
     BthreadCond cond;
     pb::ErrCode errcode;
     bool is_learner = false;
-    FollowerReadCond(bool is_learner) : errcode(pb::SUCCESS), is_learner(is_learner) {};
+    FollowerReadCond(bool is_learner, uint64_t id) : errcode(pb::SUCCESS), is_learner(is_learner), log_id(id) {};
     void set_failed() {
         if (is_learner) {
             errcode = pb::LEARNER_NOT_READY;
@@ -215,6 +220,7 @@ public:
         return ret;
     }
     void reset_timer() {
+        BAIDU_SCOPED_LOCK(_mutex);
         if (_is_running) {
             reset();
         } else {
@@ -223,11 +229,13 @@ public:
         }
     }
     void stop_timer() {
+        BAIDU_SCOPED_LOCK(_mutex);
         _is_running = false;
         stop();
     }
     virtual void run();
 protected:
+    bthread::Mutex  _mutex;
     virtual void on_destroy() {};
     Region* _region = nullptr;
     bool _is_running = false;
@@ -397,7 +405,7 @@ public:
             _wait_exec_queue.reset();
             execution_queue_join(_wait_exec_queue_id);
         }
-        _no_op_timer.stop();
+        _no_op_timer.stop_timer();
         _no_op_timer.destroy();
         if (_need_decrease) {
             _need_decrease = false;
@@ -525,7 +533,8 @@ public:
             const pb::Plan& plan,
             const RepeatedPtrField<pb::TupleDescriptor>& tuples,
             pb::StoreRes& response);
-    int select_normal(RuntimeState& state, ExecNode* root, pb::StoreRes& response);
+    int select_normal(RuntimeState& state, ExecNode* root, const pb::StoreReq& request, pb::StoreRes& response);
+    int select_vectorized(RuntimeState& state, ExecNode* root, const pb::StoreReq& request, pb::StoreRes& response);
     int select_sample(RuntimeState& state, ExecNode* root, const pb::AnalyzeInfo& analyze_info, pb::StoreRes& response);
     void do_apply(int64_t term, int64_t index, const pb::StoreReq& request, braft::Closure* done);
     virtual void on_apply(braft::Iterator& iter);
@@ -549,9 +558,9 @@ public:
     void on_snapshot_load_for_restart(braft::SnapshotReader* reader,
             std::map<int64_t, std::string>& prepared_log_entrys);
 
-    void construct_heart_beat_request(pb::StoreHeartBeatRequest& request, bool need_peer_balance); 
+    void construct_heart_beat_request(pb::StoreHeartBeatRequest& request, bool need_peer_balance, bool meta_need_report); 
 
-    void construct_peers_status(pb::LeaderHeartBeat* leader_heart);
+    void construct_peers_status(pb::LeaderHeartBeat* leader_heart, bool& need_report);
   
     void set_can_add_peer();
     
@@ -985,7 +994,12 @@ public:
             pb::StoreRes* response,
             const char* remote_side,
             google::protobuf::Closure* done);
-    
+    int exec_rollup_region_finish_request(const pb::StoreReq& request, 
+            const int64_t unappiled_begin_index, 
+            const int64_t unappiled_end_index, 
+            braft::Closure* done, 
+            int64_t term,
+            bool is_failed); 
     int execute_cached_cmd(const pb::StoreReq& request, pb::StoreRes& response, 
             uint64_t txn_id, 
             SmartTransaction& txn, 
@@ -1117,6 +1131,8 @@ public:
 
     void remove_local_index_data();
     void delete_local_rocksdb_for_ddl(int64_t table_id, int64_t index_id);
+    int delete_hot_local_rocksdb(int64_t table_id, int64_t index_id);
+
     int add_reverse_index(int64_t table_id, const std::set<int64_t>& index_ids);
 
     void process_download_sst(brpc::Controller* controller, 
@@ -1216,22 +1232,36 @@ public:
     void get_read_index(const baikaldb::pb::GetAppliedIndex* request, pb::StoreRes* response);
     
     // if seek_table_lines != nullptr, seek all sst for seek_table_lines
-    bool has_sst_data(int64_t* seek_table_lines);
+    bool has_sst_data(int64_t* seek_table_lines, int64_t* used_size);
+    // 冷数据主键已经被刷冷, 只用判断索引还在不在就行
+    bool has_index_sst_data(int64_t index_id, int64_t* seek_table_lines); 
 
     // for olap
     int manual_link_external_sst();
     int ingest_cold_sst_on_snapshot_load();
     bool need_flush_to_cold_rocksdb();
     int flush_to_cold_rocksdb();
-    int flush_hot_to_cold(std::vector<std::string>& external_files);
-    int sync_olap_info(pb::OlapRegionStat state, const std::vector<std::string>& external_files);
+    int flush_index_to_cold_rocksdb(const pb::OlapRegionInfo& olap_info);
+    int flush_hot_to_cold(std::vector<std::string>& external_files,
+                        std::map<int64_t, std::vector<std::string>>& index_ext_paths_mapping);
+    int flush_hot_index_to_cold(int64_t index_id, std::map<int64_t, std::vector<std::string>>& new_index_ext_paths_mapping);
+    int fits_snapshot_blacklist();
+    int sync_olap_info(pb::OlapRegionStat state, 
+                        const std::vector<std::string>& external_files,
+                        std::map<int64_t, std::vector<std::string> > index_ext_paths_mapping);
+    int sync_olap_index_info(const pb::OlapRegionInfo& old_olap_info, 
+                        pb::OlapRegionStat state, 
+                        std::map<int64_t, std::vector<std::string> > new_index_ext_paths_mapping);
+    void do_cold_index_ddl_work(const pb::OlapRegionInfo& olap_info);
+    int doing_cold_data_rollup(int64_t index_id);
     // int copy_files(const std::vector<rocksdb::LiveFileMetaData>& sst_files, std::vector<std::string>& external_files);
     // int copy_file(const std::string& local_file, std::string& external_file);
-    int get_hot_sst(bool do_compaction_if_need, std::vector<rocksdb::LiveFileMetaData>& sst_file_meta);
     int get_cold_sst(std::set<std::string>& sst_relative_filename);
+    int get_cold_sst(std::set<std::string>& sst_relative_filename, std::set<int64_t>& index_ids);
     int ingest_cold_sst(const std::vector<std::string>& external_files);
-    int check_hot_sst(const std::vector<rocksdb::LiveFileMetaData>& sst_files);
+    int ingest_cold_index_sst(std::vector<std::string>& external_files, int64_t index_id);
     void apply_olap_info(const pb::StoreReq& request, braft::Closure* done);
+    void apply_olap_index_info(const pb::StoreReq& request, braft::Closure* done);
     int modify_olap_region_num_table_lines();
     pb::OlapRegionStat olap_state() {
         return _olap_state.load();
@@ -1246,7 +1276,7 @@ public:
                                   const std::vector<std::string>& binlog_ssts);
     void delete_remote_expired_file();
     bool need_clear_offline_binlog_sst();
-    void clear_offline_binlog();
+    int clear_offline_binlog(int64_t start_ts, int64_t end_ts);
 private:
     struct SplitParam {
         int64_t split_start_index = INT_FAST64_MAX;
@@ -1328,7 +1358,10 @@ private:
     int write_binlog_value(const std::map<std::string, ExprValue>& field_value_map);
     int64_t binlog_get_int64_val(const std::string& name, const std::map<std::string, ExprValue>& field_value_map);
     int64_t read_data_cf_oldest_ts();
-    bool flash_back_need_read(const pb::StoreReq* request, const std::map<std::string, ExprValue>& field_value_map);
+    bool flash_back_need_read(const pb::StoreReq* request, 
+                            const std::map<std::string, ExprValue>& field_value_map,
+                            const std::set<std::string>& req_db_tables,
+                            const std::set<uint64_t>& req_signs);
     
     std::string binlog_get_str_val(const std::string& name, const std::map<std::string, ExprValue>& field_value_map);
     
@@ -1357,10 +1390,8 @@ private:
     void apply_kv_in_txn(const pb::StoreReq& request, braft::Closure* done, 
                          int64_t index, int64_t term);
 
-    void apply_kv_olap(const pb::StoreReq& request, braft::Closure* done, 
-                                  int64_t index, int64_t term);
     void apply_kv_out_txn(const pb::StoreReq& request, braft::Closure* done, 
-                                  int64_t index, int64_t term);
+                                  int64_t index, int64_t term, bool is_replay);
     bool validate_version(const pb::StoreReq* request, pb::StoreRes* response);
     void print_log_entry(const int64_t start_index, const int64_t end_index);
     void set_region(const pb::RegionInfo& region_info) {
@@ -1489,6 +1520,7 @@ private:
     rocksdb::ColumnFamilyHandle* _meta_cf;    
     std::string         _address; //ip:port
     
+    std::string         _cache_peer_status;
     //region metainfo
     pb::RegionInfo      _region_info;
     std::mutex          _region_lock;    
@@ -1539,6 +1571,7 @@ private:
     int64_t                             _braft_apply_index = 0;
     int64_t                             _applied_index = 0;  //current log index
     int64_t                             _done_applied_index = 0; // 确保已经log已经执行完(数据已写盘)，follow read用
+    int64_t                             _rollup_region_init_index = -1;
     // 表示数据版本，conf_change,no_op等不影响数据时版本不变
     // TODO, 裸用的地方太多, 需要整理
     int64_t                             _data_index = 0;
@@ -1608,7 +1641,9 @@ private:
     bool            _is_learner = false;
     bool            _learner_ready_for_read = false;
     TimeCost        _learner_time;
-
+    
+    // watt __snapshot__ filter
+    bool            _need_snapshot_filter = false;
     // follower read
     bthread::ExecutionQueueId<SmartFollowerReadCond> _wait_read_idx_queue_id;
     bthread::ExecutionQueue<SmartFollowerReadCond>::scoped_ptr_t _wait_read_idx_queue;

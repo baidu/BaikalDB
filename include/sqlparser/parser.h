@@ -19,6 +19,7 @@
 #include "dml.h"
 #include "ddl.h"
 #include "misc.h"
+#include "proto/common.pb.h"
 
 struct yy_buffer_state;
 
@@ -44,7 +45,7 @@ enum ParseError {
 };
 
 struct SqlParser {
-    std::string charset;
+    baikaldb::pb::Charset charset;
     std::string collation;
     std::vector<StmtNode*> result;
     ParseError error = SUCC;

@@ -56,6 +56,11 @@ enum OpType {
 
     // for olap
     OP_OLAP_INFO                            = 80; //olap信息更新
+    OP_OLAP_INDEX_INFO                      = 81; //olap索引信息更新
+    OP_ROLLUP_REGION_INIT                   = 82; //用于rollup的base ddl
+    OP_ROLLUP_REGION_FINISH                 = 83;
+    OP_ROLLUP_REGION_FAILED                 = 84; //失败处理
+    OP_ROLLUP_CLEAR_VERSION                 = 85;
 
     // for meta 
     OP_ADD_LOGICAL                          = 114; //建逻辑机房

@@ -24,7 +24,8 @@ enum ExprType {
     ET_ROW_EXPR,
     ET_SUB_QUERY_EXPR,
     ET_CMP_SUB_QUERY_EXPR,
-    ET_EXISTS_SUB_QUERY_EXPR
+    ET_EXISTS_SUB_QUERY_EXPR,
+    ET_COMMON_TABLE_EXPR
 };
 struct ExprNode : public Node {
     ExprType expr_type;
@@ -278,8 +279,10 @@ struct LiteralExpr : public ExprNode {
                 break;
             case LT_PLACE_HOLDER:
                 std::cout << "?(" << _u.int64_val << ")";
+                break;
             case LT_MAXVALUE:
                 std::cout << "MAXVALUE";
+                break;
         }
         std::cout << std::endl;
     }
@@ -407,6 +410,23 @@ struct RowExpr : public ExprNode {
         }
         os << ")";
     }
+};
+
+struct CommonTableExpr : public ExprNode {
+    SubqueryExpr* query_expr = nullptr;
+    Vector<ColumnName*> column_names;
+    String name;
+    CommonTableExpr() {
+        is_complex = true;
+        expr_type = ET_COMMON_TABLE_EXPR;
+    }
+    virtual void set_print_sample(bool print_sample_) override {
+        print_sample = print_sample_;
+        if (query_expr != nullptr) {
+            query_expr->set_print_sample(print_sample_);
+        }
+    }
+    virtual void to_stream(std::ostream& os) const override;
 };
 
 }

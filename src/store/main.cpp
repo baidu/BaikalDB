@@ -32,6 +32,7 @@
 #include "schema_factory.h"
 #include "qos.h"
 #include "memory_profile.h"
+#include "arrow_function.h"
 
 namespace baikaldb {
 DECLARE_int32(store_port);
@@ -163,7 +164,10 @@ int main(int argc, char **argv) {
         DB_FATAL("SchemaFactory init failed");
         return -1;
     }
-
+    if (baikaldb::ArrowFunctionManager::instance()->RegisterAllArrowFunction() != 0) {
+        DB_FATAL("ArrowFunctionManager init failed");
+        return -1;
+    }
     //add service
     butil::EndPoint addr;
     addr.ip = butil::IP_ANY;

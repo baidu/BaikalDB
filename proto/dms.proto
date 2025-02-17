@@ -1,0 +1,163 @@
+syntax = "proto2";
+import "common.proto";
+import "optype.proto";
+package baikaldb.pb;
+option cc_generic_services = true;
+
+enum DMSErrCode {
+    DMS_SUCCESS             = 0;
+    DMS_FAILED              = 1;
+    DMS_SYNTAX_CHECK_FAILED = 2;
+    
+    // 导入任务使用
+    DMS_IMPORTER_TASK_INPUT_PARAM_ILLEGAL = 1001; // 请求参数不合法
+    DMS_IMPORTER_TASK_ALREADY_EXIST       = 1002; // 新建导入任务时，任务已存在报错
+    DMS_IMPORTER_TASK_NOT_EXIST           = 1003; // 操作导入任务时，任务不存在报错
+    DMS_IMPORTER_TASK_CONFIG_ILLEGAL      = 1004; // 导入任务配置不合法
+    DMS_IMPORTER_TASK_DONE_PATH_ILLEGAL   = 1005; // 导入任务done路径不合法
+    DMS_IMPORTER_TASK_MORE_THAN_ONE       = 1006; // 查询出超过一个的导入任务
+
+};
+
+enum DMSOpType {
+    OP_CREATE_TASK                    = 1;  // 创建任务
+    OP_START_TASK                     = 2;  // 开始任务
+    OP_STOP_TASK                      = 3;  // 停止任务
+    OP_QUERY_ESTIMATE_TASK            = 4;  // 查询任务预估行数
+    OP_QUERY_EXECUTE_TASK             = 5;  // 查询任务执行进度
+    OP_ADD_IMPORTER_TASK              = 6;  // 添加导入任务
+    OP_DELETE_IMPORTER_TASK           = 7;  // 删除导入任务
+    OP_START_IMPORTER_TASK            = 8;  // 开始导入任务
+    OP_STOP_IMPORTER_TASK             = 9;  // 停止导入任务
+    OP_QUERY_IMPORTER_TASK            = 10; // 查询导入任务（凤阁场景使用）
+    OP_ADD_BACKTRACK_IMPORTER_TASK    = 11; // 添加回溯任务
+    OP_DELETE_BACKTRACK_IMPORTER_TASK = 12; // 删除回溯任务（凤阁场景使用）
+    OP_QUERY_BACKTRACK_IMPORTER_TASK  = 13; // 查询回溯任务（凤阁场景使用，每次只查询一个任务）
+    OP_ADD_TMP_TABLE_TASK             = 14; // 添加临时表任务
+    OP_QUERY_TMP_TABLE_TASK           = 15; // 查询临时表任务
+    OP_QUERY_BNS                      = 16; // 排查工具使用，查询baikaldb bns、baikalstore bns
+};
+
+enum SqlStatus {
+    SQL_SUCCESS = 0;
+    SQL_FAILED  = 1;
+};
+
+enum TaskStatus {
+    TS_SUCCESS          = 0;    // 成功状态
+    TS_RUNNING          = 1;    // 执行状态
+    TS_STOPPED          = 2;    // 停止状态
+    TS_FAILED           = 3;    // 失败状态
+    TS_ESTIMATE_RUNNING = 4;    // SQL预估执行状态
+    TS_ESTIMATE_SUCCESS = 5;    // SQL预估成功状态
+    TS_NOT_EXIST        = 6;    // 任务不存在（导入回溯任务查询使用）
+    TS_IDLE             = 7;    // 任务待执行（导入回溯任务查询使用）
+    TS_LORENTZ          = 8;    // 任务状态为lorentz（凤阁场景使用）
+    TS_INITED           = 9;    // 导入任务创建校验成功，未启动状态
+    TS_UNKNOWN          = 1001; // 未知状态
+};
+
+message DBArgs {
+    optional bytes baikal_meta       = 1;
+    optional bytes baikal_namespace  = 2;
+    optional bytes baikal_current_db = 3;
+};
+
+message SqlDetail {
+    optional int64 id             = 1; // SQL序号
+    optional SqlStatus status     = 2; // SQL状态
+    optional bytes errmsg         = 3; // SQL错误信息
+    optional int64 affected_row   = 4; // SQL影响行数
+    optional bytes sql            = 5; // SQL文本
+};
+
+// SQL预估和SQL执行返回结果复用该结构
+message TaskDetail {
+    optional uint64 task_id        = 1; // 任务id
+    optional TaskStatus status     = 2; // 任务状态
+    optional bytes errmsg          = 3; // 任务错误信息
+    optional int64 total_sql_num   = 4; // 任务SQL总数量
+    optional int64 done_sql_num    = 5; // 任务SQL已完成数量
+    repeated SqlDetail sql_details = 6; // SQL处理信息
+};
+
+// 导入任务信息
+message ImporterTaskInfo {
+    optional bytes task_suffix             = 1;  // 任务名后缀 
+    optional bytes status                  = 2;  // 任务状态（凤阁场景使用，设置为lorentz）
+    optional bytes baikal_meta             = 3;  // 业务方所对应baikalmeta
+    optional bytes baikal_namespace        = 4;  // 业务方所对应namespace
+    optional bytes database_name           = 5;  // 导入任务涉及的库
+    optional bytes table_name              = 6;  // 导入任务涉及的表
+    optional bytes afs_cluster             = 7;  // 导入数据对应afs集群
+    optional bytes afs_username            = 8;  // 导入数据对应afs集群的账号
+    optional bytes afs_password            = 9;  // 导入数据对应afs集群的密码
+    optional bytes done_file               = 10; // done文件路径，local_done_json复用该字段
+    optional bytes model                   = 11; // 模式，update/replace/delete
+    optional int64 version                 = 12; // 版本
+    optional bytes table_charset           = 13; // 表编码
+    optional bytes data_charset            = 14; // 数据编码
+    optional bytes config                  = 15; // 任务配置
+    optional int32 broken_point_continuing = 16; // 是否断点续传
+    optional bytes owner                   = 17; // 任务owner
+    optional bytes remark                  = 18; // 任务备注
+    optional bytes baikaldb_bns            = 19; // 用于获取baikalmeta、namespace（凤阁场景使用）
+    optional bytes baikaldb_username       = 20; // 用于获取baikalmeta、namespace（凤阁场景使用）
+    optional bytes baikaldb_password       = 21; // 用于获取baikalmeta、namespace（凤阁场景使用）
+    optional bytes lorentz_done_json       = 22; // 用于检查的done_json（凤阁场景使用）
+};
+
+// 回溯任务信息
+message BacktrackImporterTaskInfo {
+    optional bytes database_name           = 1; // 凤阁场景使用
+    optional bytes table_name              = 2; // 凤阁场景使用
+    optional bytes afs_cluster             = 3; // 凤阁场景使用
+    optional bytes task_done_path          = 4; // 凤阁场景使用
+    repeated bytes backtrack_done_files    = 5; // 需要回溯的done文件列表
+    repeated int64 backtrack_versions      = 6; // 需要回溯的versions文件列表
+    optional int64 backtrack_start_version = 7; // 修改例行任务的version，从该version往后回溯
+    optional bool  is_routine_task         = 8; // 凤阁场景，判断是回溯任务或例行任务
+};
+
+// f1 baikal bns、baikaldb bns
+message TroubleShootingRequest {
+    optional bytes baikal_bns   = 1; // f1 baikal bns
+    optional bytes baikaldb_bns = 2;
+    optional bytes db_name      = 3;
+    optional bytes table_name   = 4;
+    optional bool is_offline    = 5; // 是否查询线下集群
+};
+
+// baikaldb bns、baikalstore bns
+message TroubleShootingResponse {
+    repeated bytes baikaldb_bns    = 1;
+    repeated bytes baikalstore_bns = 2;
+};
+
+message TaskConfig {
+    optional bool need_backup   = 1; // 是否需要备份
+    optional bool need_parallel = 2; // 是否需要并行
+};
+
+message DMSRequest {
+    required DMSOpType op_type                                      = 1;
+    optional uint64 task_id                                         = 2;
+    optional bytes task_name                                        = 3;
+    optional bytes raw_sql                                          = 4; // 任务原始SQL
+    optional DBArgs db_args                                         = 5;
+    optional TaskConfig task_config                                 = 6; // SQL任务配置
+    optional ImporterTaskInfo importer_task_info                    = 7; // 导入任务信息
+    optional BacktrackImporterTaskInfo backtrack_importer_task_info = 8; // 回溯任务信息
+    optional TroubleShootingRequest trouble_shooting_request        = 9; // 排查工具请求
+};
+
+message DMSResponse {
+    required DMSErrCode errcode      = 1;
+    optional bytes errmsg            = 2; // 接口错误信息
+    optional TaskDetail task_details = 3;
+    optional TroubleShootingResponse trouble_shooting_response = 4; // 排查工具响应
+};
+
+service DMSService {
+    rpc query(DMSRequest) returns (DMSResponse);
+};

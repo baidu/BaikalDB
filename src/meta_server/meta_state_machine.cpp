@@ -114,7 +114,7 @@ void MetaStateMachine::baikal_heartbeat(google::protobuf::RpcController* control
     if (cntl->has_log_id()) {
         log_id = cntl->log_id();
     }
-    if (!_is_leader.load()) {
+    if (!_is_leader.load() || !_node.is_leader()) {
         DB_WARNING("NOT LEADER, logid:%lu", log_id);
         response->set_errcode(pb::NOT_LEADER);
         response->set_errmsg("not leader");
@@ -153,12 +153,14 @@ void MetaStateMachine::baikal_heartbeat(google::protobuf::RpcController* control
     DBManager::get_instance()->process_baikal_heartbeat(request, response, cntl);
     int64_t ddl_time = step_time_cost.get_time();
     step_time_cost.reset();
+    NamespaceManager::get_instance()->process_baikal_heartbeat(request, response);
+    int64_t ns_cost = step_time_cost.get_time();
     _baikal_heart_beat << time_cost.get_time();
     DB_NOTICE("baikaldb:%s heart beat, wait_time:%ld, time_cost: %ld, cluster_time: %ld, "
-                "privilege_time: %ld, schema_time: %ld, ddl_time: %ld, log_id: %lu", 
+                "privilege_time: %ld, schema_time: %ld, ddl_time: %ld, ns_time: %ld, log_id: %lu", 
                 butil::endpoint2str(cntl->remote_side()).c_str(),
                 wait_time, time_cost.get_time(),
-                cluster_time, privilege_time, schema_time, ddl_time,
+                cluster_time, privilege_time, schema_time, ddl_time, ns_cost, 
                 log_id);
 }
 
@@ -319,6 +321,10 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
              PrivilegeManager::get_instance()->drop_privilege(request, done);
             break;
         }
+        case pb::OP_DROP_INVALID_PRIVILEGE: {
+            PrivilegeManager::get_instance()->drop_invalid_privilege(request, done);
+            break;
+        }
         case pb::OP_CREATE_NAMESPACE: {
             NamespaceManager::get_instance()->create_namespace(request, done);
             break;
@@ -347,8 +353,13 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
             TableManager::get_instance()->create_table(request, iter.index(), done);
             break;
         }
-        case pb::OP_DROP_TABLE: {
+        case pb::OP_DROP_TABLE:
+        case pb::OP_DROP_VIEW: { 
             TableManager::get_instance()->drop_table(request, iter.index(), done);
+            break;
+        }
+        case pb::OP_CREATE_VIEW: {
+            TableManager::get_instance()->create_view(request, iter.index(), done);
             break;
         }
         case pb::OP_DROP_TABLE_TOMBSTONE: {
@@ -658,6 +669,12 @@ int MetaStateMachine::on_snapshot_load(braft::SnapshotReader* reader) {
         }
     }
     set_have_data(true);
+    // 重启后下发占位，防止拉取全量
+    int64_t incr_index = _applied_index + 1;
+    std::vector<pb::SchemaInfo> schema_infos;
+    TableManager::get_instance()->put_incremental_schemainfo(incr_index, schema_infos);
+    std::vector<pb::RegionInfo> region_infos;
+    RegionManager::get_instance()->put_incremental_regioninfo(incr_index, region_infos);
     return 0;
 }
 

@@ -89,6 +89,8 @@ void HandleHelper::init() {
             this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_HANDLE_MODIFY_PARTITION] = std::bind(&HandleHelper::_handle_modify_partition,
             this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_HANDLE_MODIFY_PARTITION_RESOURCETAG] = std::bind(&HandleHelper::_handle_modify_partition_resourcetag,
+            this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_HANDLE_SPECIFY_SPLIT_KEYS] = std::bind(&HandleHelper::_handle_specify_split_keys,
             this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_HADNLE_CONVERT_PARTITION] = std::bind(&HandleHelper::_handle_convert_partition,
@@ -333,59 +335,131 @@ void HandleHelper::_make_handle_region_result_rows(
     }
 }
 
+// handle add_privilege db rw;
+// handle add_privilege bns bnsaddr;
+// handle add_privilege ddl_permission true;
+// handle add_privilege resource_tag 'resource_tag';
+// handle add_privilege '{user_privilege json}';
 bool HandleHelper::_handle_add_privilege(const SmartSocket& client, const std::vector<std::string>& split_vec) {
     if (!client || !client->user_info) {
         DB_FATAL("param invalid");
         return false;
     }
-    std::string db = "";
-    std::string resource_tag = "";
-    pb::RW rw  = pb::WRITE;
-    bool permission = false;
-    std::string range_partition_type_str;
-    if (split_vec.size() == 4) {
-        db = split_vec[2];
-        if (boost::iequals(split_vec[3], "READ")) {
-            rw = pb::READ;
-        } else if (boost::iequals(split_vec[3], "true")) {
-            permission = true;
-        }
-        resource_tag = split_vec[3];
-        range_partition_type_str = split_vec[3];
-    } else {
+
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    if (factory == nullptr) {
         client->state = STATE_ERROR;
-        DB_FATAL("param invalid");
+        DB_FATAL("factory is nullptr");
         return false;
     }
+
+    if (split_vec.size() < 3) {
+        DB_FATAL("param invalid");
+        client->state = STATE_ERROR;
+        return false;
+    }
+
     pb::MetaManagerRequest request;
     pb::MetaManagerResponse response;
     request.set_op_type(pb::OP_ADD_PRIVILEGE);
-    auto pri = request.mutable_user_privilege();
-    pri->set_username(client->user_info->username);
-    pri->set_namespace_name(client->user_info->namespace_);
-    if (db == "resource_tag") {
-        pri->set_resource_tag(resource_tag);
-    } else if (db == "ddl_permission") {
-        pri->set_ddl_permission(permission);
-    } else if (db == "use_read_index") {
-        pri->set_use_read_index(permission);
-    } else if (db == "enable_plan_cache") {
-        pri->set_enable_plan_cache(permission);
-    } else if (db == "request_range_partition_type") {
-        pb::RangePartitionType range_partition_type = pb::RPT_DEFAULT;
-        if (!pb::RangePartitionType_Parse(range_partition_type_str, &range_partition_type)) {
-            DB_FATAL("Invalid range_partition_type_str: %s", range_partition_type_str.c_str());
+    pb::UserPrivilege* pri = request.mutable_user_privilege();
+    if (pri == nullptr) {
+        DB_FATAL("pri is nullptr");
+        client->state = STATE_ERROR;
+        return false;
+    }
+
+    std::string json = client->query_ctx->sql;
+    auto start = json.find_first_of('{');
+    auto end = json.find_last_of('}');
+    if (start != std::string::npos && end != std::string::npos) {
+        json = json.substr(start, end - start + 1);
+        std::string error_info = json2pb(json, pri);
+        if (!error_info.empty()) {
+            DB_FATAL("parse json failed: %s, with error: %s", json.c_str(), error_info.c_str());
             client->state = STATE_ERROR;
             return false;
         }
-        pri->set_request_range_partition_type(range_partition_type);
+        if (check_user_privilege_change(*pri) != 0) {
+            DB_FATAL("check_user_privilege_change, user_privilege: %s", pri->ShortDebugString().c_str());
+            client->state = STATE_ERROR;
+            return false;
+        }
     } else {
-        auto add_db = pri->add_privilege_database();
-        add_db->set_database(db);
-        add_db->set_database_rw(rw);
+        std::string db = "";
+        std::string str = "";
+        pb::RW rw  = pb::WRITE;
+        bool permission = false;
+        if (split_vec.size() == 4) {
+            db = split_vec[2];
+            if (boost::iequals(split_vec[3], "READ")) {
+                rw = pb::READ;
+            } else if (boost::iequals(split_vec[3], "true")) {
+                permission = true;
+            }
+            str = split_vec[3];
+        } else {
+            client->state = STATE_ERROR;
+            DB_FATAL("param invalid");
+            return false;
+        }
+        pri->set_username(client->user_info->username);
+        pri->set_namespace_name(client->user_info->namespace_);
+        if (db == "resource_tag") {
+            pri->set_resource_tag(str);
+        } else if (db == "bns") {
+            pri->add_bns(str);
+        } else if (db == "ddl_permission") {
+            pri->set_ddl_permission(permission);
+        } else if (db == "use_read_index") {
+            pri->set_use_read_index(permission);
+        } else if (db == "enable_plan_cache") {
+            pri->set_enable_plan_cache(permission);
+        } else if (db == "is_request_additional") {
+            if (permission && client->user_info->username != "baikal_olap_additional") {
+                DB_FATAL("param invalid, only baikal_olap_additional can set is_request_additional true");
+                client->state = STATE_ERROR;
+                return false;
+            }
+            pri->set_is_request_additional(permission);
+        } else if (db == "request_range_partition_type") {
+            pb::RangePartitionType range_partition_type = pb::RPT_DEFAULT;
+            if (!pb::RangePartitionType_Parse(str, &range_partition_type)) {
+                DB_FATAL("Invalid range_partition_type_str: %s", str.c_str());
+                client->state = STATE_ERROR;
+                return false;
+            }
+            pri->set_request_range_partition_type(range_partition_type);
+        } else if (db == "switch_tables") {
+            // handle add_privilege switch_tables db.table;
+            std::string full_name = client->user_info->namespace_+ "." + str;
+            SmartTable t = factory->get_table_info_ptr_by_name(full_name);
+            if (t == nullptr) {
+                DB_FATAL("param invalid, no such table with table name: %s", full_name.c_str());
+                client->state = STATE_ERROR;
+                return false;
+            }
+
+            if (client->user_info->allow_write(t->db_id, t->id, t->short_name)) {
+                DB_FATAL("param invalid, has write permission table name: %s", full_name.c_str());
+                client->state = STATE_ERROR;
+                return false;
+            }
+            
+            pri->add_switch_tables(t->id);
+        } else {
+            auto add_db = pri->add_privilege_database();
+            add_db->set_database(db);
+            add_db->set_database_rw(rw);
+        }
     }
-    MetaServerInteract::get_instance()->send_request("meta_manager", request, response);
+    int ret = MetaServerInteract::get_instance()->send_request("meta_manager", request, response);
     DB_WARNING("req:%s res:%s", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
+    if (ret != 0 || response.errcode() != pb::SUCCESS) {
+        DB_WARNING("send_request fail");
+        client->state = STATE_ERROR;
+        return false;
+    }
     if(!_make_response_packet(client, response.ShortDebugString())) {
         return false;
     }
@@ -402,15 +476,58 @@ bool HandleHelper::_handle_table_resource_tag(const SmartSocket& client, const s
     std::string db = client->current_db;
     std::string table = "";
     std::string resource_tag = "";
+    bool is_force = false;
     if (split_vec.size() == 3) {
         table = split_vec[2];
     } else if (split_vec.size() == 4) {
         table = split_vec[2];
         resource_tag = split_vec[3];
+    } else if (split_vec.size() == 5 && split_vec[4] == "force") {
+        table = split_vec[2];
+        resource_tag = split_vec[3];
+        is_force = true;
     } else {
         client->state = STATE_ERROR;
         DB_FATAL("param invalid");
         return false;
+    }
+
+    std::string full_name = namespace_name + "." + db + "." + table;
+    int64_t table_id = 0;
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    if (factory->get_table_id(full_name, table_id) != 0) {
+        DB_FATAL("param invalid, no such table with table name: %s", full_name.c_str());
+        _wrapper->make_err_packet(client, ER_TABLE_NAME, "Failed to get table.");
+        client->state = STATE_ERROR;
+        return false;
+    }
+
+    auto smart_table = factory->get_table_info_ptr(table_id);
+    if (smart_table == nullptr) {
+        DB_FATAL("table null table name: %s, table_id: %ld", full_name.c_str(), table_id);
+        _wrapper->make_err_packet(client, ER_TABLE_NAME, "Failed to get table.");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    bool is_operator_safe = true;
+    std::vector<std::string> unsafe_list;
+    is_operator_safe = _can_change_resourcetag_safely(smart_table, &unsafe_list);
+    
+    if (!is_operator_safe) {
+        std::string unsafe_item_string;
+        for (auto& unsafe_item : unsafe_list) {
+            unsafe_item_string += (unsafe_item + ", ");
+        }
+        unsafe_item_string = unsafe_item_string.substr(0, unsafe_item_string.size() - 2);
+
+        if (!is_force) {
+            DB_FATAL("Table: %s, %s not empty, new resourcetag not safe.", full_name.c_str(), unsafe_item_string.c_str());
+            _wrapper->make_err_packet(client, ER_ERROR_COMMON, "%s Not Empty. Operate Not Safe. Need 'force'.", unsafe_item_string.c_str());
+            client->state = STATE_ERROR;
+            return false;
+        }
+
+        DB_WARNING("Table: %s, %s not empty, new resourcetag not safe, forced to execute.", full_name.c_str(), unsafe_item_string.c_str());
     }
 
     pb::MetaManagerRequest request;
@@ -680,19 +797,23 @@ bool HandleHelper::_handle_split_region(const SmartSocket& client, const std::ve
     return true;
 }
 
+// handle rm_privilege db [table];
+// handle rm_privilege resource_tag tag;
+// handle rm_privilege '{user_privilege json}';
 bool HandleHelper::_handle_rm_privilege(const SmartSocket& client, const std::vector<std::string>& split_vec) {
     if(!client || !client->user_info) {
         DB_FATAL("param invalid");
         return false;
     }
-    std::string db = "";
-    std::string table = "";
-    if (split_vec.size() == 3) {
-        db = split_vec[2];
-    } else if (split_vec.size() == 4) {
-        db = split_vec[2];
-        table = split_vec[3];
-    } else {
+
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    if (factory == nullptr) {
+        client->state = STATE_ERROR;
+        DB_FATAL("factory is nullptr");
+        return false;
+    }
+
+    if (split_vec.size() < 3) {
         DB_FATAL("param invalid");
         client->state = STATE_ERROR;
         return false;
@@ -701,27 +822,85 @@ bool HandleHelper::_handle_rm_privilege(const SmartSocket& client, const std::ve
     pb::MetaManagerRequest request;
     pb::MetaManagerResponse response;
     request.set_op_type(pb::OP_DROP_PRIVILEGE);
-    auto info = request.mutable_user_privilege();
-    info->set_username(client->user_info->username);
-    info->set_password(client->user_info->password);
-    info->set_namespace_name(client->user_info->namespace_);
-    if (table == "") {
-        pb::PrivilegeDatabase privilege_database;
-        privilege_database.set_database(db);
-        auto db_info = info->add_privilege_database();
-        *db_info = privilege_database;
-    } else if (db != "resource_tag") {
-        pb::PrivilegeTable privilege_table;
-        privilege_table.set_database(db);
-        privilege_table.set_table_name(table);
-        auto table_info = info->add_privilege_table();
-        *table_info = privilege_table;
-    } else {
-        // 第一个参数为resource_tag，则删除user中对应的resource_tag
-        info->set_resource_tag(table);
+    pb::UserPrivilege* pri = request.mutable_user_privilege();
+    if (pri == nullptr) {
+        DB_FATAL("pri is nullptr");
+        client->state = STATE_ERROR;
+        return false;
     }
-    MetaServerInteract::get_instance()->send_request("meta_manager", request, response);
+
+    std::string json = client->query_ctx->sql;
+    auto start = json.find_first_of('{');
+    auto end = json.find_last_of('}');
+    if (start != std::string::npos && end != std::string::npos) {
+        json = json.substr(start, end - start + 1);
+        std::string error_info = json2pb(json, pri);
+        if (!error_info.empty()) {
+            DB_FATAL("parse json failed: %s, with error: %s", json.c_str(), error_info.c_str());
+            client->state = STATE_ERROR;
+            return false;
+        }
+        if (check_user_privilege_change(*pri) != 0) {
+            DB_FATAL("check_user_privilege_change, user_privilege: %s", pri->ShortDebugString().c_str());
+            client->state = STATE_ERROR;
+            return false;
+        }
+    } else {
+        std::string db = "";
+        std::string table = "";
+        if (split_vec.size() == 3) {
+            db = split_vec[2];
+        } else if (split_vec.size() == 4) {
+            db = split_vec[2];
+            table = split_vec[3];
+        } else {
+            DB_FATAL("param invalid");
+            client->state = STATE_ERROR;
+            return false;
+        }
+        pri->set_username(client->user_info->username);
+        pri->set_password(client->user_info->password);
+        pri->set_namespace_name(client->user_info->namespace_);
+        if (table == "") {
+            pb::PrivilegeDatabase privilege_database;
+            privilege_database.set_database(db);
+            auto db_info = pri->add_privilege_database();
+            *db_info = privilege_database;
+        } else if (db == "resource_tag") {
+            // 第一个参数为resource_tag，则删除user中对应的resource_tag
+            pri->set_resource_tag(table);
+        } else if (db == "switch_tables") {
+            // handle rm_privilege switch_tables db.table;
+            std::string full_name = client->user_info->namespace_+ "." + table;
+            SmartTable t = factory->get_table_info_ptr_by_name(full_name);
+            if (t == nullptr) {
+                DB_FATAL("param invalid, no such table with table name: %s", full_name.c_str());
+                client->state = STATE_ERROR;
+                return false;
+            }
+
+            if (client->user_info->allow_write(t->db_id, t->id, t->short_name)) {
+                DB_FATAL("param invalid, has write permission table name: %s", full_name.c_str());
+                client->state = STATE_ERROR;
+                return false;
+            }
+
+            pri->add_switch_tables(t->id);
+        } else {
+            pb::PrivilegeTable privilege_table;
+            privilege_table.set_database(db);
+            privilege_table.set_table_name(table);
+            auto table_info = pri->add_privilege_table();
+            *table_info = privilege_table;
+        }
+    }
+    int ret = MetaServerInteract::get_instance()->send_request("meta_manager", request, response);
     DB_WARNING("req:%s res:%s", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
+    if (ret != 0 || response.errcode() != pb::SUCCESS) {
+        DB_WARNING("send_request fail");
+        client->state = STATE_ERROR;
+        return false;
+    }
     if(!_make_response_packet(client, response.ShortDebugString())) {
         return false;
     }
@@ -764,6 +943,104 @@ bool HandleHelper::_handle_modify_partition(const SmartSocket& client, const std
     // todo 临时代码，只修改expr_string
     partition_info->set_type(pb::PT_HASH);
     partition_info->set_expr_string("((userid & 0x700) >> 6) + (userid & 3)");
+    MetaServerInteract::get_instance()->send_request("meta_manager", request, response);
+    DB_WARNING("req:%s res:%s", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
+    if(!_make_response_packet(client, response.ShortDebugString())) {
+        return false;
+    }
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
+// handle modify_partition_resourcetag dbname tbname resourcetag start_date end_date
+bool HandleHelper::_handle_modify_partition_resourcetag(const SmartSocket& client, const std::vector<std::string>& split_vec) {
+    if(!client || !client->user_info) {
+        DB_FATAL("param invalid");
+        return false;
+    }
+    if (split_vec.size() != 7) {
+        DB_FATAL("param invalid");
+        client->state = STATE_ERROR;
+        return false;
+    }
+    std::string db_name     = split_vec[2];
+    std::string table_name  = split_vec[3];
+    std::string resourcetag = split_vec[4];
+    std::string start_date  = split_vec[5];
+    std::string end_date    = split_vec[6];
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    std::string full_name = client->user_info->namespace_+ "." + db_name + "." + table_name;
+    int64_t table_id = 0;
+    if (factory->get_table_id(full_name, table_id) != 0) {
+        DB_FATAL("param invalid, no such table with table name: %s", full_name.c_str());
+        client->state = STATE_ERROR;
+        return false;
+    }
+    auto table = factory->get_table_info_ptr(table_id);
+    if (table == nullptr || !table->is_range_partition) {
+        client->state = STATE_ERROR;
+        return false;
+    }
+
+    if (table->partition_info.field_info().mysql_type() != pb::DATE) {
+        DB_FATAL("param invalid, table: %s is not date type", full_name.c_str());
+        client->state = STATE_ERROR;
+        return false;
+    }
+
+    ExprValue left_value(pb::DATE, start_date);
+    ExprValue right_value(pb::DATE, end_date);
+
+    RangePartition* partition_ptr = static_cast<RangePartition*>(table->partition_ptr.get());
+    std::set<int64_t> partition_ids;
+    int64_t ret = partition_ptr->calc_partitions(client->user_info, left_value, false, right_value, false, partition_ids);
+    if (ret < 0) {
+        DB_FATAL("param invalid, no such partition with start date: %s and end date: %s", start_date.c_str(), end_date.c_str());
+        client->state = STATE_ERROR;
+        return false;
+    }
+
+    if (partition_ids.empty()) {
+        DB_FATAL("param invalid, no such partition with start date: %s and end date: %s", start_date.c_str(), end_date.c_str());
+        client->state = STATE_READ_QUERY_RESULT;
+        return true;
+    }
+
+    auto ranges = partition_ptr->ranges();
+    std::vector<std::string> partition_names;
+    partition_names.reserve(partition_ids.size());
+    for (const auto& range : ranges) {
+        if (partition_ids.count(range.partition_id) <= 0) {
+            continue;
+        }
+
+        // 只处理cold分区
+        if (range.is_cold) {
+            partition_names.emplace_back(range.partition_name);
+        }
+    }
+
+    if (partition_names.empty()) {
+        DB_FATAL("param invalid, no such partition with start date: %s and end date: %s", start_date.c_str(), end_date.c_str());
+        client->state = STATE_READ_QUERY_RESULT;
+        return true;
+    }
+
+    pb::MetaManagerRequest request;
+    pb::MetaManagerResponse response;
+    request.set_op_type(pb::OP_MODIFY_PARTITION);
+    pb::SchemaInfo* p_table = request.mutable_table_info();
+    p_table->set_database(db_name);
+    p_table->set_table_name(table_name);
+    p_table->set_namespace_name(client->user_info->namespace_);
+    pb::PartitionInfo* p_partition_info = p_table->mutable_partition_info();
+    p_partition_info->set_type(pb::PT_RANGE);
+    for (const std::string& partition_name : partition_names) {
+        pb::RangePartitionInfo* p_range_partition_info = p_partition_info->add_range_partition_infos();
+        p_range_partition_info->set_partition_name(partition_name);
+        p_range_partition_info->set_resource_tag(resourcetag);
+    }
+
     MetaServerInteract::get_instance()->send_request("meta_manager", request, response);
     DB_WARNING("req:%s res:%s", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
     if(!_make_response_packet(client, response.ShortDebugString())) {
@@ -1489,7 +1766,8 @@ bool HandleHelper::_handle_schema_conf(const SmartSocket& client, const std::vec
         int days = strtol(split_vec[4].c_str(), NULL, 10);
         schema_conf->set_binlog_backup_days(days);
     } else if (key.find("blacklist") != key.npos || key.find("forcelearner") != key.npos
-            || key.find("forceindex") != key.npos) {
+            || key.find("forceindex") != key.npos || key.find("rolling") != key.npos
+            || key.find("exectype") != key.npos) {
         auto table = factory->get_table_info_ptr(table_id);
         if (table == nullptr) {
             DB_FATAL("table null table name: %s, table_id: %ld", full_name.c_str(), table_id);
@@ -1507,10 +1785,53 @@ bool HandleHelper::_handle_schema_conf(const SmartSocket& client, const std::vec
             handle_signlist(is_add, table->sign_forcelearner, split_vec[4], value);
             schema_conf->set_sign_forcelearner(value);
             DB_WARNING("forcelearner table_name: %s, table_id: %ld, signs: %s", full_name.c_str(), table_id, value.c_str());
-        } else {
+        } else if (key.find("rolling") != key.npos) {
+            handle_signlist(is_add, table->sign_rolling, split_vec[4], value);
+            schema_conf->set_sign_rolling(value);
+            DB_WARNING("rolling table_name: %s, table_id: %ld, signs: %s", full_name.c_str(), table_id, value.c_str());
+        } else if (key.find("forceindex") != key.npos) {
             handle_signlist(is_add, table->sign_forceindex, split_vec[4], value);
             schema_conf->set_sign_forceindex(value);
             DB_WARNING("forceindex table_name: %s, table_id: %ld, signs: %s", full_name.c_str(), table_id, value.c_str());
+        } else {
+            handle_signlist(is_add, table->sign_exec_type, split_vec[4], value);
+            schema_conf->set_sign_exec_type(value);
+            DB_WARNING("sign_exec_type table_name: %s, table_id: %ld, signs: %s", full_name.c_str(), table_id, value.c_str());
+        }
+    } else if (key.find("snapshot") != key.npos) {
+        auto table = factory->get_table_info_ptr(table_id);
+        if (table == nullptr) {
+            DB_FATAL("table null table name: %s, table_id: %ld", full_name.c_str(), table_id);
+            client->state = STATE_ERROR;
+            return false;
+        }
+        if (key.find("enable") != key.npos || key.find("disable") != key.npos) {
+            bool is_add = key.find("enable") != key.npos ? true : false;
+            if (key.find("snapshot") != key.npos) {
+                if (table->get_field_id_by_short_name("__snapshot__") < 0) {
+                    DB_FATAL(" table name: %s, table_id: %ld has no __snapshot__ field", full_name.c_str(), table_id);
+                    client->state = STATE_ERROR;
+                    return false;
+                }
+                uint64_t sign_num = strtoull(split_vec[4].c_str(), nullptr, 10);
+                if (snapshot_to_timestamp(sign_num) < 0) {
+                    DB_FATAL("param invalid");
+                    client->state = STATE_ERROR;
+                    return false;
+                }
+                std::set<uint64_t> origin_list;
+                handle_signlist(true, origin_list, split_vec[4], value);
+                if (is_add) {
+                    schema_conf->set_snapshot_blacklist(value);
+                } else {
+                    schema_conf->set_del_snapshot_blacklist(value);
+                }
+                DB_WARNING("snapshot blacklist table_name: %s, table_id: %ld, snapshot: %s, is_add: %d", full_name.c_str(), table_id, value.c_str(), is_add);
+            }
+        } else {
+            DB_FATAL("param invalid");
+            client->state = STATE_ERROR;
+            return false;
         }
     } else {
         DB_FATAL("param invalid");
@@ -1988,20 +2309,20 @@ bool HandleHelper::_handle_link_external_sst(const SmartSocket& client, const st
     }
 
     std::vector<int64_t> partition_id_vec { partition_id };
-    std::map<std::string, pb::RegionInfo> region_infos_map;
-    if (SchemaFactory::get_instance()->get_all_region_by_table_id(table_id, &region_infos_map, partition_id_vec) != 0) {
+    std::vector<pb::RegionInfo> region_infos;
+    if (SchemaFactory::get_instance()->get_all_region_by_table_id(table_id, &region_infos, partition_id_vec) != 0) {
         DB_WARNING("get_all_region_by_table_id failed, table_id[%ld], partition_id[%ld]", table_id, partition_id);
         client->state = STATE_ERROR;
         return false;
     }
 
-    for (const auto& iter : region_infos_map) {
+    for (const auto& region_info : region_infos) {
         int retry_time = 3;
-        std::string leader = iter.second.leader();
+        std::string leader = region_info.leader();
         while(retry_time-- > 0) {
             pb::RegionIds req;
             pb::StoreRes res;
-            req.add_region_ids(iter.second.region_id());
+            req.add_region_ids(region_info.region_id());
             StoreInteract interact(leader);
             interact.send_request("manual_link_external_sst", req, res);
             DB_WARNING("req:%s res:%s", req.ShortDebugString().c_str(), res.ShortDebugString().c_str());
@@ -2110,4 +2431,54 @@ int HandleHelper::_make_common_resultset_packet(
     _wrapper->make_eof_packet(sock->send_buf, ++sock->packet_id);
     return 0;
 }
+
+bool HandleHelper::_can_change_resourcetag_safely(SmartTable table, std::vector<std::string>* unsafe_list) {
+    if (unsafe_list == nullptr) {
+        return table->sign_blacklist.empty() &&
+                table->sign_forcelearner.empty() &&
+                table->sign_rolling.empty() &&
+                table->sign_forceindex.empty() &&
+                table->sign_exec_type.empty();
+    }
+    unsafe_list->clear();
+    if (!table->sign_blacklist.empty()) {
+        unsafe_list->emplace_back("sign_blacklist");
+    }
+    if (!table->sign_forcelearner.empty()) {
+        unsafe_list->emplace_back("sign_forcelearner");
+    }
+    if (!table->sign_rolling.empty()) {
+        unsafe_list->emplace_back("sign_rolling");
+    }
+    if (!table->sign_forceindex.empty()) {
+        unsafe_list->emplace_back("sign_forceindex");
+    }
+    if (!table->sign_exec_type.empty()) {
+        unsafe_list->emplace_back("sign_exec_type");
+    }
+    return unsafe_list->empty();
+}
+
+int HandleHelper::check_user_privilege_change(const pb::UserPrivilege& user_privilege) {
+    int64_t change_num = 0;
+    change_num += user_privilege.privilege_database().size();
+    change_num += user_privilege.privilege_table().size();
+    if (user_privilege.has_ddl_permission()) {
+        change_num += 1;
+    }
+    if (user_privilege.has_need_auth_addr()) {
+        change_num += 1;
+    }
+    if (user_privilege.bns().size() > 0) {
+        change_num += 1;
+    }
+    if (user_privilege.ip().size() > 0) {
+        change_num += 1;
+    }
+    if (change_num != 1) {
+        return -1;
+    }
+    return 0;
+}
+
 }

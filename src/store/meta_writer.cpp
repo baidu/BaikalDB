@@ -56,6 +56,10 @@ const std::string MetaWriter::LOCAL_STORAGE_IDENTIFY(1, 0x0D);
 const std::string MetaWriter::OLAP_REGION_IDENTIFY(1, 0x0E);
 //key: META_IDENIFY + region_id + identify
 const std::string MetaWriter::REGION_OFFLINE_BINLOG_IDENTIFY(1, 0x0F);
+//key: META_IDENIFY + region_id + identify
+const std::string MetaWriter::WATT_STATS_VERSION_IDENTIFY(1, 0x10);
+//用于rollup做基准缓存业务数据位置
+const std::string MetaWriter::ROLLUP_REGION_INIT_INDEX_INDENTIFY(1, 0x11);
 
 int MetaWriter::init_meta_info(const pb::RegionInfo& region_info) {
     std::vector<std::string> keys;
@@ -147,6 +151,20 @@ int MetaWriter::update_apply_index(int64_t region_id, int64_t applied_index, int
     auto status = _rocksdb->put(MetaWriter::write_options, _meta_cf, 
                 rocksdb::Slice(applied_index_key(region_id)), 
                 rocksdb::Slice(encode_applied_index(applied_index, data_index)));
+    if (!status.ok()) {
+        DB_FATAL("write apply index fail, err_msg: %s, region_id: %ld",
+                    status.ToString().c_str(), region_id);
+        return -1;
+    } else {
+        //DB_WARNING("region_id: %ld update_apply_index : %ld success", 
+        //            region_id, applied_index);
+    }
+    return 0; 
+}
+int MetaWriter::update_rollup_region_init_index(int64_t region_id, int64_t rollup_region_init_index) {
+    auto status = _rocksdb->put(MetaWriter::write_options, _meta_cf, 
+                rocksdb::Slice(rollup_region_init_index_key(region_id)), 
+                rocksdb::Slice(encode_rollup_region_init_index(rollup_region_init_index)));
     if (!status.ok()) {
         DB_FATAL("write apply index fail, err_msg: %s, region_id: %ld",
                     status.ToString().c_str(), region_id);
@@ -387,7 +405,11 @@ int MetaWriter::clear_pre_commit_infos(int64_t region_id) {
     }
     return 0;
 }
-
+int MetaWriter::clear_unapplied_begin_index(int64_t region_id) {
+    rocksdb::WriteBatch batch;
+    batch.Delete(_meta_cf, rocksdb::Slice(rollup_region_init_index_key(region_id)));
+    return write_batch(&batch, region_id);
+}
 int MetaWriter::clear_doing_snapshot(int64_t region_id) {
     rocksdb::WriteBatch batch;
     rocksdb::WriteOptions options;
@@ -528,7 +550,15 @@ void MetaWriter::read_applied_index(int64_t region_id, const rocksdb::ReadOption
         *data_index = *applied_index;
     }
 }
-
+int64_t MetaWriter::read_rollup_region_init_index(int64_t region_id) {
+    std::string value;
+    rocksdb::ReadOptions options;
+    auto status = _rocksdb->get(options, _meta_cf, rocksdb::Slice(rollup_region_init_index_key(region_id)), &value);
+    if (!status.ok()) {
+        return -1;
+    }
+    return TableKey(rocksdb::Slice(value)).extract_i64(0);
+}
 int64_t MetaWriter::read_num_table_lines(int64_t region_id) {
     std::string value;
     rocksdb::ReadOptions options;
@@ -635,6 +665,13 @@ std::string MetaWriter::applied_index_key(int64_t region_id) const {
     key.append_char(MetaWriter::APPLIED_INDEX_INDENTIFY.data(), 1);
     return key.data();
 }
+std::string MetaWriter::rollup_region_init_index_key(int64_t region_id) const {
+    MutTableKey key;
+    key.append_char(MetaWriter::META_IDENTIFY.data(), 1);
+    key.append_i64(region_id);
+    key.append_char(MetaWriter::ROLLUP_REGION_INIT_INDEX_INDENTIFY.data(), 1);
+    return key.data();
+}
 std::string MetaWriter::num_table_lines_key(int64_t region_id) const {
     MutTableKey key;
     key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);
@@ -712,7 +749,11 @@ std::string MetaWriter::encode_applied_index(int64_t applied_index, int64_t data
     index_value.append_i64(data_index);
     return index_value.data();
 }
-
+std::string MetaWriter::encode_rollup_region_init_index(int64_t unapply_index) const {
+    MutTableKey index_value;
+    index_value.append_i64(unapply_index);
+    return index_value.data();
+}
 std::string MetaWriter::encode_removed_ddl_key(int64_t region_id, int64_t index_id)  const {
     MutTableKey ddl_key;
     ddl_key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);
@@ -861,6 +902,68 @@ std::string MetaWriter::offline_binlog_key(int64_t region_id) const {
     key.append_i64(region_id);
     key.append_char(MetaWriter::REGION_OFFLINE_BINLOG_IDENTIFY.c_str(), 1);
     return key.data();
+}
+
+std::string MetaWriter::watt_stats_version_key(int64_t region_id, uint64_t watt_stats_version) const {
+    MutTableKey key;
+    key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);
+    key.append_i64(region_id);
+    key.append_char(MetaWriter::WATT_STATS_VERSION_IDENTIFY.c_str(), 1);
+    key.append_u64(watt_stats_version);
+    return key.data();
+}
+
+rocksdb::Status MetaWriter::get_watt_stats_version(int64_t region_id, uint64_t watt_stats_version) const {
+    std::string value;
+    rocksdb::ReadOptions options;
+    return _rocksdb->get(options, _meta_cf, rocksdb::Slice(watt_stats_version_key(region_id, watt_stats_version)), &value);
+}
+
+int MetaWriter::put_watt_stats_version(int64_t region_id, uint64_t watt_stats_version, SmartTransaction txn) {
+    return txn->put_meta_info(watt_stats_version_key(region_id, watt_stats_version), "");
+}
+
+int MetaWriter::clear_watt_stats_version(int64_t region_id) {
+    std::string start_key = watt_stats_version_key(region_id, 0);
+    std::string end_key = watt_stats_version_key(region_id, UINT64_MAX);
+    auto status = _rocksdb->remove_range(MetaWriter::write_options, _meta_cf,
+            start_key, end_key, false);
+    if (!status.ok()) {
+        DB_WARNING("remove_range error: code=%d, msg=%s, region_id: %ld",
+            status.code(), status.ToString().c_str(), region_id);
+        return -1;
+    }
+    return 0;
+}
+
+int MetaWriter::clear_rollup_batch_version(int64_t region_id) {
+    uint64_t rollup_batch_version = 1;
+    while (true) {
+        auto s = get_watt_stats_version(region_id, rollup_batch_version);
+        if (s.ok()) {
+            // 已存在
+            continue;
+        } else if (s.IsNotFound()) {
+            break;
+        } else {
+            DB_WARNING("clear_rollup_batch_version fail region_id: %lu, rollup_batch_version: %lu, code: %d, msg: %s,"
+                , region_id, rollup_batch_version, s.code(), s.ToString().c_str());
+            return -1;
+        }
+        rollup_batch_version ++;
+    }
+    if (rollup_batch_version != 1) {
+        std::string start_key = watt_stats_version_key(region_id, 1);
+        std::string end_key = watt_stats_version_key(region_id, rollup_batch_version);
+        auto status = _rocksdb->remove_range(MetaWriter::write_options, _meta_cf,
+                start_key, end_key, false);
+        if (!status.ok()) {
+            DB_WARNING("remove_range error: code=%d, msg=%s, region_id: %ld",
+                status.code(), status.ToString().c_str(), region_id);
+            return -1;
+        }
+    }
+    return 0;
 }
 
 int MetaWriter::write_olap_info(int64_t region_id, const pb::OlapRegionInfo& olap_info) {

@@ -101,7 +101,8 @@ int AutoInc::update_auto_inc(SmartTable table_info_ptr,
         if (use_backup) {
             interact = MetaServerInteract::get_backup_instance();
         }
-        int ret = interact->send_request("meta_manager", request, response);
+        const int64_t meta_id = ::baikaldb::get_meta_id(table_info_ptr->id);
+        int ret = interact->send_request("meta_manager", request, response, meta_id);
         auto_inc_count << 1;
         if (ret != 0) {
             auto_inc_error << 1;

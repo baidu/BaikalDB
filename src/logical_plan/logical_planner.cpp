@@ -40,13 +40,16 @@ DECLARE_int32(bthread_concurrency); //bthread.cpp
 
 namespace baikaldb {
 DEFINE_bool(enable_plan_cache, false, "enable plan cache");
+DEFINE_bool(enable_convert_charset, false, "enable convert charset");
 DECLARE_string(log_plat_name);
+DECLARE_bool(enable_dblink);
 
 std::map<parser::JoinType, pb::JoinType> LogicalPlanner::join_type_mapping {
         { parser::JT_NONE, pb::NULL_JOIN},    
         { parser::JT_INNER_JOIN, pb::INNER_JOIN},
         { parser::JT_LEFT_JOIN, pb::LEFT_JOIN},
-        { parser::JT_RIGHT_JOIN, pb::RIGHT_JOIN}
+        { parser::JT_RIGHT_JOIN, pb::RIGHT_JOIN},
+        { parser::JT_FULL_JOIN, pb::FULL_JOIN}
     };
 
 int LogicalPlanner::create_n_ary_predicate(const parser::FuncExpr* func_item, 
@@ -75,7 +78,7 @@ int LogicalPlanner::create_n_ary_predicate(const parser::FuncExpr* func_item,
         node->set_col_type(pb::BOOL);
     }
     if (type == pb::LIKE_PREDICATE) {
-        node->set_charset(_ctx->charset == "gbk" ? pb::GBK : pb::UTF8);
+        node->set_charset(_ctx->charset);
     }
     node->set_node_type(type);
     pb::Function* func = node->mutable_fn();
@@ -424,8 +427,10 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
         planner.reset(new DeletePlanner(ctx));
         break;
     case parser::NT_CREATE_TABLE:
+    case parser::NT_CREATE_VIEW:
     case parser::NT_CREATE_DATABASE:
     case parser::NT_DROP_TABLE:
+    case parser::NT_DROP_VIEW:
     case parser::NT_RESTORE_TABLE:
     case parser::NT_DROP_DATABASE:
     case parser::NT_ALTER_TABLE:
@@ -437,6 +442,7 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
     case parser::NT_ALTER_USER:
     case parser::NT_GRANT:
     case parser::NT_REVOKE:
+    case parser::NT_ALTER_VIEW:
         planner.reset(new DDLPlanner(ctx));
         ctx->succ_after_logical_plan = true;
         break;
@@ -565,7 +571,7 @@ int LogicalPlanner::generate_sql_sign(QueryContext* ctx, parser::StmtNode* stmt)
     return 0;
 }
 
-int LogicalPlanner::gen_subquery_plan(parser::DmlNode* subquery, const SmartPlanTableCtx& plan_state,
+int LogicalPlanner::gen_subquery_plan(parser::DmlNode* subquery, SmartPlanTableCtx plan_state,
         const ExprParams& expr_params) {
     _cur_sub_ctx = std::make_shared<QueryContext>();
     auto client = _ctx->client_conn;
@@ -582,11 +588,22 @@ int LogicalPlanner::gen_subquery_plan(parser::DmlNode* subquery, const SmartPlan
     _cur_sub_ctx->client_conn = client;
     _cur_sub_ctx->sql = subquery->to_string();
     _cur_sub_ctx->charset = _ctx->charset;
+    _cur_sub_ctx->is_from_subquery = expr_params.is_from_subquery;
+    _cur_sub_ctx->is_full_export= _ctx->is_full_export;
+    _cur_sub_ctx->sub_query_level = ++_unique_id_ctx->sub_query_level; //不同层级的子查询同名表不冲突
+    _cur_sub_ctx->is_with = _ctx->is_with;
+    _cur_sub_ctx->is_create_view = _ctx->is_create_view;
+    _cur_sub_ctx->table_with_clause_mapping = _ctx->table_with_clause_mapping;
+    _cur_sub_ctx->is_union_subquery = expr_params.is_union_subquery;
+    // from子查询完全ctx完全独立
+    if (expr_params.is_from_subquery || expr_params.is_union_subquery) {
+        plan_state.reset(new (std::nothrow)PlanTableContext);
+    }
     std::unique_ptr<LogicalPlanner> planner;
     if (_cur_sub_ctx->stmt_type == parser::NT_SELECT) {
-        planner.reset(new SelectPlanner(_cur_sub_ctx.get(), plan_state));
+        planner.reset(new SelectPlanner(_cur_sub_ctx.get(), _unique_id_ctx, plan_state));
     } else if (_cur_sub_ctx->stmt_type == parser::NT_UNION) {
-        planner.reset(new UnionPlanner(_cur_sub_ctx.get(), plan_state));
+        planner.reset(new UnionPlanner(_cur_sub_ctx.get(), _unique_id_ctx, plan_state));
     }
     if (planner->plan() != 0) {
         _ctx->stat_info.error_code = _cur_sub_ctx->stat_info.error_code;
@@ -594,6 +611,7 @@ int LogicalPlanner::gen_subquery_plan(parser::DmlNode* subquery, const SmartPlan
         DB_WARNING("gen plan failed, type:%d", _cur_sub_ctx->stmt_type);
         return -1;
     }
+
     if (_ctx->stat_info.family.empty()) {
         _ctx->stat_info.family = _cur_sub_ctx->stat_info.family;
     }
@@ -612,9 +630,13 @@ int LogicalPlanner::gen_subquery_plan(parser::DmlNode* subquery, const SmartPlan
     _cur_sub_ctx->expr_params.row_filed_number = planner->select_names().size();
     _ctx->set_kill_ctx(_cur_sub_ctx);
     auto stat_info = &(_cur_sub_ctx->stat_info);
-    int ret = generate_sql_sign(_cur_sub_ctx.get(), subquery);
-    if (ret < 0) {
-        return -1;
+
+    int ret = 0;
+    if (!_ctx->is_with && !_ctx->is_create_view) {
+        ret = generate_sql_sign(_cur_sub_ctx.get(), subquery);
+        if (ret < 0) {
+            return -1;
+        }
     }
     auto& client_conn = _ctx->client_conn;
     client_conn->insert_subquery_sign(stat_info->sign);
@@ -637,7 +659,7 @@ int LogicalPlanner::add_derived_table(const std::string& database, const std::st
     _plan_table_ctx->database_info.emplace(try_to_lower(database), db);
     SmartTable tbl_info_ptr = std::make_shared<TableInfo>();
     TableInfo& tbl_info = *tbl_info_ptr;
-    tbl_info.id = --_plan_table_ctx->derived_table_id;
+    tbl_info.id = --_unique_id_ctx->derived_table_id;
     tbl_info.namespace_ = _ctx->user_info->namespace_;
     std::string table_name = database + "." + table;
     tbl_info.name = table_name;
@@ -645,6 +667,7 @@ int LogicalPlanner::add_derived_table(const std::string& database, const std::st
     if (ok) {
         ScanTupleInfo* tuple_info = get_scan_tuple(table_name, tbl_info.id);
         _ctx->derived_table_ctx_mapping[tuple_info->tuple_id] = _ctx->sub_query_plans.back();
+        _plan_table_ctx->derived_table_ctx_mapping[tuple_info->tuple_id] = _ctx->sub_query_plans.back();
         _ctx->current_tuple_ids.emplace(tuple_info->tuple_id);
         _ctx->current_table_tuple_ids.emplace(tuple_info->tuple_id);
         _table_names.emplace(table_name);
@@ -743,12 +766,55 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
             _ctx->stat_info.error_msg << "table: " << database << "." << table << " not exist";
             return -1;
         }
+        // DBLINK表和外部映射表权限相同
+        int64_t privilege_db_id = db.id;
+        int64_t privilege_table_id = tbl_ptr->id;
+        // DBLINK表处理
+        bool is_dblink = false;
+        if (tbl_ptr->engine == pb::DBLINK) {
+            is_dblink = true;
+            SmartTable orig_tbl_ptr = tbl_ptr;
+            const std::string& meta_name = tbl_ptr->dblink_info.meta_name();
+            const std::string& namespace_name = tbl_ptr->dblink_info.namespace_name();
+            const std::string& database_name = tbl_ptr->dblink_info.database_name();
+            const std::string& table_name = tbl_ptr->dblink_info.table_name();
+            int64_t meta_id = 0;
+            if (_factory->get_meta_id(meta_name, meta_id) != 0) {
+                DB_WARNING("unknown meta: %s", meta_name.c_str());
+                return -1;
+            }
+            std::string external_table_name = namespace_name + "." + database_name + "." + table_name;
+            external_table_name = ::baikaldb::get_add_meta_name(meta_id, external_table_name);
+            if (_factory->get_table_id(external_table_name, tableid) != 0) {
+                DB_WARNING("unknown external_table_name: %s", external_table_name.c_str());
+                _ctx->stat_info.error_code = ER_NO_SUCH_TABLE;
+                _ctx->stat_info.error_msg << "table: " << database << "." << table 
+                                          << "(@dblink_table:" << external_table_name << ") not exist";
+                return -1;
+            }
+            tbl_ptr = _factory->get_table_info_ptr(tableid);
+            if (tbl_ptr == nullptr) {
+                DB_WARNING("no table found with id: %ld", tableid);
+                _ctx->stat_info.error_code = ER_NO_SUCH_TABLE;
+                _ctx->stat_info.error_msg << "table: " << database << "." << table 
+                                          << "(@dblink_table:" << external_table_name << ") not exist";
+                return -1;
+            }
+            if (can_use_dblink(tbl_ptr) != 0) {
+                DB_WARNING("can not use dblink, tableid: %ld", tableid);
+                return -1;                
+            }
+            // 外部表到主meta的dblink表的映射
+            _plan_table_ctx->dblink_table_mapping[tableid] = orig_tbl_ptr;
+        }
+        if (tbl_ptr->engine == pb::ROCKSDB_CSTORE || tbl_ptr->has_vector_index) {
+            _ctx->table_can_use_arrow_vectorize = false; 
+        }
         _ctx->stat_info.resource_tag = tbl_ptr->resource_tag;
         // learner降级
         if (tbl_ptr->need_learner_backup) {
             _ctx->need_learner_backup = true;
         }
-
         if (!_ctx->client_conn->user_info->resource_tag.empty()) {
             for (const auto& tag : tbl_ptr->learner_resource_tags) {
                 if (_ctx->client_conn->user_info->resource_tag == tag) {
@@ -758,10 +824,36 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
             }
         }
 
+        _ctx->sign_blacklist.insert(tbl_ptr->sign_blacklist.begin(), tbl_ptr->sign_blacklist.end());
+        _ctx->sign_forcelearner.insert(tbl_ptr->sign_forcelearner.begin(), tbl_ptr->sign_forcelearner.end());
+        _ctx->sign_rolling.insert(tbl_ptr->sign_rolling.begin(), tbl_ptr->sign_rolling.end());
+        for (auto& sign_index : tbl_ptr->sign_forceindex) {
+            std::vector<std::string> vec;
+            boost::split(vec, sign_index, boost::is_any_of(":"));
+            if (vec.size() != 2) {
+                continue;
+            }
+            uint64_t sign_num = strtoull(vec[0].c_str(), nullptr, 10);
+            auto& table_index_map = _ctx->sign_forceindex[sign_num];
+            auto& force_index_set = table_index_map[tableid];
+            force_index_set.insert(vec[1]);
+        }
+        for (auto& sign_exec_type : tbl_ptr->sign_exec_type) {
+            std::vector<std::string> vec;
+            boost::split(vec, sign_exec_type, boost::is_any_of(":"));
+            if (vec.size() != 2) {
+                continue;
+            }
+            uint64_t sign_num = strtoull(vec[0].c_str(), nullptr, 10);
+            uint64_t exec_type = strtoull(vec[1].c_str(), nullptr, 10);
+            _ctx->sign_exec_type[sign_num] = to_sign_exec_type(exec_type);
+        }
+
+
         // 通用降级路由
         // 复杂sql(join和子查询)不降级
         if (MetaServerInteract::get_backup_instance()->is_inited() && tbl_ptr->have_backup && !_ctx->is_complex &&
-            (tbl_ptr->need_write_backup || (tbl_ptr->need_read_backup && _ctx->is_select))) {
+            (tbl_ptr->need_write_backup || (tbl_ptr->need_read_backup && _ctx->is_select)) && !is_dblink) {
             _ctx->use_backup = true;
             SchemaFactory::use_backup.set_bthread_local(true);
             _factory = SchemaFactory::get_backup_instance();
@@ -778,7 +870,10 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
                 _ctx->stat_info.error_msg << "table: " << database << "." << table << " not exist";
                 return -1;
             }
+            privilege_db_id = db.id;
+            privilege_table_id = tbl_ptr->id;
         }
+
         auto& tbl = *tbl_ptr;
         // validate user permission
 //        pb::OpType op_type = pb::OP_INSERT;
@@ -809,9 +904,9 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
         default:
             break;
         }
-        if (!_ctx->user_info->allow_op(op_type, db.id, tbl.id, table)) {
+        if (!_ctx->user_info->allow_op(op_type, privilege_db_id, privilege_table_id, table)) {
             DB_WARNING("user %s has no permission to access: %s.%s, db.id:%ld, tbl.id:%ld", 
-                _username.c_str(), database.c_str(), table.c_str(), db.id, tbl.id);
+                _username.c_str(), database.c_str(), table.c_str(), privilege_db_id, privilege_table_id);
             _ctx->stat_info.error_code = ER_TABLEACCESS_DENIED_ERROR;
             _ctx->stat_info.error_msg << "user " << _username 
                                       << " has no permission to access " 
@@ -844,21 +939,6 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
         _partition_names.clear();
     }
     _ctx->stat_info.table_id = tableid;
-    auto tbl_ptr = _factory->get_table_info_ptr(tableid);
-    _ctx->sign_blacklist.insert(tbl_ptr->sign_blacklist.begin(), tbl_ptr->sign_blacklist.end());
-    _ctx->sign_forcelearner.insert(tbl_ptr->sign_forcelearner.begin(), tbl_ptr->sign_forcelearner.end());
-    for (auto& sign_index : tbl_ptr->sign_forceindex) {
-        std::vector<std::string> vec;
-        boost::split(vec, sign_index, boost::is_any_of(":"));
-        if (vec.size() != 2) {
-            continue;
-        }
-        uint64_t sign_num = strtoull(vec[0].c_str(), nullptr, 10);
-        auto& table_index_map = _ctx->sign_forceindex[sign_num];
-        auto& force_index_set = table_index_map[tableid];
-        force_index_set.insert(vec[1]);
-    }
-
 
     ScanTupleInfo* tuple_info = get_scan_tuple(alias_full_name, tableid);
     _ctx->current_tuple_ids.emplace(tuple_info->tuple_id);
@@ -1134,7 +1214,7 @@ int LogicalPlanner::create_join_node_from_table_source(const parser::TableSource
     std::string db;
     std::string table;
     std::string alias;
-    bool is_derived_table = false; 
+    bool is_derived_table = false;
     if (parse_db_name_from_table_source(table_source, db, table, alias, is_derived_table) < 0) {
         DB_WARNING("parser db name from table name fail");
         return -1;
@@ -1255,6 +1335,18 @@ int LogicalPlanner::parse_db_name_from_table_name(
     _ctx->stat_info.family = db;
     _ctx->stat_info.table = table;
     _current_tables.emplace_back(db + "." + table);
+    if (_ctx->stmt_type == parser::NT_CREATE_VIEW) {
+        ((parser::TableName*)table_name)->db = _ctx->stat_info.family.c_str();
+
+        // 由于重复表名有问题, 暂时不支持在视图上新建视图
+        std::string table_full_name = _ctx->user_info->namespace_ + "." + db + "." + table;
+        SmartTable table_ptr = SchemaFactory::get_instance()->get_table_info_ptr_by_name(table_full_name);
+        if (table_ptr != nullptr && table_ptr->is_view) {
+            _ctx->stat_info.error_code = ER_VIEW_INVALID;
+            _ctx->stat_info.error_msg << "cant create view on a view, " << table_full_name << " is a view";
+            return -1;
+        }
+    }
     return 0;
 }
 
@@ -1267,28 +1359,71 @@ int LogicalPlanner::parse_db_name_from_table_source(const parser::TableSource* t
         DB_WARNING("table source is null");
         return -1;
     }
+    // check查询的表是否是在with中
+    if (table_source->table_name != nullptr ) {
+        auto table_with_clause_iter = _ctx->table_with_clause_mapping.find(table_source->table_name->table.value);
+        if (table_with_clause_iter != _ctx->table_with_clause_mapping.end()) {
+            // 查询的表在with中
+            std::string with_select_stmt = "SELECT * FROM (" + table_with_clause_iter->second + ") " + table_source->table_name->table.value;
+            parser::SqlParser parser;
+            parser.parse(with_select_stmt);
+            if (parser.result.size() != 1) {
+                DB_WARNING("with rewrite sql view %s cant parse", with_select_stmt.c_str());
+                return -1;
+            }
+            parser::TableSource* with_table_source = (parser::TableSource*) ((parser::SelectStmt*) parser.result[0])->table_refs;
+            if (with_table_source != nullptr) {
+                // with解析逻辑同子查询
+                if (0 != parse_table_source(with_table_source, db, table, alias, is_derived_table)) {
+                    DB_WARNING("parse view table source failed");
+                    return -1;
+                }
+                return 0;
+            }
+        }
+    }
+    // check查询的表是否是视图
+    std::string table_full_name = "";
+    if (table_source->table_name != nullptr && !table_source->table_name->db.empty()) {
+        table_full_name = _ctx->user_info->namespace_ + "." + table_source->table_name->db.value + "." + table_source->table_name->table.value;
+    } else if (table_source->table_name != nullptr && !_ctx->cur_db.empty()) {
+        table_full_name = _ctx->user_info->namespace_ + "." + _ctx->cur_db + "." + table_source->table_name->table.value;
+    }
+    if (table_full_name != "" 
+        && table_source->derived_table == nullptr
+        && _ctx->stmt_type != parser::NT_CREATE_VIEW) {
+        SmartTable table_ptr = SchemaFactory::get_instance()->get_table_info_ptr_by_name(table_full_name);
+        if (table_ptr != nullptr && table_ptr->is_view) {
+            if (_ctx->is_with == true) {
+                _ctx->stat_info.error_code = ER_VIEW_INVALID;
+                _ctx->stat_info.error_msg << "cant create with-clause on a view, " << table_full_name << " is a view";
+                return -1;
+            }
+
+            std::string view_select_stmt = "SELECT * FROM (" + table_ptr->view_select_stmt + ") " + table_ptr->short_name;
+            parser::SqlParser parser;
+            parser.parse(view_select_stmt);
+            if (parser.result.size() != 1) {
+                DB_WARNING("view rewrite sql view %s cant parse", view_select_stmt.c_str());
+                return -1;
+            }
+            parser::TableSource* view_table_source = (parser::TableSource*) ((parser::SelectStmt*) parser.result[0])->table_refs;
+            if (view_table_source != nullptr) {
+                // 视图解析逻辑同子查询
+                if (0 != parse_table_source(view_table_source, db, table, alias, is_derived_table)) {
+                    DB_WARNING("parse view table source failed");
+                    return -1;
+                }
+                return 0;
+            }
+        }
+    }
 
     if (table_source->derived_table != nullptr) {
-        if (table_source->as_name.empty()) {
-            _ctx->stat_info.error_code = ER_DERIVED_MUST_HAVE_ALIAS;
-            _ctx->stat_info.error_msg << "Every derived table must have its own alias";
+        if (0 != parse_table_source(table_source, db, table, alias, is_derived_table)) {
+            DB_WARNING("parse table source failed");
             return -1;
         }
-        _ctx->has_derived_table = true;
-        is_derived_table = true;
-        table = table_source->as_name.value;
-        alias = table;
-        db = VIRTUAL_DATABASE_NAME;
-        _ctx->stat_info.family = db;
-        _ctx->stat_info.table = table;
-        _current_tables.emplace_back(db + "." + table);
-        parser::DmlNode* derived_table = table_source->derived_table;
-        int ret = gen_subquery_plan(derived_table, _plan_table_ctx, ExprParams());
-        if (ret < 0) {
-            DB_WARNING("gen subquery plan failed");
-            return -1;
-        }
-        _ctx->add_sub_ctx(_cur_sub_ctx);
         return 0;
     }
     for (int i = 0; i < table_source->partition_names.size(); ++i) {
@@ -1304,6 +1439,456 @@ int LogicalPlanner::parse_db_name_from_table_source(const parser::TableSource* t
     if (!table_source->as_name.empty()) {
         alias = table_source->as_name.value;
         _current_tables.back() = db + "." + alias;
+    }
+    return 0;
+}
+
+int LogicalPlanner::parse_table_source(const parser::TableSource* table_source, 
+                                                    std::string& db, 
+                                                    std::string& table,
+                                                    std::string& alias,
+                                                    bool& is_derived_table) {
+    if (table_source->as_name.empty()) {
+        _ctx->stat_info.error_code = ER_DERIVED_MUST_HAVE_ALIAS;
+        _ctx->stat_info.error_msg << "Every derived table must have its own alias";
+        return -1;
+    }
+    _ctx->has_derived_table = true;
+    is_derived_table = true;
+    table = table_source->as_name.value;
+    alias = table;
+    db = VIRTUAL_DATABASE_NAME;
+    //不同层级的子查询同名表不能冲突
+    if (_ctx->sub_query_level > 0) {
+        db += std::to_string(_ctx->sub_query_level);
+    }
+    _ctx->stat_info.family = db;
+    _ctx->stat_info.table = table;
+    _current_tables.emplace_back(db + "." + table);
+    parser::DmlNode* derived_table = table_source->derived_table;
+    ExprParams expr_params;
+    expr_params.is_from_subquery = true;
+    int ret = gen_subquery_plan(derived_table, _plan_table_ctx, expr_params);
+    if (ret < 0) {
+        DB_WARNING("gen subquery plan failed");
+        return -1;
+    }
+    _ctx->add_sub_ctx(_cur_sub_ctx);
+    return 0;
+}
+
+int LogicalPlanner::parse_view_select(parser::DmlNode* view_select_stmt,
+                        const parser::Vector<parser::ColumnName*>& column_names,
+                        pb::SchemaInfo& view) {
+    if (view_select_stmt->node_type == parser::NT_SELECT) {
+        std::string view_select_field_str = "";
+        if (0 != parse_view_select_fields((parser::SelectStmt*) view_select_stmt, 
+                column_names, view_select_field_str, view)) {
+            DB_WARNING("parse view select field failed");
+            return -1;
+        }
+        if (0 != add_view_select_stmt((parser::SelectStmt*) view_select_stmt, 
+                        column_names,
+                        view_select_field_str,
+                        view)) {
+            DB_WARNING("add view_select_stmt to view failed.");
+            return -1;
+        }
+    } else if (view_select_stmt->node_type == parser::NT_UNION) {
+        parser::UnionStmt* union_stmt = (parser::UnionStmt*) view_select_stmt;
+        std::vector<pb::SchemaInfo> view_list;
+        std::string union_str = "";
+        for (int stmt_idx = 0; stmt_idx < union_stmt->select_stmts.size(); stmt_idx++) {
+            std::string view_select_field_str = "";
+            pb::SchemaInfo tmp_view = view;
+             std::unique_ptr<LogicalPlanner> planner;
+            planner.reset(new SelectPlanner(_ctx));
+            if (0 != planner->parse_view_select(union_stmt->select_stmts[stmt_idx], 
+                                        column_names,
+                                        tmp_view)) {
+                DB_WARNING("parse view select failed");
+                return -1;
+            }
+            view_list.push_back(tmp_view);
+        }
+        if (union_stmt->is_in_braces) {
+            union_str += "(";
+        }
+        for (int i = 0; i < view_list.size() - 1; ++i) {
+            if (view_list[i].fields_size() != view_list[i + 1].fields_size()) {
+                _ctx->stat_info.error_code = ER_VIEW_INVALID;
+                _ctx->stat_info.error_msg << "The used SELECT statements have a different number of columns";
+                DB_WARNING("have a different number of columns %u and %u", view_list[i].fields_size(), view_list[i+1].fields_size());
+                return -1;
+            }
+            for (int j = 0; j < view_list[i].fields_size(); ++j) {
+                if (view_list[i].fields(j).mysql_type() != view_list[i + 1].fields(j).mysql_type()) {
+                    _ctx->stat_info.error_code = ER_VIEW_INVALID;
+                    _ctx->stat_info.error_msg << "The used SELECT statements have different type";
+                    DB_WARNING("have a different type of columns %s and %s", 
+                                    pb::PrimitiveType_Name(view_list[i].fields(j).mysql_type()).c_str(),
+                                    pb::PrimitiveType_Name(view_list[i+1].fields(j).mysql_type()).c_str());
+
+                    return -1;
+                }
+            }
+            if (union_stmt->distinct) {
+                union_str += view_list[i].view_select_stmt() + " UNION ";
+            } else {
+                union_str += view_list[i].view_select_stmt() + " UNION ALL ";
+            }
+        }
+        if (view_list.size() > 0) {
+            union_str += view_list[view_list.size() - 1].view_select_stmt();
+        }
+        std::ostringstream os;
+        if (union_stmt->order != nullptr) {
+            os << " ORDER BY" << union_stmt->order;
+        }
+        if (union_stmt->limit != nullptr) {
+            os << " LIMIT" << union_stmt->limit;
+        }
+        os << parser::for_lock_str[union_stmt->lock];
+        if (union_stmt->is_in_braces) {
+            os << ")";
+        }
+        if (os.str().size() > 0) {
+            union_str += os.str();
+        }
+        if (union_str.size() > 0) {
+            view.set_view_select_stmt(union_str);
+            view.mutable_fields()->CopyFrom(view_list[0].fields());
+        }
+    }
+    return 0;
+}
+
+int LogicalPlanner::parse_view_select_fields(parser::SelectStmt* view_select_stmt,
+                        const parser::Vector<parser::ColumnName*>& column_names,
+                        std::string& view_select_field_str,
+                        pb::SchemaInfo& view) {
+    std::vector<std::string> select_field_names;
+    int column_name_idx = 0;
+    std::set<std::string> uniq_view_select_field_alias;
+
+    // 用于添加表信息
+    if (0 != parse_db_tables(view_select_stmt->table_refs, &_join_root)) {
+        return -1;
+    }
+    for (int i = 0; i < view_select_stmt->fields.size(); ++i) {
+        parser::SelectField* select_field = view_select_stmt->fields[i];
+        if (select_field->wild_card != nullptr) {
+            if (-1 == parse_view_select_star(select_field, 
+                                column_names, 
+                                column_name_idx, 
+                                uniq_view_select_field_alias,
+                                view_select_field_str,
+                                view)) {
+                DB_WARNING("parse view select star failed");
+                return -1;
+            }
+        } else {
+            if (-1 == parse_view_select_field(select_field, 
+                                column_names,
+                                column_name_idx, 
+                                uniq_view_select_field_alias,
+                                view_select_field_str,
+                                view)) {
+                DB_WARNING("parse view select field failed");
+                return -1;
+            };
+        }
+    }
+    if (view_select_field_str.size() > 0 && view_select_field_str[view_select_field_str.size() - 1] == ',') {
+        view_select_field_str.pop_back();
+    }
+    return 0;
+}
+
+int LogicalPlanner::parse_view_select_star(parser::SelectField* select_field, 
+            const parser::Vector<parser::ColumnName*>& column_names, 
+            int& column_name_idx, 
+            std::set<std::string>& uniq_view_select_field_alias,
+            std::string& view_select_field_str,
+            pb::SchemaInfo& view) {
+    parser::WildCardField* wild_card = select_field->wild_card;
+    // select * ...
+    if (wild_card->db_name.empty() && wild_card->table_name.empty()) {
+        for (auto& table_name : _table_names) {
+            auto table_info = get_table_info_ptr(table_name);
+            if (table_info == nullptr) {
+                if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                    _ctx->stat_info.error_code = ER_WRONG_TABLE_NAME;
+                    _ctx->stat_info.error_msg << "Incorrect table name \'" << table_name << "\'";
+                }
+                DB_WARNING("no table found for select field: %s", select_field->to_string().c_str());
+                return -1;
+            }
+            if (0 != add_single_table_columns_for_view(table_info, 
+                                column_names,
+                                uniq_view_select_field_alias,
+                                view_select_field_str, 
+                                column_name_idx,
+                                view)) {
+                DB_WARNING("add single table: %s columns fail", table_info->short_name.c_str());
+                return -1;
+            }
+        }
+    } else {
+        // select db.table.* / table.* ....
+        if (wild_card->table_name.empty()) {
+            DB_WARNING("table name is empty");
+            return -1;
+        }
+        std::string table_name = wild_card->table_name.value;
+        std::string db_name;
+        std::string full_name;
+        // try to search alias table
+        if (!wild_card->db_name.empty()) {
+            db_name = wild_card->db_name.value;
+            full_name = db_name + "." + table_name;
+        } else {
+            //table.field_name
+            auto dbs = get_possible_databases(table_name);
+            if (dbs.size() == 0) {
+                if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                    _ctx->stat_info.error_code = ER_WRONG_TABLE_NAME;
+                    _ctx->stat_info.error_msg << "Incorrect table name \'" << table_name << "\'";
+                }
+                DB_WARNING("no database found for field: %s", table_name.c_str());
+                return -1;
+            } else if (dbs.size() > 1 && !FLAGS_disambiguate_select_name) {
+                if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                    _ctx->stat_info.error_code = ER_AMBIGUOUS_FIELD_TERM;
+                    _ctx->stat_info.error_msg << "table  \'" << table_name << "\' is ambiguous";
+                }
+                DB_WARNING("ambiguous table_name: %s", table_name.c_str());
+                return -1;
+            }
+            full_name = *dbs.begin() + "." + table_name;
+        }
+        auto table_info = get_table_info_ptr(full_name);
+        if (table_info == nullptr) {
+            if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                _ctx->stat_info.error_code = ER_WRONG_TABLE_NAME;
+                _ctx->stat_info.error_msg << "Incorrect table name \'" << table_name << "\'";
+            }
+            DB_WARNING("no table found for select field: %s", select_field->to_string().c_str());
+            return -1;
+        }
+        if (0 != add_single_table_columns_for_view(table_info, 
+                                column_names,
+                                uniq_view_select_field_alias,
+                                view_select_field_str,
+                                column_name_idx,
+                                view)) {
+            DB_WARNING("add single table: %s columns fail", table_info->short_name.c_str());
+            return -1;
+        }
+    }
+    return 0;
+}
+
+int LogicalPlanner::parse_view_select_field(parser::SelectField* select_field, 
+            const parser::Vector<parser::ColumnName*>& column_names, 
+            int& column_name_idx, 
+            std::set<std::string>& uniq_view_select_field_alias,
+            std::string& view_select_field_str,
+            pb::SchemaInfo& view) {
+    // 主要是做一些检查, 列名是否存在等
+    pb::Expr select_expr;
+    if (select_field->expr == nullptr) {
+        DB_WARNING("field expr is nullptr");
+        return -1;
+    }
+    CreateExprOptions options;
+    options.can_agg = true;
+    options.is_select_field = true;
+    options.max_one_row = true;
+    if (0 != create_expr_tree(select_field->expr, select_expr, options)) {
+        DB_WARNING("create select expr failed");
+        return -1;
+    }
+    ExprNode* select_expr_node = nullptr;
+    if (0 != ExprNode::create_tree(select_expr, &select_expr_node)) {
+        DB_WARNING("create insertion mem expr failed");
+        return -1;
+    }
+    if (0 != select_expr_node->type_inferer()) {
+        DB_WARNING("expr type_inferer fail");
+        return -1;
+    }
+    pb::PrimitiveType mysql_type = select_expr_node->col_type();
+    select_expr_node->close();
+    delete select_expr_node;
+    // 不影响正常流程, create view 在ddl_planner里面需要一个正常的mysql_type才能成功update_table
+    if (mysql_type == pb::INVALID_TYPE) {
+        mysql_type = pb::STRING;
+    }
+
+    std::string select_name;
+    if (parse_select_name(select_field, select_name) == -1) {
+        DB_WARNING("Fail to parse_select_name");
+        return -1;
+    }
+
+    // 解析select expr
+    if (column_names.size() > 0 && column_names.size() <= column_name_idx) {
+        DB_WARNING("column names size %d not equal to column_name_idx size %d", column_names.size(), column_name_idx);
+        return -1;
+    }
+
+    const std::string& alias_name = column_names.size() > 0 ? 
+                    column_names[column_name_idx++]->name.value : select_name;       
+    if (uniq_view_select_field_alias.count(alias_name)) {
+        DB_WARNING("column name %s is duplicate", alias_name.c_str());
+        if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+            _ctx->stat_info.error_code = ER_VIEW_INVALID;
+            _ctx->stat_info.error_msg << "duplicate view column name \'" << alias_name << "\'";
+        }
+        return -1;
+    }
+    for (int i = 0; i < alias_name.size(); i++) {
+        if ((alias_name[i] < 'a' || 'z' < alias_name[i]) &&
+                (alias_name[i] < 'A' || 'Z' < alias_name[i]) &&
+                (alias_name[i] < '0' || '9' < alias_name[i]) &&
+                (alias_name[i] != '_')) {
+            // 类似sum(a),a+1 这种列名会在schema_factory中构建proto时报错, 需要指定列名
+            DB_WARNING("column name %s need alias name", alias_name.c_str());
+            if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                _ctx->stat_info.error_code = ER_VIEW_INVALID;
+                _ctx->stat_info.error_msg << "column name \'"  << alias_name << "' need alias name";
+            }
+            return -1;
+        }
+    }
+   
+    std::string real_alias_name = "`" + alias_name + "`";
+    char* as_name_ptr = select_field->as_name.value;
+    select_field->as_name = real_alias_name.c_str();
+    std::ostringstream os;
+    select_field->to_stream(os);
+
+    view_select_field_str += os.str() + ",";
+    uniq_view_select_field_alias.insert(alias_name);
+    pb::FieldInfo* view_field = view.add_fields();
+    view_field->set_field_name(alias_name);
+    view_field->set_mysql_type(mysql_type);
+    return 0;
+}
+
+int LogicalPlanner::add_single_table_columns_for_view(
+    TableInfo* table_info,
+    const parser::Vector<parser::ColumnName*>& column_names,
+    std::set<std::string>& uniq_view_select_field_alias,
+    std::string& view_select_field_str,
+    int& column_name_idx,
+    pb::SchemaInfo& view) {
+    for (auto& field : table_info->fields) {
+        if (field.deleted) {
+            continue;
+        }
+        if (column_names.size() > 0 && column_names.size() <= column_name_idx) {
+            DB_WARNING("column names size %d not equal to column_name_idx size %d", column_names.size(), column_name_idx);
+            if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                _ctx->stat_info.error_code = ER_VIEW_INVALID;
+                _ctx->stat_info.error_msg << "view column size invaild";
+            }
+            return -1;
+        }
+        std::string& select_name = field.name;
+        const std::string& alias_name =  column_names.size() > 0 ? 
+            column_names[column_name_idx++]->name.value : field.short_name;       
+        if (uniq_view_select_field_alias.count(alias_name)) {
+            DB_WARNING("column name %s is duplicate", alias_name.c_str());
+            if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                _ctx->stat_info.error_code = ER_VIEW_INVALID;
+                _ctx->stat_info.error_msg << "duplicate view column name \'" << alias_name << "\'";
+            }
+            return -1;
+        }
+        // 取出列名 table.column_name
+        size_t dot_pos = field.name.find('.'); 
+        if (dot_pos == std::string::npos) {
+            DB_WARNING("view column name %s invaild", field.name.c_str());
+            if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                _ctx->stat_info.error_code = ER_VIEW_INVALID;
+                _ctx->stat_info.error_msg << "view column " << field.name << " invaild";
+            }
+            return -1;
+        }
+        std::string select_full_name = field.name.substr(dot_pos + 1); 
+        view_select_field_str += select_full_name + " AS `" + alias_name + "`,";
+        uniq_view_select_field_alias.insert(alias_name);
+        pb::FieldInfo* view_field = view.add_fields();
+        view_field->set_field_name(alias_name);
+        view_field->set_mysql_type(field.type);
+    }
+    
+    return 0;
+}
+
+int LogicalPlanner::add_view_select_stmt(parser::SelectStmt* view_select_stmt,
+                parser::Vector<parser::ColumnName*>  column_names, 
+                const std::string& view_select_field_str,
+                pb::SchemaInfo& view) {
+    std::ostringstream os;        
+    if (view_select_stmt->is_in_braces) {
+        os << "(";
+    }
+    os << "SELECT ";
+    view_select_stmt->select_opt->to_stream(os);
+    // 检查column_names和view_select_stmt的字段个数是否一致
+
+    if (!view_select_field_str.empty()) {
+        os << view_select_field_str;
+    }
+    if (view_select_stmt->table_refs != nullptr) {
+        os << " FROM" << view_select_stmt->table_refs;
+    }
+    if (view_select_stmt->where != nullptr) {
+        os << " WHERE " << view_select_stmt->where;
+    }
+    if (view_select_stmt->group != nullptr) {
+        os << " GROUP BY" << view_select_stmt->group;
+    }
+    if (view_select_stmt->having != nullptr) {
+        os << " HAVING" << view_select_stmt->having;
+    }
+    if (view_select_stmt->order != nullptr) {
+        os << " ORDER BY" << view_select_stmt->order;
+    }
+    if (view_select_stmt->limit != nullptr) {
+        os << " LIMIT" << view_select_stmt->limit;
+    }
+    os << parser::for_lock_str[view_select_stmt->lock];
+    if (view_select_stmt->is_in_braces) {
+        os << ")";
+    }
+    view.set_view_select_stmt(os.str());
+    return 0;
+}
+
+int LogicalPlanner::parse_select_name(parser::SelectField* field, std::string& select_name) {
+    if (field == nullptr) {
+        DB_WARNING("field is nullptr");
+        return -1;
+    }
+    if (field->expr == nullptr) {
+        DB_WARNING("field->expr is nullptr");
+        return -1;
+    }
+    if (!field->as_name.empty()) {
+        select_name = field->as_name.value;
+    } else {
+        if (field->expr->expr_type == parser::ET_COLUMN) {
+            parser::ColumnName* column = static_cast<parser::ColumnName*>(field->expr);
+            select_name = column->name.c_str();
+        } else if (!field->org_name.empty()) {
+            select_name = field->org_name.c_str();
+        } else {
+            select_name = field->expr->to_string();
+        }
     }
     return 0;
 }
@@ -1360,7 +1945,7 @@ int LogicalPlanner::flatten_filter(const parser::ExprNode* item, std::vector<pb:
 
 void LogicalPlanner::create_order_func_slot() {
     if (_order_tuple_id == -1) {
-        _order_tuple_id = _plan_table_ctx->tuple_cnt++;
+        _order_tuple_id = _unique_id_ctx->tuple_cnt++;
     }
     pb::SlotDescriptor slot;
     slot.set_slot_id(_order_slot_cnt++);
@@ -1372,11 +1957,12 @@ void LogicalPlanner::create_order_func_slot() {
 std::vector<pb::SlotDescriptor>& LogicalPlanner::get_agg_func_slot(
         const std::string& agg, const std::string& fn_name, bool& new_slot) {
     if (_agg_tuple_id == -1) {
-        _agg_tuple_id = _plan_table_ctx->tuple_cnt++;
+        _agg_tuple_id = _unique_id_ctx->tuple_cnt++;
         _ctx->current_table_tuple_ids.emplace(_agg_tuple_id);
     }
     static std::unordered_set<std::string> need_intermediate_slot_agg = {
-        "avg", "rb_or_cardinality_agg", "rb_and_cardinality_agg", "rb_xor_cardinality_agg"
+        "avg", "rb_or_cardinality_agg", "rb_and_cardinality_agg", "rb_xor_cardinality_agg", "multi_count_distinct", "multi_sum_distinct",
+        "multi_group_concat_distinct"
     };
     std::vector<pb::SlotDescriptor>* slots = nullptr;
     auto iter = _agg_slot_mapping.find(agg);
@@ -1412,8 +1998,19 @@ int LogicalPlanner::create_agg_expr(const parser::FuncExpr* expr_item, pb::Expr&
         return -1;
     }
     bool new_slot = true;
+
+    std::string fn_name = expr_item->fn_name.to_lower();
+    if (_need_multi_distinct && expr_item->distinct) {
+        if (expr_item->fn_name.to_lower() == "count") {
+            fn_name = "multi_count_distinct";
+        } else if (expr_item->fn_name.to_lower() == "sum") {
+            fn_name = "multi_sum_distinct";
+        } else if (expr_item->fn_name.to_lower() == "group_concat") {
+            fn_name = "multi_group_concat_distinct";
+        }
+    }
     auto& slots = get_agg_func_slot(
-            expr_item->to_string(), expr_item->fn_name.to_lower(), new_slot);
+            expr_item->to_string(), fn_name, new_slot);
     if (slots.size() < 1) {
         DB_WARNING("wrong number of agg slots");
         return -1;
@@ -1425,7 +2022,7 @@ int LogicalPlanner::create_agg_expr(const parser::FuncExpr* expr_item, pb::Expr&
     node->set_node_type(pb::AGG_EXPR);
     node->set_col_type(pb::INVALID_TYPE);
     pb::Function* func = node->mutable_fn();
-    func->set_name(expr_item->fn_name.to_lower());
+    func->set_name(fn_name);
     func->set_fn_op(expr_item->func_type);
     func->set_has_var_args(false);
 
@@ -1454,7 +2051,9 @@ int LogicalPlanner::create_agg_expr(const parser::FuncExpr* expr_item, pb::Expr&
         func->set_name(func->name() + "_star");
     }
     // min max无需distinct
-    if (expr_item->distinct && func->name() != "max" && func->name() != "min") {
+    if (expr_item->distinct && func->name() != "max" && func->name() != "min"
+        && func->name() != "multi_count_distinct" && func->name() != "multi_sum_distinct"
+        && func->name() != "multi_group_concat_distinct") {
         func->set_name(func->name() + "_distinct");
     }
     node->set_num_children(expr_item->children.size());
@@ -1527,6 +2126,14 @@ int LogicalPlanner::construct_apply_node(QueryContext* sub_ctx,
             pb::Expr& expr,
             const pb::JoinType join_type,
             const CreateExprOptions& options) {
+    for (auto& kv : sub_ctx->derived_table_ctx_mapping) {
+        _ctx->derived_table_ctx_mapping[kv.first] = kv.second;
+        _ctx->add_sub_ctx(kv.second);
+        _ctx->has_derived_table = true;
+    }
+    for (auto& kv : sub_ctx->slot_column_mapping) {
+        _ctx->slot_column_mapping[kv.first] = kv.second;
+    }
     std::unique_ptr<ApplyMemTmp> apply_node_mem(new ApplyMemTmp);
     apply_node_mem->apply_node.set_join_type(join_type);
     apply_node_mem->apply_node.set_max_one_row(options.max_one_row);
@@ -1663,6 +2270,7 @@ int LogicalPlanner::create_scala_func_expr(const parser::FuncExpr* item,
             node->set_col_type(pb::INT64);
             node->set_num_children(0);
             node->mutable_derive_node()->set_int_val(_ctx->client_conn->last_insert_id);
+            _ctx->has_unable_cache_expr = true;
             return 0;
         }
         if (lower_fn_name == "database" ||
@@ -1677,6 +2285,7 @@ int LogicalPlanner::create_scala_func_expr(const parser::FuncExpr* item,
                 node->set_num_children(0);
                 node->mutable_derive_node()->set_string_val(_ctx->client_conn->current_db);
             }
+            _ctx->has_unable_cache_expr = true;
             return 0;
         }
         if (lower_fn_name == "user" ||
@@ -1688,6 +2297,7 @@ int LogicalPlanner::create_scala_func_expr(const parser::FuncExpr* item,
             node->set_num_children(0);
             node->mutable_derive_node()->set_string_val(_ctx->client_conn->username
                 + "@" + _ctx->client_conn->ip);
+            _ctx->has_unable_cache_expr = true;
             return 0;
         }
 
@@ -1716,6 +2326,7 @@ int LogicalPlanner::create_scala_func_expr(const parser::FuncExpr* item,
             pb::ExprNode* node = expr.add_nodes();
             Literal literal = Literal(field_info->default_expr_value);
             literal.transfer_pb(node);
+            _ctx->has_unable_cache_expr = true;
             return 0;
         }
         if (FunctionManager::instance()->get_object(item->fn_name.to_lower()) == nullptr) {
@@ -2106,15 +2717,8 @@ int LogicalPlanner::handle_compare_subquery(const parser::ExprNode* expr_item, p
 
 int LogicalPlanner::handle_exists_subquery(const parser::ExprNode* expr_item, pb::Expr& expr,
         const CreateExprOptions& options) {
-    parser::ExistsSubqueryExpr* sub_query_expr = nullptr;
-    bool is_not = false;
-    if (expr_item->expr_type == parser::ET_FUNC) {
-        parser::FuncExpr* func = (parser::FuncExpr*)expr_item;
-        sub_query_expr = (parser::ExistsSubqueryExpr*)func->children[0];
-        is_not = true;
-    } else {
-        sub_query_expr = (parser::ExistsSubqueryExpr*)expr_item;
-    }
+    parser::ExistsSubqueryExpr* sub_query_expr = (parser::ExistsSubqueryExpr*)expr_item;
+    bool is_not = sub_query_expr->is_not;
 
     ExprParams expr_params;
     expr_params.is_expr_subquery = true;
@@ -2321,13 +2925,33 @@ std::string LogicalPlanner::get_field_alias_name(const parser::ColumnName* colum
             }
             DB_WARNING("no database found for field: %s", column->to_string().c_str());
             return "";
-        } else if (dbs.size() > 1 && !FLAGS_disambiguate_select_name) {
-            if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
-                _ctx->stat_info.error_code = ER_AMBIGUOUS_FIELD_TERM;
-                _ctx->stat_info.error_msg << "column  \'" << column->name << "\' is ambiguous";
+        } else if (dbs.size() > 1) {
+            // _current_tables是同层join表, 内外层同名表以内表为准，支持下面的
+            // select *,(select a.area_id from (select area_id from dim_public_area_basic_df) as a where area_id=3 limit 1) from  (select area_id from dim_public_area_basic_df) as  a limit 1;
+            auto tables = get_possible_tables(column->name.c_str());
+            if (tables.size() == 1) {
+                alias_name += *tables.begin();
+                return alias_name;
             }
-            DB_WARNING("ambiguous field_name: %s", column->to_string().c_str());
-            return "";
+            std::vector<std::string> meet_tables;
+            meet_tables.reserve(2);
+            for (const auto& db : dbs) {
+                auto t = db + "." + column->table.c_str();
+                if (std::find(_current_tables.cbegin(), _current_tables.cend(), t) != _current_tables.cend()) {
+                    meet_tables.emplace_back(t);
+                }
+            }
+            if (meet_tables.size() == 1) {
+                return meet_tables[0];
+            }
+            if (!FLAGS_disambiguate_select_name) {
+                if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                    _ctx->stat_info.error_code = ER_AMBIGUOUS_FIELD_TERM;
+                    _ctx->stat_info.error_msg << "column  \'" << column->name << "\' is ambiguous";
+                }
+                DB_WARNING("ambiguous field_name: %s", column->to_string().c_str());
+                return "";
+            }
         }
         alias_name += *dbs.begin();
         alias_name += ".";
@@ -2383,11 +3007,11 @@ ScanTupleInfo* LogicalPlanner::get_scan_tuple(const std::string& table_name, int
         tuple_info = &(iter->second);
     } else {
         tuple_info = &(_plan_table_ctx->table_tuple_mapping[try_to_lower(table_name)]);
-        tuple_info->tuple_id = _plan_table_ctx->tuple_cnt++;
+        tuple_info->tuple_id = _unique_id_ctx->tuple_cnt++;
         tuple_info->table_id = table_id;
         tuple_info->slot_cnt = 1;
     }
-    //DB_WARNING("table_name:%s tuple_id:%d table_id:%d", table_name.c_str(), tuple_info->tuple_id, table_id);
+    //DB_WARNING("table_name:%s tuple_id:%d table_id:%ld", table_name.c_str(), tuple_info->tuple_id, table_id);
     return tuple_info;
 }
 
@@ -2419,7 +3043,7 @@ pb::SlotDescriptor& LogicalPlanner::get_values_ref_slot(int64_t table,
         int32_t field, pb::PrimitiveType type) {
     auto& tuple_info = _values_tuple_info;
     if (tuple_info.tuple_id == -1) {
-        tuple_info.tuple_id = _plan_table_ctx->tuple_cnt++;
+        tuple_info.tuple_id = _unique_id_ctx->tuple_cnt++;
         tuple_info.table_id = table;
         tuple_info.slot_cnt = 1;
     }
@@ -2618,6 +3242,18 @@ int LogicalPlanner::create_term_literal_node(const parser::LiteralExpr* literal,
             DB_WARNING("create_term_literal_node failed: %d", literal->literal_type);
             return -1;
     }
+
+    if (_ctx != nullptr && _ctx->need_convert_charset && literal->literal_type == parser::LT_STRING) {
+        std::string convert_str;
+        if (convert_charset(_ctx->charset, node->derive_node().string_val(),
+                            _ctx->table_charset, convert_str) != 0) {
+            DB_FATAL("Fail to convert_charset, connection_charset: %d, table_charset: %d, value: %s",
+                      _ctx->charset, _ctx->table_charset, node->derive_node().string_val().c_str());
+            return -1;
+        }
+        node->mutable_derive_node()->set_string_val(convert_str);
+    }
+
     return 0;
 }
 
@@ -2785,7 +3421,7 @@ int LogicalPlanner::create_filter_node(std::vector<pb::Expr>& filters,
         pb::Expr* expr = filter->add_conjuncts();
         expr->CopyFrom(filters[idx]);
     }
-    //DB_NOTICE("filter:%s", filter->ShortDebugString().c_str());
+    //DB_NOTICE("create_filter_node:%s", where_node->ShortDebugString().c_str());
     return 0;
 }
 
@@ -2926,6 +3562,20 @@ int LogicalPlanner::create_scan_nodes() {
     return 0;
 }
 
+int LogicalPlanner::need_dml_txn(const int64_t table_id) {
+    if (_ctx == nullptr || _factory == nullptr) {
+        DB_FATAL("_ctx or _factory is nullptr");
+        return -1;
+    }
+    if (_ctx->enable_2pc ||
+            _factory->need_begin_txn(table_id) ||
+            (!_ctx->no_binlog && _factory->has_open_binlog(table_id))) {
+        return 0;
+    } else {
+        return -1;
+    }
+}
+
 void LogicalPlanner::set_dml_txn_state(int64_t table_id) {
     if (_ctx->is_explain) {
         return;
@@ -2942,9 +3592,7 @@ void LogicalPlanner::set_dml_txn_state(int64_t table_id) {
     if (client->txn_id == 0) {
         DB_DEBUG("enable_2pc %d global index %d, binlog %d", 
             _ctx->enable_2pc, _factory->has_global_index(table_id), _factory->has_open_binlog(table_id));
-        if (_ctx->enable_2pc
-            || _factory->need_begin_txn(table_id)
-            || (!_ctx->no_binlog && _factory->has_open_binlog(table_id))) {
+        if (need_dml_txn(table_id) == 0) {
             client->on_begin();
             DB_DEBUG("get txn %ld", client->txn_id);
             client->seq_id = 0;
@@ -3109,6 +3757,83 @@ int LogicalPlanner::set_dml_local_index_binlog(const int64_t table_id) {
             DB_WARNING("un-supported command type: %d", _ctx->stmt_type);
             return -1;
         }
+    }
+    return 0;
+}
+
+int LogicalPlanner::get_convert_charset_info() {
+    if (!FLAGS_enable_convert_charset) {
+        return 0;
+    }
+    if (_ctx->is_complex) {
+        // 当前只支持简单SQL编码转换
+        return 0;
+    }
+    if (_plan_table_ctx->table_info.size() == 1) {
+        SmartTable table_info = _plan_table_ctx->table_info.begin()->second;
+        if (table_info == nullptr) {
+            DB_WARNING("table_info is nullptr");
+            return -1;
+        }
+        _ctx->table_charset = table_info->charset;
+        if (_ctx->charset == _ctx->table_charset) {
+            return 0;
+        }
+        if (_ctx->charset == pb::CS_UNKNOWN || _ctx->table_charset == pb::CS_UNKNOWN) {
+            DB_WARNING("Invalid charset[%d] or table_charset[%d]", _ctx->charset, _ctx->table_charset);
+            return -1;
+        }
+        _ctx->need_convert_charset = true;
+    }
+    return 0;
+}
+
+int LogicalPlanner::can_use_dblink(SmartTable table) {
+    if (table == nullptr) {
+        DB_WARNING("table is nullptr");
+        return -1;
+    }
+    if (_ctx == nullptr || _ctx->client_conn == nullptr || _factory == nullptr) {
+        DB_WARNING("ctx or client_conn or factory is nullptr");
+        return -1;
+    }
+    if (!FLAGS_enable_dblink) {
+        DB_WARNING("not support dblink");
+        _ctx->stat_info.error_code = ER_BAD_TABLE_ERROR;
+        _ctx->stat_info.error_msg << "not support dblink";
+        return -1;
+    }
+    // dblink表只支持INSERT/DELETE/UPDATE/SELECT
+    if (_ctx->stmt_type != parser::NT_INSERT 
+            && _ctx->stmt_type != parser::NT_DELETE
+            && _ctx->stmt_type != parser::NT_UPDATE 
+            && _ctx->stmt_type != parser::NT_SELECT) {
+        DB_WARNING("dblink table not support stmt type: %d", _ctx->stmt_type);
+        _ctx->stat_info.error_code = ER_BAD_TABLE_ERROR;
+        _ctx->stat_info.error_msg << "dblink table only supprt INSERT/DELETE/UPDATE/SELECT";
+        return -1;
+    }
+    // dblink表不支持事务
+    if (_ctx->client_conn->txn_id != 0) {
+        DB_WARNING("dblink table not support txn");
+        _ctx->stat_info.error_code = ER_BAD_TABLE_ERROR;
+        _ctx->stat_info.error_msg << "dblink table not support txn";
+        return -1;
+    }
+    if (_ctx->stmt_type != parser::NT_SELECT) {
+        if (need_dml_txn(table->id) == 0) {
+            DB_WARNING("dblink table not support dml txn");
+            _ctx->stat_info.error_code = ER_BAD_TABLE_ERROR;
+            _ctx->stat_info.error_msg << "dblink table not support dml txn, maybe table has binlog or global index";
+            return -1;
+        }
+    }
+    // dblink表不支持外部映射表为代价表
+    if (_factory->is_switch_open(table->id, TABLE_SWITCH_COST)) {
+        DB_WARNING("dblink table not support statistics table");
+        _ctx->stat_info.error_code = ER_BAD_TABLE_ERROR;
+        _ctx->stat_info.error_msg << "dblink table not support statistics table";
+        return -1;
     }
     return 0;
 }

@@ -7,14 +7,14 @@ jobs:
   build:
     runs-on: ubuntu-20.04
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
     - name: Cache cmake modules
-      uses: actions/cache@v2
+      uses: actions/cache@v4
       with:
-        key: cmake-buildenv-third-party
+        key: cmake-buildenv-third-party2
         path: |
            buildenv/third-party
     - name: Install Dependencies
       run: sudo apt-get update && sudo apt-get install -y flex bison libssl-dev autoconf g++ libtool make cmake libz-dev locate gfortran
     - name: Build
-      run: mkdir -p buildenv && cd buildenv && cmake -DWITH_BAIKAL_CLIENT=OFF .. && make 
+      run: mkdir -p buildenv && cd buildenv && cmake -DWITH_BAIKAL_CLIENT=OFF .. && make -j2

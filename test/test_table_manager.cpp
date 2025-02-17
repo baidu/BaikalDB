@@ -278,12 +278,22 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     ASSERT_EQ(1, _database_manager->_table_ids[1].size());
     ASSERT_EQ(1, _database_manager->_database_info_map[1].version());
 
-    ASSERT_EQ(1, _table_manager->_table_id_map.size());
-    ASSERT_EQ(1, _table_manager->_table_id_map[std::string("FengChao") +  "\001" + "FC_Word" + "\001" + "userinfo"]);
-    ASSERT_EQ(1, _table_manager->_table_info_map.size());
+    std::unordered_map<std::string, int64_t>            table_id_map;
+    std::unordered_map<int64_t, baikaldb::TableMem>               table_info_map;
+    {
+        baikaldb::DoubleBufferedTableMemMapping::ScopedPtr info;
+        if (_table_manager->_table_mem_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return;
+        }
+        table_id_map = info->table_id_map;
+        table_info_map = info->table_info_map;
+    }
+    ASSERT_EQ(1, table_id_map.size());
+    ASSERT_EQ(1, table_id_map[std::string("FengChao") +  "\001" + "FC_Word" + "\001" + "userinfo"]);
+    ASSERT_EQ(1, table_info_map.size());
     
-    for (auto& table_mem : _table_manager->_table_info_map) {
-        DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
+    for (auto& table_mem : table_info_map) {
         DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
         for (auto& partition_region : table_mem.second.partition_regions) {
             DB_WARNING("partition_id: %ld", partition_region.first);
@@ -293,9 +303,6 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
         }
         for (auto& field : table_mem.second.field_id_map) {
             DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
-        }
-        for (auto& index : table_mem.second.index_id_map) {
-            DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
         }
     }
     _schema_manager->load_snapshot();
@@ -320,18 +327,23 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     ASSERT_EQ(1, _database_manager->_table_ids[1].size());
     ASSERT_EQ(1, _database_manager->_database_info_map[1].version());
 
-    ASSERT_EQ(1, _table_manager->_table_id_map.size());
-    ASSERT_EQ(1, _table_manager->_table_id_map[std::string("FengChao") +  "\001" + "FC_Word" + "\001" + "userinfo"]);
-    ASSERT_EQ(1, _table_manager->_table_info_map.size());
+    {
+        baikaldb::DoubleBufferedTableMemMapping::ScopedPtr info;
+        if (_table_manager->_table_mem_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return;
+        }
+        table_id_map = info->table_id_map;
+        table_info_map = info->table_info_map;
+    }
+    ASSERT_EQ(1, table_id_map.size());
+    ASSERT_EQ(1, table_id_map[std::string("FengChao") +  "\001" + "FC_Word" + "\001" + "userinfo"]);
+    ASSERT_EQ(1, table_info_map.size());
     
-    for (auto& table_mem : _table_manager->_table_info_map) {
-        DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
+    for (auto& table_mem : table_info_map) {
         DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
         for (auto& field : table_mem.second.field_id_map) {
             DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
-        }
-        for (auto& index : table_mem.second.index_id_map) {
-            DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
         }
         for (auto& partition_region : table_mem.second.partition_regions) {
             DB_WARNING("partition_id: %ld", partition_region.first);
@@ -348,7 +360,7 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     request_create_table_fc_level.mutable_table_info()->set_database("FC_Word");
     request_create_table_fc_level.mutable_table_info()->set_namespace_name("FengChao");
     // request_create_table_fc_level.mutable_table_info()->add_init_store("127.0.0.1:8010");
-    request_create_table_fc_level.mutable_table_info()->set_upper_table_name("userinfo");
+    //request_create_table_fc_level.mutable_table_info()->set_upper_table_name("userinfo");
     request_create_table_fc_level.mutable_table_info()->set_resource_tag("e0");
     field = request_create_table_fc_level.mutable_table_info()->add_fields();
     field->set_field_name("userid");
@@ -376,7 +388,7 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     ASSERT_EQ(2, _namespace_manager->_max_namespace_id);
     ASSERT_EQ(3, _database_manager->_max_database_id);
     ASSERT_EQ(4, _table_manager->_max_table_id);
-    ASSERT_EQ(1, _region_manager->_max_region_id);
+    ASSERT_EQ(2, _region_manager->_max_region_id);
     ASSERT_EQ(2, _namespace_manager->_namespace_id_map.size());
     ASSERT_EQ(1, _namespace_manager->_namespace_id_map["FengChao"]);
     ASSERT_EQ(2, _namespace_manager->_namespace_id_map["Feed"]);
@@ -394,19 +406,24 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     ASSERT_EQ(2, _database_manager->_table_ids[1].size());
     ASSERT_EQ(1, _database_manager->_database_info_map[1].version());
 
-    ASSERT_EQ(2, _table_manager->_table_id_map.size());
-    ASSERT_EQ(1, _table_manager->_table_id_map[std::string("FengChao") +  "\001" + "FC_Word" + "\001" + "userinfo"]);
-    ASSERT_EQ(3, _table_manager->_table_id_map[std::string("FengChao") +  "\001" + "FC_Word" + "\001" + "planinfo"]);
-    ASSERT_EQ(2, _table_manager->_table_info_map.size());
-    ASSERT_EQ(2, _table_manager->_table_info_map[1].schema_pb.version()); 
-    for (auto& table_mem : _table_manager->_table_info_map) {
-        DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
+    {
+        baikaldb::DoubleBufferedTableMemMapping::ScopedPtr info;
+        if (_table_manager->_table_mem_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return;
+        }
+        table_id_map = info->table_id_map;
+        table_info_map = info->table_info_map;
+    }
+    ASSERT_EQ(2, table_id_map.size());
+    ASSERT_EQ(1, table_id_map[std::string("FengChao") +  "\001" + "FC_Word" + "\001" + "userinfo"]);
+    ASSERT_EQ(3, table_id_map[std::string("FengChao") +  "\001" + "FC_Word" + "\001" + "planinfo"]);
+    ASSERT_EQ(2, table_info_map.size());
+    ASSERT_EQ(1, table_info_map[1].schema_pb.version()); 
+    for (auto& table_mem : table_info_map) {
         DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
         for (auto& field : table_mem.second.field_id_map) {
             DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
-        }
-        for (auto& index : table_mem.second.index_id_map) {
-            DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
         }
         for (auto& partition_region : table_mem.second.partition_regions) {
             DB_WARNING("partition_id: %ld", partition_region.first);
@@ -419,7 +436,7 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     ASSERT_EQ(2, _namespace_manager->_max_namespace_id);
     ASSERT_EQ(3, _database_manager->_max_database_id);
     ASSERT_EQ(4, _table_manager->_max_table_id);
-    ASSERT_EQ(1, _region_manager->_max_region_id);
+    ASSERT_EQ(2, _region_manager->_max_region_id);
     ASSERT_EQ(2, _namespace_manager->_namespace_id_map.size());
     ASSERT_EQ(1, _namespace_manager->_namespace_id_map["FengChao"]);
     ASSERT_EQ(2, _namespace_manager->_namespace_id_map["Feed"]);
@@ -437,20 +454,25 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     ASSERT_EQ(2, _database_manager->_table_ids[1].size());
     ASSERT_EQ(1, _database_manager->_database_info_map[1].version());
 
-    ASSERT_EQ(2, _table_manager->_table_id_map.size());
-    ASSERT_EQ(1, _table_manager->_table_id_map[std::string("FengChao") +  "\001" + "FC_Word" + "\001" + "userinfo"]);
-    ASSERT_EQ(3, _table_manager->_table_id_map[std::string("FengChao") +  "\001" + "FC_Word" + "\001" + "planinfo"]);
-    ASSERT_EQ(2, _table_manager->_table_info_map.size());
-    ASSERT_EQ(2, _table_manager->_table_info_map[1].schema_pb.version()); 
+    {
+        baikaldb::DoubleBufferedTableMemMapping::ScopedPtr info;
+        if (_table_manager->_table_mem_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return;
+        }
+        table_id_map = info->table_id_map;
+        table_info_map = info->table_info_map;
+    }
+    ASSERT_EQ(2, table_id_map.size());
+    ASSERT_EQ(1, table_id_map[std::string("FengChao") +  "\001" + "FC_Word" + "\001" + "userinfo"]);
+    ASSERT_EQ(3, table_id_map[std::string("FengChao") +  "\001" + "FC_Word" + "\001" + "planinfo"]);
+    ASSERT_EQ(2, table_info_map.size());
+    ASSERT_EQ(1, table_info_map[1].schema_pb.version()); 
     
-    for (auto& table_mem : _table_manager->_table_info_map) {
-        DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
+    for (auto& table_mem : table_info_map) {
         DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
         for (auto& field : table_mem.second.field_id_map) {
             DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
-        }
-        for (auto& index : table_mem.second.index_id_map) {
-            DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
         }
         for (auto& partition_region : table_mem.second.partition_regions) {
             DB_WARNING("partition_id: %ld", partition_region.first);
@@ -498,18 +520,23 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     rename_table_request.mutable_table_info()->set_database("FC_Word");
     rename_table_request.mutable_table_info()->set_namespace_name("FengChao");
     _table_manager->rename_table(rename_table_request, 3, NULL);
-    ASSERT_EQ(3, _table_manager->_table_info_map[1].schema_pb.version()); 
-    for (auto& table_id : _table_manager->_table_id_map) {
+    {
+        baikaldb::DoubleBufferedTableMemMapping::ScopedPtr info;
+        if (_table_manager->_table_mem_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return;
+        }
+        table_id_map = info->table_id_map;
+        table_info_map = info->table_info_map;
+    }
+    ASSERT_EQ(2, table_info_map[1].schema_pb.version()); 
+    for (auto& table_id : table_id_map) {
         DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
     }
-    for (auto& table_mem : _table_manager->_table_info_map) {
-        DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
+    for (auto& table_mem : table_info_map) {
         DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
         for (auto& field : table_mem.second.field_id_map) {
             DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
-        }
-        for (auto& index : table_mem.second.index_id_map) {
-            DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
         }
         for (auto& partition_region : table_mem.second.partition_regions) {
             DB_WARNING("partition_id: %ld", partition_region.first);
@@ -519,18 +546,23 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
         } 
     }
     _schema_manager->load_snapshot();
-    ASSERT_EQ(3, _table_manager->_table_info_map[1].schema_pb.version()); 
-    for (auto& table_id : _table_manager->_table_id_map) {
+    {
+        baikaldb::DoubleBufferedTableMemMapping::ScopedPtr info;
+        if (_table_manager->_table_mem_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return;
+        }
+        table_id_map = info->table_id_map;
+        table_info_map = info->table_info_map;
+    }
+    ASSERT_EQ(2, table_info_map[1].schema_pb.version()); 
+    for (auto& table_id : table_id_map) {
         DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
     }
-    for (auto& table_mem : _table_manager->_table_info_map) {
-        DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
+    for (auto& table_mem : table_info_map) {
         DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
         for (auto& field : table_mem.second.field_id_map) {
             DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
-        }
-        for (auto& index : table_mem.second.index_id_map) {
-            DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
         }
         for (auto& partition_region : table_mem.second.partition_regions) {
             DB_WARNING("partition_id: %ld", partition_region.first);
@@ -548,18 +580,23 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     update_byte_size_request.mutable_table_info()->set_namespace_name("FengChao");
     update_byte_size_request.mutable_table_info()->set_byte_size_per_record(1000);
     _table_manager->update_byte_size(update_byte_size_request, 4, NULL);
-    ASSERT_EQ(4, _table_manager->_table_info_map[1].schema_pb.version());
-    for (auto& table_id : _table_manager->_table_id_map) {
+    {
+        baikaldb::DoubleBufferedTableMemMapping::ScopedPtr info;
+        if (_table_manager->_table_mem_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return;
+        }
+        table_id_map = info->table_id_map;
+        table_info_map = info->table_info_map;
+    }
+    ASSERT_EQ(3, table_info_map[1].schema_pb.version());
+    for (auto& table_id : table_id_map) {
         DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
     }
-    for (auto& table_mem : _table_manager->_table_info_map) {
-        DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
+    for (auto& table_mem : table_info_map) {
         DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
         for (auto& field : table_mem.second.field_id_map) {
             DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
-        }
-        for (auto& index : table_mem.second.index_id_map) {
-            DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
         }
         for (auto& partition_region : table_mem.second.partition_regions) {
             DB_WARNING("partition_id: %ld", partition_region.first);
@@ -569,18 +606,23 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
         } 
     }
     _schema_manager->load_snapshot();
-    ASSERT_EQ(4, _table_manager->_table_info_map[1].schema_pb.version()); 
-    for (auto& table_id : _table_manager->_table_id_map) {
+    {
+        baikaldb::DoubleBufferedTableMemMapping::ScopedPtr info;
+        if (_table_manager->_table_mem_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return;
+        }
+        table_id_map = info->table_id_map;
+        table_info_map = info->table_info_map;
+    }
+    ASSERT_EQ(3, table_info_map[1].schema_pb.version()); 
+    for (auto& table_id : table_id_map) {
         DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
     }
-    for (auto& table_mem : _table_manager->_table_info_map) {
-        DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
+    for (auto& table_mem : table_info_map) {
         DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
         for (auto& field : table_mem.second.field_id_map) {
             DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
-        }
-        for (auto& index : table_mem.second.index_id_map) {
-            DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
         }
         for (auto& partition_region : table_mem.second.partition_regions) {
             DB_WARNING("partition_id: %ld", partition_region.first);
@@ -600,18 +642,23 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     add_field_request.mutable_table_info()->set_database("FC_Word");
     add_field_request.mutable_table_info()->set_namespace_name("FengChao");
     _table_manager->add_field(add_field_request, 5, NULL);
-    ASSERT_EQ(5, _table_manager->_table_info_map[1].schema_pb.version());
-    for (auto& table_id : _table_manager->_table_id_map) {
+    {
+        baikaldb::DoubleBufferedTableMemMapping::ScopedPtr info;
+        if (_table_manager->_table_mem_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return;
+        }
+        table_id_map = info->table_id_map;
+        table_info_map = info->table_info_map;
+    }
+    ASSERT_EQ(4, table_info_map[1].schema_pb.version());
+    for (auto& table_id : table_id_map) {
         DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
     }
-    for (auto& table_mem : _table_manager->_table_info_map) {
-        DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
+    for (auto& table_mem : table_info_map) {
         DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
         for (auto& field : table_mem.second.field_id_map) {
             DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
-        }
-        for (auto& index : table_mem.second.index_id_map) {
-            DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
         }
         for (auto& partition_region : table_mem.second.partition_regions) {
             DB_WARNING("partition_id: %ld", partition_region.first);
@@ -621,18 +668,23 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
         } 
     }
     _schema_manager->load_snapshot();
-    ASSERT_EQ(5, _table_manager->_table_info_map[1].schema_pb.version());
-    for (auto& table_id : _table_manager->_table_id_map) {
+    {
+        baikaldb::DoubleBufferedTableMemMapping::ScopedPtr info;
+        if (_table_manager->_table_mem_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return;
+        }
+        table_id_map = info->table_id_map;
+        table_info_map = info->table_info_map;
+    }
+    ASSERT_EQ(4, table_info_map[1].schema_pb.version());
+    for (auto& table_id : table_id_map) {
         DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
     }
-    for (auto& table_mem : _table_manager->_table_info_map) {
-        DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
+    for (auto& table_mem : table_info_map) {
         DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
         for (auto& field : table_mem.second.field_id_map) {
             DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
-        }
-        for (auto& index : table_mem.second.index_id_map) {
-            DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
         }
         for (auto& partition_region : table_mem.second.partition_regions) {
             DB_WARNING("partition_id: %ld", partition_region.first);
@@ -651,18 +703,23 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     drop_field_request.mutable_table_info()->set_database("FC_Word");
     drop_field_request.mutable_table_info()->set_namespace_name("FengChao");
     _table_manager->drop_field(drop_field_request, 6, NULL);
-    ASSERT_EQ(6, _table_manager->_table_info_map[1].schema_pb.version()); 
-    for (auto& table_id : _table_manager->_table_id_map) {
+    {
+        baikaldb::DoubleBufferedTableMemMapping::ScopedPtr info;
+        if (_table_manager->_table_mem_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return;
+        }
+        table_id_map = info->table_id_map;
+        table_info_map = info->table_info_map;
+    }
+    ASSERT_EQ(5, table_info_map[1].schema_pb.version()); 
+    for (auto& table_id : table_id_map) {
         DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
     }
-    for (auto& table_mem : _table_manager->_table_info_map) {
-        DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
+    for (auto& table_mem : table_info_map) {
         DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
         for (auto& field : table_mem.second.field_id_map) {
             DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
-        }
-        for (auto& index : table_mem.second.index_id_map) {
-            DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
         }
         for (auto& partition_region : table_mem.second.partition_regions) {
             DB_WARNING("partition_id: %ld", partition_region.first);
@@ -672,18 +729,23 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
         } 
     }
     _schema_manager->load_snapshot();
-    ASSERT_EQ(6, _table_manager->_table_info_map[1].schema_pb.version());
-    for (auto& table_id : _table_manager->_table_id_map) {
+    {
+        baikaldb::DoubleBufferedTableMemMapping::ScopedPtr info;
+        if (_table_manager->_table_mem_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return;
+        }
+        table_id_map = info->table_id_map;
+        table_info_map = info->table_info_map;
+    }
+    ASSERT_EQ(5, table_info_map[1].schema_pb.version());
+    for (auto& table_id : table_id_map) {
         DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
     }
-    for (auto& table_mem : _table_manager->_table_info_map) {
-        DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
+    for (auto& table_mem : table_info_map) {
         DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
         for (auto& field : table_mem.second.field_id_map) {
             DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
-        }
-        for (auto& index : table_mem.second.index_id_map) {
-            DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
         }
         for (auto& partition_region : table_mem.second.partition_regions) {
             DB_WARNING("partition_id: %ld", partition_region.first);
@@ -703,18 +765,23 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     rename_field_request.mutable_table_info()->set_database("FC_Word");
     rename_field_request.mutable_table_info()->set_namespace_name("FengChao");
     _table_manager->rename_field(rename_field_request, 7, NULL);
-    ASSERT_EQ(7, _table_manager->_table_info_map[1].schema_pb.version());
-    for (auto& table_id : _table_manager->_table_id_map) {
+    {
+        baikaldb::DoubleBufferedTableMemMapping::ScopedPtr info;
+        if (_table_manager->_table_mem_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return;
+        }
+        table_id_map = info->table_id_map;
+        table_info_map = info->table_info_map;
+    }
+    ASSERT_EQ(6, table_info_map[1].schema_pb.version());
+    for (auto& table_id : table_id_map) {
         DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
     }
-    for (auto& table_mem : _table_manager->_table_info_map) {
-        DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
+    for (auto& table_mem : table_info_map) {
         DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
         for (auto& field : table_mem.second.field_id_map) {
             DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
-        }
-        for (auto& index : table_mem.second.index_id_map) {
-            DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
         }
         for (auto& partition_region : table_mem.second.partition_regions) {
             DB_WARNING("partition_id: %ld", partition_region.first);
@@ -724,18 +791,23 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
         } 
     }
     _schema_manager->load_snapshot();
-    ASSERT_EQ(7, _table_manager->_table_info_map[1].schema_pb.version());
-    for (auto& table_id : _table_manager->_table_id_map) {
+    {
+        baikaldb::DoubleBufferedTableMemMapping::ScopedPtr info;
+        if (_table_manager->_table_mem_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return;
+        }
+        table_id_map = info->table_id_map;
+        table_info_map = info->table_info_map;
+    }
+    ASSERT_EQ(6, table_info_map[1].schema_pb.version());
+    for (auto& table_id : table_id_map) {
         DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
     }
-    for (auto& table_mem : _table_manager->_table_info_map) {
-        DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
+    for (auto& table_mem : table_info_map) {
         DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
         for (auto& field : table_mem.second.field_id_map) {
             DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
-        }
-        for (auto& index : table_mem.second.index_id_map) {
-            DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
         }
         for (auto& partition_region : table_mem.second.partition_regions) {
             DB_WARNING("partition_id: %ld", partition_region.first);
@@ -745,10 +817,10 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
         } 
     }
     
-    auto ret = _table_manager->whether_exist_table_id(1);
-    ASSERT_EQ(0, ret);
-    ret = _table_manager->whether_exist_table_id(2);
-    ASSERT_EQ(-1, ret);
+    bool ret = _table_manager->exist_table_id(1);
+    ASSERT_EQ(true, ret);
+    ret = _table_manager->exist_table_id(2);
+    ASSERT_EQ(false, ret);
 
     _table_manager->add_region_id(1, 0, 1);
     _table_manager->add_region_id(1, 0, 2);
@@ -810,11 +882,20 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     request_drop_level_table_fc.mutable_table_info()->set_database("FC_Word");
     request_drop_level_table_fc.mutable_table_info()->set_namespace_name("FengChao");
     _table_manager->drop_table(request_drop_level_table_fc, 8, NULL);
-    ASSERT_EQ(8, _table_manager->_table_info_map[1].schema_pb.version());
+    {
+        baikaldb::DoubleBufferedTableMemMapping::ScopedPtr info;
+        if (_table_manager->_table_mem_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return;
+        }
+        table_id_map = info->table_id_map;
+        table_info_map = info->table_info_map;
+    }
+    ASSERT_EQ(6, table_info_map[1].schema_pb.version());
     ASSERT_EQ(2, _namespace_manager->_max_namespace_id);
     ASSERT_EQ(3, _database_manager->_max_database_id);
     ASSERT_EQ(4, _table_manager->_max_table_id);
-    ASSERT_EQ(1, _region_manager->_max_region_id);
+    ASSERT_EQ(2, _region_manager->_max_region_id);
     ASSERT_EQ(2, _namespace_manager->_namespace_id_map.size());
     ASSERT_EQ(1, _namespace_manager->_namespace_id_map["FengChao"]);
     ASSERT_EQ(2, _namespace_manager->_namespace_id_map["Feed"]);
@@ -822,26 +903,31 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     ASSERT_EQ(1, _namespace_manager->_database_ids[2].size());
     ASSERT_EQ(1, _database_manager->_table_ids[1].size());
     ASSERT_EQ(3, _database_manager->_database_id_map.size());
-    ASSERT_EQ(1, _table_manager->_table_info_map.size());
-    for (auto& table_id : _table_manager->_table_id_map) {
+    ASSERT_EQ(1, table_info_map.size());
+    for (auto& table_id : table_id_map) {
         DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
     }
-    for (auto& table_mem : _table_manager->_table_info_map) {
-        DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
+    for (auto& table_mem : table_info_map) {
         DB_WARNING("table_id:%ld, table_info:%s",
                     table_mem.first, table_mem.second.schema_pb.ShortDebugString().c_str());
         for (auto& field : table_mem.second.field_id_map) {
             DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
         }
-        for (auto& index : table_mem.second.index_id_map) {
-            DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
-        }
     }
     _schema_manager->load_snapshot();
+    {
+        baikaldb::DoubleBufferedTableMemMapping::ScopedPtr info;
+        if (_table_manager->_table_mem_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return;
+        }
+        table_id_map = info->table_id_map;
+        table_info_map = info->table_info_map;
+    }
     ASSERT_EQ(2, _namespace_manager->_max_namespace_id);
     ASSERT_EQ(3, _database_manager->_max_database_id);
     ASSERT_EQ(4, _table_manager->_max_table_id);
-    ASSERT_EQ(1, _region_manager->_max_region_id);
+    ASSERT_EQ(2, _region_manager->_max_region_id);
     ASSERT_EQ(2, _namespace_manager->_namespace_id_map.size());
     ASSERT_EQ(1, _namespace_manager->_namespace_id_map["FengChao"]);
     ASSERT_EQ(2, _namespace_manager->_namespace_id_map["Feed"]);
@@ -849,19 +935,15 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     ASSERT_EQ(1, _namespace_manager->_database_ids[2].size());
     ASSERT_EQ(1, _database_manager->_table_ids[1].size());
     ASSERT_EQ(3, _database_manager->_database_id_map.size());
-    ASSERT_EQ(1, _table_manager->_table_info_map.size());
-    ASSERT_EQ(8, _table_manager->_table_info_map[1].schema_pb.version());
-    for (auto& table_id : _table_manager->_table_id_map) {
+    ASSERT_EQ(1, table_info_map.size());
+    ASSERT_EQ(6, table_info_map[1].schema_pb.version());
+    for (auto& table_id : table_id_map) {
         DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
     }
-    for (auto& table_mem : _table_manager->_table_info_map) {
-        DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
+    for (auto& table_mem : table_info_map) {
         DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
         for (auto& field : table_mem.second.field_id_map) {
             DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
-        }
-        for (auto& index : table_mem.second.index_id_map) {
-            DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
         }
     }
 
@@ -873,18 +955,23 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     update_charset_request.mutable_table_info()->set_namespace_name("FengChao");
     update_charset_request.mutable_table_info()->set_charset(baikaldb::pb::GBK);
     _table_manager->update_charset(update_charset_request, 9, NULL);
-    ASSERT_EQ(9, _table_manager->_table_info_map[1].schema_pb.version());
-    for (auto& table_id : _table_manager->_table_id_map) {
+    {
+        baikaldb::DoubleBufferedTableMemMapping::ScopedPtr info;
+        if (_table_manager->_table_mem_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return;
+        }
+        table_id_map = info->table_id_map;
+        table_info_map = info->table_info_map;
+    }
+    ASSERT_EQ(7, table_info_map[1].schema_pb.version());
+    for (auto& table_id : table_id_map) {
         DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
     }
-    for (auto& table_mem : _table_manager->_table_info_map) {
-        DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
+    for (auto& table_mem : table_info_map) {
         DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
         for (auto& field : table_mem.second.field_id_map) {
             DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
-        }
-        for (auto& index : table_mem.second.index_id_map) {
-            DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
         }
         for (auto& partition_region : table_mem.second.partition_regions) {
             DB_WARNING("partition_id: %ld", partition_region.first);
@@ -894,18 +981,23 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
         } 
     }
     _schema_manager->load_snapshot();
-    ASSERT_EQ(9, _table_manager->_table_info_map[1].schema_pb.version()); 
-    for (auto& table_id : _table_manager->_table_id_map) {
+    {
+        baikaldb::DoubleBufferedTableMemMapping::ScopedPtr info;
+        if (_table_manager->_table_mem_infos.Read(&info) != 0) {
+            DB_WARNING("read double_buffer_table error.");
+            return;
+        }
+        table_id_map = info->table_id_map;
+        table_info_map = info->table_info_map;
+    }
+    ASSERT_EQ(7, table_info_map[1].schema_pb.version()); 
+    for (auto& table_id : table_id_map) {
         DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
     }
-    for (auto& table_mem : _table_manager->_table_info_map) {
-        DB_WARNING("whether_level_table:%d", table_mem.second.whether_level_table);
+    for (auto& table_mem : table_info_map) {
         DB_WARNING("table_info:%s", table_mem.second.schema_pb.ShortDebugString().c_str());
         for (auto& field : table_mem.second.field_id_map) {
             DB_WARNING("field_id:%d, field_name:%s", field.second, field.first.c_str());
-        }
-        for (auto& index : table_mem.second.index_id_map) {
-            DB_WARNING("index_id:%ld, index_name:%s", index.second, index.first.c_str());
         }
         for (auto& partition_region : table_mem.second.partition_regions) {
             DB_WARNING("partition_id: %ld", partition_region.first);

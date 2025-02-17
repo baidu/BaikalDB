@@ -21,7 +21,12 @@ int Tokenizer::nlpc_seg(drpc::NLPCClient& client,
              IN& s_input)
 {
     if (word.empty()) {
-        return -1;
+        return 0;
+    }
+
+    //有的业务带有\0的数据，导致分词报错
+    if (word[0] == '\0') {
+        return 0;
     }
 
     std::string str_input;

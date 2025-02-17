@@ -37,7 +37,10 @@ public:
     virtual int expr_optimize(QueryContext* ctx);
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state);
+    // from型子查询PacketNode透传子节点数据
+    virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state);
+    virtual int predicate_pushdown(std::vector<ExprNode*>& input_exprs);
 
     pb::OpType op_type() {
         return _op_type;
@@ -60,8 +63,12 @@ public:
     std::vector<ResultField>& mutable_fields() {
         return _fields;
     }
+    virtual bool can_use_arrow_vector();
+    int start_vectorized_execution(RuntimeState* state);
+    int build_arrow_declaration(RuntimeState* state);
 
 private:
+    int handle_acero_plan(RuntimeState* state);
     int open_histogram(RuntimeState* state);
     int open_cmsketch(RuntimeState* state);
     int open_analyze(RuntimeState* state);
@@ -70,8 +77,10 @@ private:
     int handle_trace2(RuntimeState* state);
     int handle_show_cost(RuntimeState* state);
     int handle_keypoint(RuntimeState* state);
-    int pack_keypoints(RuntimeState* state, std::map<std::string, std::vector<std::string>>& partition_key_pks,
-                               int partition_field_id, int partition_slot_id);
+    int pack_keypoints(RuntimeState* state, 
+                       std::map<std::string, std::vector<std::vector<ExprValue>>>& partition_key_pks,
+                       int partition_field_id, 
+                       int partition_slot_id);
     void pack_trace2(std::vector<std::map<std::string, std::string>>& info, const pb::TraceNode& trace_node,
         int64_t& total_scan_rows, int64_t& total_index_filter, int64_t& total_get_primary, int64_t& total_where_filter);
     int handle_explain(RuntimeState* state);
@@ -81,8 +90,8 @@ private:
     int pack_head();
     int pack_fields();
     int pack_vector_row(const std::vector<std::string>& row);
-    int pack_text_row(MemRow* row);
-    int pack_binary_row(MemRow* row);
+    int pack_text_row(MemRow* row, RuntimeState* state, std::vector<std::shared_ptr<arrow::ChunkedArray>>* columns = nullptr, int row_idx = 0);
+    int pack_binary_row(MemRow* row, RuntimeState* state, std::vector<std::shared_ptr<arrow::ChunkedArray>>* columns = nullptr, int row_idx = 0);
     int pack_eof();
     int fatch_expr_subquery_results(RuntimeState* state);
 

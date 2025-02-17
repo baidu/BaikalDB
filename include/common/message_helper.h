@@ -252,11 +252,12 @@ static ExprValue get_value(const FieldDescriptor* field, Message* message) {
     return ExprValue::Null();
 }
 
-// 仅对int型进行add
+// 仅对int型进行add, 只用于rollup
 static void add_value(const FieldDescriptor* field, Message* message, const ExprValue& value) {
     const Reflection* reflection = message->GetReflection();
     if (!reflection->HasField(*message, field)) {
-        return;
+        ExprValue default_val(pb::INT64);
+        set_value(field, message, default_val);
     }
     auto type = field->cpp_type();
     switch (type) {

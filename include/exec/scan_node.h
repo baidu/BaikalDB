@@ -160,7 +160,6 @@ private:
 
     int64_t select_index_common();
     int64_t select_index_by_cost();
-private:
     std::set<int64_t> _possible_indexs; // reset时，重置possible的index
     std::map<int64_t, SmartPath> _paths;
     std::vector<int64_t> _multi_reverse_index;
@@ -288,6 +287,7 @@ public:
 
     void clear_possible_indexes() {
         _main_path.clear();
+        _join_path.clear();
         _learner_path.clear();
         _scan_indexs.clear();
         _pb_node.mutable_derive_node()->mutable_scan_node()->clear_indexes();
@@ -311,6 +311,12 @@ public:
     }
 
     void add_access_path(const SmartPath& access_path) {
+        if (access_path->pushed_join_on_condition()) {
+            if (access_path->index_info_ptr->index_hint_status != pb::IHS_DISABLE) {
+                _join_path.add_access_path(access_path);
+            }
+            return;
+        }
         if (access_path->index_info_ptr->index_hint_status != pb::IHS_DISABLE) {
             //disable之后不用于主集群选索引
             _main_path.add_access_path(access_path);
@@ -321,13 +327,13 @@ public:
     }
 
     void add_expr_partition_pair(const std::string& expr_str, int64_t partition_id) {
-        _expr_partition_map.emplace(expr_str, partition_id);
+        _expr_partition_map[expr_str].insert(partition_id);
     }
 
     void set_partition_field_id(int64_t partition_field_id) {
         _partition_field_id = partition_field_id;
     }
-
+    int64_t select_join_index_in_baikaldb(const std::string& sample_sql);
     int64_t select_index_in_baikaldb(const std::string& sample_sql);
 
     virtual void show_explain(std::vector<std::map<std::string, std::string>>& output);
@@ -379,13 +385,28 @@ public:
 
     void add_global_condition_again();
 
+    pb::TupleDescriptor* get_tuple() {
+        return _tuple_desc;
+    }
+    void set_watt_stats_version(uint64_t watt_stats_version) {
+        _watt_stats_version = watt_stats_version;
+    }
+
+    bool can_use_no_index_join() {
+        // 当join on条件推不推都选择同一个索引, 且不是主键的时候, 才可以使用非index join
+        if (_select_idx == _select_index_for_join && _select_idx != _table_id) {
+            return true;
+        }
+        return false;
+    }
 protected:
     pb::Engine _engine = pb::ROCKSDB;
     int32_t _tuple_id = 0;
     int64_t _table_id = -1;
     AccessPathMgr _main_path;    //主集群索引选择
     AccessPathMgr _learner_path; //learner集群索引选择
-    std::map<std::string, int64_t> _expr_partition_map;
+    AccessPathMgr _join_path;    //join on条件下推的索引选择
+    std::map<std::string, std::unordered_set<int64_t>> _expr_partition_map;
     int64_t _partition_field_id = -1;
     pb::TupleDescriptor* _tuple_desc = nullptr;
     bool _learner_use_diff_index = false;
@@ -398,11 +419,13 @@ protected:
     FulltextInfoTree _fulltext_index_tree; //目前只有两层，第一层为and，第二层为or。
     std::unique_ptr<pb::FulltextIndex> _fulltext_index_pb;
     int64_t _select_idx = -1;
+    int64_t _select_index_for_join = -1;  // join on条件推到scannode,命中的索引
 
     std::vector<ScanIndexInfo> _scan_indexs;
     bthread::Mutex _current_index_mutex;
     bool _current_global_backup = false;
     GetMode _get_mode = GET_ONLY; // set to GET_LOCK, when "select ... for update"
+    uint64_t _watt_stats_version = 0;
 };
 }
 

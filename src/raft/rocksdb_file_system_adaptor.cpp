@@ -791,6 +791,7 @@ bool RocksdbFileSystemAdaptor::open_snapshot(const std::string& path) {
             && (iter->second.ptr->data_context == nullptr
             || iter->second.ptr->data_context->offset == 0)) {
             _snapshots.erase(iter);
+            _mutil_snapshot_cond.decrease_broadcast();
             DB_WARNING("region_id: %ld snapshot path: %s is hang over 1 hour, erase", _region_id, path.c_str());
         } else {
             // leaner拉取快照会保留raft_snapshot_reader_expire_time_s

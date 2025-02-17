@@ -113,10 +113,11 @@ private:
     int fetch_instance_info();
     int make_worker_process();
     void connection_timeout_check();
+    int heartbeat(bool is_sync, bool is_backup);
     void report_heart_beat();
     void report_other_heart_beat();
-    void index_recommend(const std::string& sample_sql, int64_t table_id, 
-        int64_t index_id, std::string& index_info, std::string& desc);
+    // void index_recommend(const std::string& sample_sql, int64_t table_id, 
+    //     int64_t index_id, std::string& index_info, std::string& desc);
     void get_field_distinct_cnt(int64_t table_id, std::set<int> fileds, 
         std::map<int64_t, int>& distinct_field_map);
     void fill_field_info(int64_t table_id, std::map<int64_t, int>& distinct_field_map, 
@@ -152,6 +153,7 @@ private:
     Bthread         _agg_sql_bth;
     Bthread         _health_check_bth;
     Bthread         _conn_bvars_update_bth;
+    Bthread         _ext_fs_gc_bth;
     uint32_t        _driver_thread_num;
     uint64_t        _instance_id = 0;
     std::string     _physical_room;

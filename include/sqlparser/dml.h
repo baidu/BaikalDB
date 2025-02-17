@@ -48,6 +48,7 @@ enum JoinType {
     JT_INNER_JOIN = 1,
     JT_LEFT_JOIN = 2,
     JT_RIGHT_JOIN = 3,
+    JT_FULL_JOIN = 4,
 };
 
 struct IndexHint : public Node {
@@ -134,6 +135,16 @@ struct TableSource : public Node {
         }
         for (int i = 0; i < index_hints.size(); ++i) {
             os << index_hints[i];
+        }
+        if (partition_names.size() > 0) {
+            os << " PARTITION(";
+            for (int i = 0; i < partition_names.size(); ++i) {
+                os << partition_names[i];
+                if (i != partition_names.size() - 1) {
+                    os << ",";
+                }
+            }
+            os << ")";
         }
     }
 };
@@ -358,6 +369,31 @@ struct LimitClause : public Node {
     }
     virtual void to_stream(std::ostream& os) const override {
         os << " " << offset << ", " << count;
+    }
+};
+
+struct WithClause : public Node {
+    Vector<CommonTableExpr*> ctes;
+    WithClause() {
+        is_complex = true;
+        node_type = NT_WITH;
+    }
+
+    virtual void to_stream(std::ostream& os) const override {
+        os << "WITH";
+        for (int i = 0; i < ctes.size(); i++) {
+            os << " ";
+            ctes[i]->to_stream(os);
+            if (i != ctes.size() - 1) {
+                os << ",";
+            }        
+        }
+    }
+    virtual void set_print_sample(bool print_sample_) override {
+        print_sample = print_sample_;
+        for (int i = 0; i < ctes.size(); i++) {
+            ctes[i]->set_print_sample(print_sample_);
+        }
     }
 };
 
@@ -650,6 +686,7 @@ struct SelectStmt : public DmlNode {
     ExprNode* having = nullptr;
     OrderByClause* order = nullptr;
     LimitClause* limit = nullptr;
+    WithClause* with = nullptr;
     bool is_in_braces = false;
     SelectLock lock = SL_NONE;
     SelectStmt() {
@@ -657,6 +694,10 @@ struct SelectStmt : public DmlNode {
     }
     virtual bool is_complex_node() {
         if (is_complex) {
+            return true;
+        }
+        if (with != nullptr && with->is_complex_node()) {
+            is_complex = true;
             return true;
         }
         for (int i = 0; i < fields.size(); i++) {
@@ -693,6 +734,9 @@ struct SelectStmt : public DmlNode {
     }
     virtual void set_print_sample(bool print_sample_) override {
         print_sample = print_sample_;
+        if (with != nullptr) {
+            with->set_print_sample(print_sample_);
+        }
         for (int i = 0; i < fields.size(); i++) {
             fields[i]->set_print_sample(print_sample_);
         }
@@ -746,6 +790,10 @@ struct SelectStmt : public DmlNode {
     }
 
     virtual void to_stream(std::ostream& os) const override {
+        if (with != nullptr) {
+            with->to_stream(os);
+            os << " AS ";
+        }
         if (is_in_braces) {
             os << "(";
         }
@@ -961,6 +1009,7 @@ enum ShowType {
     SHOW_STATUS,
     SHOW_COLLATION,
     SHOW_CREATE_TABLE,
+    SHOW_CREATE_VIEW,
     SHOW_GTRANTS,
     SHOW_TRIGGERS,
     SHOW_PROCEDURE_STATUS,

@@ -24,7 +24,19 @@ DEFINE_bool(disable_wal, false, "disable rocksdb interanal WAL log, only use raf
 DECLARE_int32(rocks_transaction_lock_timeout_ms);
 DEFINE_int64(exec_1pc_out_fsm_timeout_ms, 5 * 1000, "exec 1pc out of fsm, timeout");
 DEFINE_int64(exec_1pc_in_fsm_timeout_ms, 100, "exec 1pc in fsm, timeout");
+DEFINE_bool(leader_merge_in_raft, false, "leader_merge_in_raft");
 
+/**
+ * @brief 解码TTL
+ *
+ * 根据给定的RocksDB切片，解码TTL。
+ *
+ * @param value RocksDB切片
+ * @param index_info 索引信息指针
+ * @param base_expire_time_us 基础过期时间（微秒）
+ *
+ * @return 解码后的TTL时间戳（微秒）
+ */
 // value 出参，会remove prefix
 int64_t ttl_decode(rocksdb::Slice& value, const IndexInfo* const index_info, int64_t base_expire_time_us) {
     if (base_expire_time_us == 0) {
@@ -427,7 +439,17 @@ int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord re
 
     rocksdb::Status res;
     if (is_merge) {
-        res = _txn->Merge(_data_cf, key.data(), value);
+        if (!_is_separate || _txn_id != 0) {
+            // insert merge into必须kv分离，否则无法支持watt stats version幂等
+            // merge不支持事务
+            DB_FATAL("merge not separate or in txn");
+            return -1;
+        }
+        _is_merge = true;
+        // 如果leader在raft状态机中执行，则不在此处Merge
+        if (!_leader_merge_in_raft) {
+            res = _txn->Merge(_data_cf, key.data(), value);
+        }
     } else {
         res = put_kv_without_lock(key.data(), value, _write_ttl_timestamp_us);
     }
@@ -444,7 +466,7 @@ int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord re
 
     if (_is_separate) {
         if (is_merge) {
-            add_kvop_merge(key.data(), value);
+            add_kvop_merge(key.data(), value, _watt_stats_version);
         } else {
             add_kvop_put(key.data(), value, _write_ttl_timestamp_us, true);
         }
@@ -460,14 +482,14 @@ int Transaction::put_primary(int64_t region, IndexInfo& pk_index, SmartRecord re
 
 //TODO: finer return status
 //txt->Put always return OK when using OptimisticTransactionDB
-int Transaction::put_secondary(int64_t region, IndexInfo& index, SmartRecord record) {
+int Transaction::put_secondary(int64_t region, IndexInfo& index, SmartRecord record, bool is_rollup_base) {
     BAIDU_SCOPED_LOCK(_txn_mutex);
     last_active_time = butil::gettimeofday_us();
     if (_is_rolledback) {
         DB_WARNING("TransactionWarn: write a rolledback txn: %lu", _txn_id);
         return -1;
     }
-    if (index.type != pb::I_KEY && index.type != pb::I_UNIQ) {
+    if (index.type != pb::I_KEY && index.type != pb::I_UNIQ && index.type != pb::I_ROLLUP) {
         DB_WARNING("invalid index type, region_id: %ld, table_id: %ld, index_type:%d", region, index.id, index.type);
         return -1;
     }
@@ -502,6 +524,28 @@ int Transaction::put_secondary(int64_t region, IndexInfo& index, SmartRecord rec
             add_kvop_put(key.data(), pk.data(), _write_ttl_timestamp_us, index.is_global);
         }
         res = put_kv_without_lock(key.data(), pk.data(), _write_ttl_timestamp_us);
+    } else if (index.type == pb::I_ROLLUP) {
+        std::string value;
+        SmartRecord rollup_record =  record->clone(true);
+        if (rollup_record->encode_value_for_rollup(index, _table_info->fields, _table_info->fields_need_sum) != 0) {
+            DB_FATAL("Fail to encode_rollup, reg:%ld, tab:%ld", region, index.pk);
+            return -1;
+        }
+        if (0 != rollup_record->encode(value)) {
+            DB_WARNING("encode record failed: reg=%ld, tab=%ld", region, index.pk);
+            return -1;
+        }
+        if (!_is_separate || _txn_id != 0) {
+            DB_FATAL("merge not separate or in txn");
+            return -1;
+        }
+        add_kvop_merge(key.data(), value, _watt_stats_version);
+        _store_req.set_is_rollup_base(is_rollup_base);
+        _is_merge = true;
+        // 如果leader在raft状态机中执行，则不在此处Merge
+        if (!_leader_merge_in_raft || !_is_separate) {
+            res = _txn->Merge(_data_cf, key.data(), value);
+        }
     }
     if (res.IsTimedOut()) {
         print_txninfo_holding_lock(key.data());        
@@ -775,6 +819,7 @@ int Transaction::multiget_primary(
     read_disk_size = 0;
     TimeCost cost;
     rocksdb::ReadOptions read_opt;
+    bool use_memrow = row_batch->use_memrow();
     read_opt.fill_cache = true;
     read_opt.snapshot = _snapshot;
     _txn->MultiGet(read_opt, _data_cf, rocksdb_keys, values, statuses, sorted_input);
@@ -791,11 +836,16 @@ int Transaction::multiget_primary(
                     continue;
                 }
             }
-            std::unique_ptr<MemRow> mem_row = mem_row_desc->fetch_mem_row();
+            std::unique_ptr<MemRow> mem_row = nullptr;
+            if (use_memrow) {
+                mem_row = mem_row_desc->fetch_mem_row();
+            }
             if (!is_cstore()) {
                 TupleRecord tuple_record(value_slice);
                 // only decode the required field (field_ids stored in fields)
-                if (0 != tuple_record.decode_fields(fields, &field_slot, nullptr, tuple_id, &mem_row)) {
+                if (0 != tuple_record.decode_fields(fields, &field_slot, nullptr, tuple_id, 
+                                                    use_memrow ? &mem_row : nullptr, 
+                                                    row_batch->get_chunk())) {
                     DB_WARNING("decode value failed: %ld, _use_ttl:%d", pk_index.id, _use_ttl);
                     continue;
                 }
@@ -809,11 +859,22 @@ int Transaction::multiget_primary(
             }
             int prefix_len = 2 * sizeof(int64_t);
             TableKey key(rocksdb_keys[i], true);
-            if (0 != mem_row->decode_key(tuple_id, pk_index, field_slot, key, prefix_len)) {
-                DB_WARNING("decode primary index failed: %ld", pk_index.id);
-                continue;
+            if (use_memrow) {
+                if (0 != mem_row->decode_key(tuple_id, pk_index, field_slot, key, prefix_len)) {
+                    DB_WARNING("decode primary index failed: %ld", pk_index.id);
+                    continue;
+                }
+                row_batch->move_row(std::move(mem_row));
+            } else {
+                if (0 != row_batch->get_chunk()->decode_key(tuple_id, pk_index, field_slot, key, prefix_len)) {
+                    DB_FATAL("decode primary index failed in arrow mode: %ld", pk_index.id);
+                    continue;
+                }
+                if (0 != row_batch->add_chunk_row()) {
+                    DB_FATAL("add arrow chunk row fail");
+                    return -1;
+                }
             }
-            row_batch->move_row(std::move(mem_row));
         } else if (statuses[i].IsNotFound()) {
             DB_DEBUG("lock ok but key not exist");
             continue;
@@ -1030,6 +1091,7 @@ int Transaction::multiget_secondary(
 
     read_disk_size = 0;
 
+    bool use_memrow = row_batch->use_memrow();
     std::vector<rocksdb::PinnableSlice> values(num_keys);
     std::vector<rocksdb::Status> statuses(num_keys);
     TimeCost cost;
@@ -1068,7 +1130,7 @@ int Transaction::multiget_secondary(
                     continue;
                 }
                 read_records.emplace_back(record);
-            } else {
+            } else if (use_memrow) {
                 std::unique_ptr<MemRow> mem_row = mem_row_desc->fetch_mem_row();
                 TableKey pkey(value_slice, true);
                 int pos = 0;
@@ -1083,6 +1145,23 @@ int Transaction::multiget_secondary(
                     continue;
                 }
                 row_batch->move_row(std::move(mem_row));
+            } else {
+                TableKey pkey(value_slice, true);
+                int pos = 0;
+                if (0 != row_batch->get_chunk()->decode_primary_key(tuple_id, index, field_slot, pkey, pos)) {
+                    DB_FATAL("decode primary key failed in arrow mode: %ld", index.id);
+                    continue;
+                }
+                TableKey key(rocksdb_keys[i], true);
+                pos = 0;
+                if (0 != row_batch->get_chunk()->decode_key(tuple_id, index, field_slot, key, pos)) {
+                    DB_FATAL("decode second key failed in arrow mode: %ld", index.id);
+                    continue;
+                }
+                if (0 != row_batch->add_chunk_row()) {
+                    DB_FATAL("add row failed in arrow mode");
+                    return -1;
+                }
             }
         } else if (statuses[i].IsNotFound()) {
             DB_DEBUG("lock ok but key not exist");
@@ -1195,8 +1274,31 @@ int Transaction::remove(int64_t region, IndexInfo& index, /*IndexInfo& pk_index,
             return -1;
         }
     }
-
-    auto res = _txn->Delete(_data_cf, _key.data());
+    
+    rocksdb::Status res;
+    std::string value;
+    if(index.type == pb::I_ROLLUP) {
+        SmartRecord rollup_record = key->clone(true);
+        if (rollup_record->encode_value_for_rollup(index, _table_info->fields, _table_info->fields_need_sum, true) != 0) {
+            DB_FATAL("Fail to encode_rollup, reg:%ld, tab:%ld", region, index.pk);
+            return -1;
+        }
+        int ret = rollup_record->encode(value);
+        if (ret != 0) {
+            DB_WARNING("encode record failed: reg=%ld, tab=%ld", region, index.pk);
+            return -1;
+        }
+        if (!_is_separate || _txn_id != 0) {
+            // insert merge into必须kv分离，否则无法支持watt stats version幂等
+            // merge不支持事务
+            DB_FATAL("merge not separate or in txn");
+            return -1;
+        }
+        res = _txn->Merge(_data_cf, _key.data(), value);
+    } else {
+        res = _txn->Delete(_data_cf, _key.data());
+    }
+    
     DB_DEBUG("delete key=%s", str_to_hex(_key.data()).c_str());
     if (res.IsTimedOut()) {
         print_txninfo_holding_lock(_key.data());        
@@ -1209,7 +1311,11 @@ int Transaction::remove(int64_t region, IndexInfo& index, /*IndexInfo& pk_index,
         return -1;
     }
     if (_is_separate) {
-        add_kvop_delete(_key.data(), index.type == pb::I_PRIMARY || index.is_global);
+        if (index.type == pb::I_ROLLUP) {
+            add_kvop_merge(_key.data(), value, _watt_stats_version);
+        } else {
+            add_kvop_delete(_key.data(), index.type == pb::I_PRIMARY || index.is_global);
+        }
     }
     // for cstore only, remove_columns
     if (index.type == pb::I_PRIMARY && is_cstore()) {

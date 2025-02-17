@@ -40,6 +40,13 @@ int InsertPlanner::plan() {
         insert->set_row_ttl_duration(_ctx->row_ttl_duration);
         DB_DEBUG("row_ttl_duration: %ld", _ctx->row_ttl_duration);
     }
+    if (_ctx->watt_stats_version > 0) {
+        insert->set_watt_stats_version(_ctx->watt_stats_version);
+    }
+    if (_ctx->watt_stats_version > 0 && !_insert_stmt->is_merge) {
+        DB_FATAL("has watt stats version but not merge");
+        return -1;
+    }
     for (int i = 0; i < _insert_stmt->partition_names.size(); ++i) {
         std::string lower_name = _insert_stmt->partition_names[i].value;
         std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
@@ -49,6 +56,12 @@ int InsertPlanner::plan() {
     if (0 != parse_db_table(insert)) {
         return -1;
     }
+
+    // 获取编码转换信息
+    if (get_convert_charset_info() != 0) {
+        return -1;
+    }
+
     if (0 != parse_kv_list()) {
         return -1;
     }

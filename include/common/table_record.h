@@ -132,6 +132,7 @@ public:
     void add_value(const FieldDescriptor* field, const ExprValue& value) {
         MessageHelper::add_value(field, _message, value);
     }
+
 /*
     // by_tag default true
     int set_default_value(const FieldInfo& field_info) {
@@ -208,7 +209,9 @@ public:
     // these two funcs are only used for encode/decode pk fields after secondary index
     int encode_primary_key(IndexInfo& index, MutTableKey& key, int field_cnt);
     int decode_primary_key(IndexInfo& index, const TableKey& key, int& pos);
-
+    int encode_value_for_rollup(IndexInfo& index, const std::vector<FieldInfo>& total_fields, 
+                    const std::vector<FieldInfo>& fields_need_sum,
+                    bool is_delete = false);
     // those two funcs are only used for encode/decode non-pk fields after primary, for cstore
     int encode_field_for_cstore(const FieldInfo& field_info, std::string& out);
     int decode_field(const FieldInfo& field_info, const rocksdb::Slice& in);
@@ -300,6 +303,13 @@ public:
     void clear() {
         _batch.clear();
         _idx = 0;
+    }
+    std::vector<SmartRecord>* get_batch() {
+        return &_batch;
+    }
+    void insert(BatchRecord& other) {
+        auto other_vec = other.get_batch();
+        _batch.insert(_batch.end(), other_vec->begin(), other_vec->end());
     }
 private:
     size_t _idx = 0;

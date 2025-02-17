@@ -16,6 +16,11 @@
 #include "runtime_state.h"
 #include "network_socket.h"
 #include "scan_node.h"
+#include <arrow/type.h>
+#include <arrow/acero/options.h>
+#include <arrow/stl_iterator.h>
+#include "vectorize_helpper.h"
+#include "filter_node.h"
 
 namespace baikaldb {
 DEFINE_int32(expect_bucket_count, 100, "expect_bucket_count");
@@ -283,8 +288,9 @@ int PacketNode::handle_trace2(RuntimeState* state) {
 }
 
 int PacketNode::pack_keypoints(RuntimeState* state, 
-                               std::map<std::string, std::vector<std::string>>& partition_key_pks,
-                               int partition_field_id, int partition_slot_id) {
+                               std::map<std::string, std::vector<std::vector<ExprValue>>>& partition_key_pks,
+                               int partition_field_id, 
+                               int partition_slot_id) {
     int ret = 0;
     bool eos = false;
     do {
@@ -299,17 +305,30 @@ int PacketNode::pack_keypoints(RuntimeState* state,
         }
         for (batch.reset(); !batch.is_traverse_over(); batch.next()) {
             MemRow* row = batch.get_row().get();
-            std::string key_point;
+            std::vector<ExprValue> values;
             std::string paritition_key = row->get_value(0, partition_slot_id).get_string();
             for (auto expr : _projections) {
-                key_point += expr->get_value(row).cast_to(expr->col_type()).get_string() + ",";
+                values.emplace_back(expr->get_value(row));
             }
-            if (!key_point.empty()) {
-                key_point.pop_back();
-            }
-            partition_key_pks[paritition_key].emplace_back(key_point);
+            partition_key_pks[paritition_key].emplace_back(values);
         }
     } while (!eos);
+    // 拿keypoint的order by可能被下推干掉导致解析出来的主键部分字段组成的keypoint无序, 必须在这里排序
+    for (auto& pair : partition_key_pks) {
+        auto& rows = pair.second;
+        // 排序, 和multi_lt_value一样
+        std::sort(rows.begin(), rows.end(), [](std::vector<ExprValue>& a, std::vector<ExprValue>& b) -> bool {
+            int field_size = a.size();
+            for (int i = 0; i < field_size; ++i) {
+                if (a[i].compare(b[i]) < 0) {
+                    return true;
+                } else if (a[i].compare(b[i]) > 0) {
+                    return false;
+                }
+            }
+            return false;
+        });
+    }
     return 0;
 }
 
@@ -363,7 +382,7 @@ int PacketNode::handle_keypoint(RuntimeState* state) {
         partition_threshold = 2;
     }
     int64_t range_count_limit = state->range_count_limit;
-    std::map<std::string, std::vector<std::string>> partition_key_pks;
+    std::map<std::string, std::vector<std::vector<ExprValue>>> partition_key_pks;
     pack_keypoints(state, partition_key_pks, partition_key_field_id, partition_key_slot_id);
 
     std::vector<std::vector<std::string>> rows;
@@ -383,9 +402,16 @@ int PacketNode::handle_keypoint(RuntimeState* state) {
         }
         for (auto& pk : sub_info.second) {
             if (++key_count % keypoint_range_per_user == 0) {
-                if (last_pk != pk) {
-                    pks += pk + ";";
-                    last_pk = pk;
+                std::string key;
+                for (auto& v : pk) {
+                    key += v.cast_to(pb::STRING).get_string() + ",";
+                }
+                if (!key.empty()) {
+                    key.pop_back();
+                }
+                if (last_pk != key) {
+                    pks += key + ";";
+                    last_pk = key;
                 }
             }
         }
@@ -435,7 +461,126 @@ int PacketNode::fatch_expr_subquery_results(RuntimeState* state) {
     return 0;
 }
 
+bool PacketNode::can_use_arrow_vector() {
+    for (auto& expr : _projections) {
+        if (!expr->can_use_arrow_vector()) {
+            return false;
+        }
+    }
+    for (auto& c : _children) {
+        if (!c->can_use_arrow_vector()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+int PacketNode::build_arrow_declaration(RuntimeState* state) {
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
+    for (auto c : _children) {
+        if (c->build_arrow_declaration(state) != 0) {
+            return -1;
+        }
+    }
+    auto sort_node = static_cast<SortNode*>(get_node(pb::SORT_NODE));
+    if (sort_node != nullptr) {
+        if (0 != sort_node->build_sort_arrow_declaration(state, get_trace())) {
+            return -1;
+        }
+    }
+    //  add projection stage
+    std::vector<arrow::compute::Expression> exprs;
+    for (auto& field : _projections) {
+        if (field->transfer_to_arrow_expression() != 0) {
+            DB_FATAL_STATE(state, "packetnode projection transfer_to_arrow_expression fail");
+            return -1;
+        }
+        exprs.emplace_back(field->arrow_expr());
+    }
+    arrow::acero::Declaration dec{"project", arrow::acero::ProjectNodeOptions{exprs}};
+    LOCAL_TRACE_ARROW_PLAN(dec);
+    state->append_acero_declaration(dec);
+    return 0;
+}
+
+int PacketNode::start_vectorized_execution(RuntimeState* state) {
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
+    TimeCost cost;
+    int ret = build_arrow_declaration(state);
+    if (ret != 0) {
+        DB_FATAL_STATE(state, "build arrow declaration fail");
+        return -1;
+    }
+    std::shared_ptr<arrow::Table> table;
+    // handle limit node
+    int64_t offset = 0;
+    int64_t limit = 0; 
+    LimitNode* limit_node = static_cast<LimitNode*>(vec_get_limit_node());
+    if (limit_node != nullptr) {
+        // 全局索引处理limit会add skip_num
+        offset = limit_node->get_offset() - limit_node->get_num_rows_skipped();
+        limit = limit_node->get_limit();
+    }
+    // execute
+    arrow::Result<std::shared_ptr<arrow::Table>> final_table;
+    GlobalArrowExecutor::execute(state, &final_table);
+    if (final_table.ok()) {
+        table = *final_table;
+    } else {
+        DB_FATAL("arrow acero run fail, status: %s", final_table.status().ToString().c_str());
+        return -1;
+    }
+    if (limit != 0) {
+        if (table->num_rows() - offset <= 0) {
+            // no value
+            table.reset();
+        } else {
+            int64_t row_len = std::min(table->num_rows() - offset, limit);
+            table = table->Slice(offset, row_len);
+        }
+    }
+    if (state->explain_type == SHOW_TRACE) {
+        return 0;
+    } 
+    int64_t pack_time = 0;
+    if (_children.empty()) {
+        return 0;
+    }
+    cost.reset();
+    if (table != nullptr) {
+        std::vector<std::shared_ptr<arrow::ChunkedArray>> columns = table->columns();
+        for (int row_idx = 0; row_idx < table->num_rows(); ++row_idx) {
+            if (_binary_protocol) {
+                ret = pack_binary_row(nullptr, state, &columns, row_idx);
+            } else {
+                ret = pack_text_row(nullptr, state, &columns, row_idx);
+            }
+            state->inc_num_returned_rows(1);
+            if (ret < 0) {
+                pack_time += cost.get_time();
+                DB_WARNING("pack_row fail:%d", ret);
+                return ret;
+            }
+        }
+    }
+    pack_time += cost.get_time();
+    return 0;
+}
+
 int PacketNode::open(RuntimeState* state) {
+    int ret = 0;
+    if (state->is_from_subquery() || state->is_union_subquery()) {
+        ret = ExecNode::open(state);
+        if (_children.size() > 0) {
+            set_node_exec_type(_children[0]->node_exec_type());
+        }
+        if (ret < 0) {
+            DB_WARNING("ExecNode::open fail:%d", ret);
+            return ret;
+        }
+        return 0;
+    }
+
     _client = state->client_conn();
     if (FLAGS_field_charsetnr_set_by_client) {
         for (auto& field : _fields) {
@@ -445,11 +590,12 @@ int PacketNode::open(RuntimeState* state) {
         }
     }
     _send_buf = state->send_buf();
-    int ret = 0;
+
     if (state->explain_type == EXPLAIN_SHOW_COST) {
         handle_show_cost(state);
         return 0;
     }
+
     if (!_return_empty || op_type() == pb::OP_SELECT) {
         ret = ExecNode::open(state);
         if (ret < 0) {
@@ -510,7 +656,7 @@ int PacketNode::open(RuntimeState* state) {
 
     pack_head();
     pack_fields();
-    
+
     if (state->is_full_export) {
         return 0;
     }
@@ -527,12 +673,16 @@ int PacketNode::open(RuntimeState* state) {
             DB_WARNING("children:get_next fail:%d", ret);
             return ret;
         }
+        set_node_exec_type(_children[0]->node_exec_type());
+        if (_node_exec_type == pb::EXEC_ARROW_ACERO) {
+            break;
+        }
         for (batch.reset(); !batch.is_traverse_over(); batch.next()) {
             TimeCost cost;
             if (_binary_protocol) {
-                ret = pack_binary_row(batch.get_row().get());
+                ret = pack_binary_row(batch.get_row().get(), state);
             } else {
-                ret = pack_text_row(batch.get_row().get());
+                ret = pack_text_row(batch.get_row().get(), state);
             }
 
             pack_time += cost.get_time();
@@ -544,6 +694,14 @@ int PacketNode::open(RuntimeState* state) {
             }
         }
     } while (!eos);
+    if (!_return_empty && _node_exec_type == pb::EXEC_ARROW_ACERO) {
+        // ARROW列式执行入口
+        ret = start_vectorized_execution(state);
+        if (ret < 0) {
+            return ret;
+        }
+    }
+    state->execute_type = _node_exec_type;
     //DB_WARNING("txn_id: %lu, pack_time: %ld", state->txn_id, pack_time);
     pack_eof();
     return 0;
@@ -563,8 +721,17 @@ int PacketNode::open_trace(RuntimeState* state) {
             DB_WARNING("children:get_next fail:%d", ret);
             return ret;
         }
+        set_node_exec_type(_children[0]->node_exec_type());
+        if (_node_exec_type == pb::EXEC_ARROW_ACERO) {
+            break;
+        }
         state->inc_num_returned_rows(batch.size());
     } while (!eos);
+    if (_node_exec_type == pb::EXEC_ARROW_ACERO) {
+        // ARROW列式执行入口
+        start_vectorized_execution(state);
+    }
+    state->execute_type = _node_exec_type;
 
     if (state->explain_type == SHOW_TRACE) {
         handle_trace(state);
@@ -780,9 +947,9 @@ int PacketNode::get_next(RuntimeState* state) {
     for (batch.reset(); !batch.is_traverse_over(); batch.next()) {
         TimeCost cost;
         if (_binary_protocol) {
-            ret = pack_binary_row(batch.get_row().get());
+            ret = pack_binary_row(batch.get_row().get(), state);
         } else {
-            ret = pack_text_row(batch.get_row().get());
+            ret = pack_text_row(batch.get_row().get(), state);
         }
         state->inc_num_returned_rows(1);
         if (ret < 0) {
@@ -795,6 +962,14 @@ int PacketNode::get_next(RuntimeState* state) {
         pack_eof();
     }
     return 0;
+}
+
+int PacketNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
+    if (_children.empty()) {
+        DB_WARNING("Has no child");
+        return -1;
+    }
+    return _children[0]->get_next(state, batch, eos);
 }
 
 void PacketNode::close(RuntimeState* state) {
@@ -913,7 +1088,7 @@ int PacketNode::pack_vector_row(const std::vector<std::string>& row) {
     return 0;
 }
 
-int PacketNode::pack_text_row(MemRow* row) {
+int PacketNode::pack_text_row(MemRow* row,  RuntimeState* state, std::vector<std::shared_ptr<arrow::ChunkedArray>>* columns, int row_idx) {
     int start_pos = _send_buf->_size;
     uint8_t bytes[4];
     bytes[0] = '\x01';
@@ -926,11 +1101,27 @@ int PacketNode::pack_text_row(MemRow* row) {
     }
 
     // package body.
+    int field_idx = 0;
     for (auto expr : _projections) {
-        if (!_send_buf->append_text_value(expr->get_value(row).cast_to(expr->col_type()))) {
+        ExprValue expr_value;
+        if (row != nullptr) {
+            expr_value = expr->get_value(row).cast_to(expr->col_type());
+        } else {
+            expr_value = VectorizeHelpper::get_vectorized_value((*columns)[field_idx].get(), row_idx).cast_to(expr->col_type());
+        }
+        if (state->need_convert_charset) {
+            int ret = expr_value.convert_charset(state->table_charset, state->connection_charset);
+            if (ret < 0) {
+                DB_FATAL("Fail to convert_charset, table_charset: %d, connection_charset: %d, value: %s",
+                          state->table_charset, state->connection_charset, expr_value.get_string().c_str());
+                return -1;
+            }
+        }
+        if (!_send_buf->append_text_value(expr_value)) {
             DB_FATAL("Failed to append table cell.");
             return -1;
         }
+        field_idx++;
     }
     uint32_t packet_body_len = _send_buf->_size - start_pos - 4;
     while (packet_body_len >= PACKET_LEN_MAX) {
@@ -955,7 +1146,7 @@ int PacketNode::pack_text_row(MemRow* row) {
     return 0;
 }
 
-int PacketNode::pack_binary_row(MemRow* row) {
+int PacketNode::pack_binary_row(MemRow* row, RuntimeState* state, std::vector<std::shared_ptr<arrow::ChunkedArray>>* columns, int row_idx) {
     int start_pos = _send_buf->_size;
     uint8_t bytes[4];
     bytes[0] = '\x01';
@@ -987,7 +1178,21 @@ int PacketNode::pack_binary_row(MemRow* row) {
     int field_idx = 0;
     // package body.
     for (auto expr : _projections) {
-        if (!_send_buf->append_binary_value(expr->get_value(row).cast_to(expr->col_type()),
+        ExprValue expr_value;
+        if (row != nullptr) {
+            expr_value = expr->get_value(row).cast_to(expr->col_type());
+        } else {
+            expr_value = VectorizeHelpper::get_vectorized_value((*columns)[field_idx].get(), row_idx).cast_to(expr->col_type());
+        }
+        if (state->need_convert_charset) {
+            int ret = expr_value.convert_charset(state->table_charset, state->connection_charset);
+            if (ret < 0) {
+                DB_FATAL("Fail to convert_charset, table_charset: %d, connection_charset: %d, value: %s",
+                          state->table_charset, state->connection_charset, expr_value.get_string().c_str());
+                return -1;
+            }
+        }
+        if (!_send_buf->append_binary_value(expr_value,
                 _fields[field_idx].type, null_map.get(), field_idx, 2)) {
             DB_FATAL("Failed to append table cell.");
             return -1;
@@ -1035,6 +1240,18 @@ void PacketNode::find_place_holder(std::unordered_multimap<int, ExprNode*>& plac
         expr->find_place_holder(placeholders);
     }
 }
+
+int PacketNode::predicate_pushdown(std::vector<ExprNode*>& input_exprs) {
+    if (_children.size() > 0) {
+        _children[0]->predicate_pushdown(input_exprs);
+    }
+    if (input_exprs.size() > 0) {
+        add_filter_node_as_child(input_exprs);
+    }
+    input_exprs.clear();
+    return 0;
+}
+
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

@@ -17,7 +17,7 @@
 #include "query_context.h"
 
 namespace baikaldb {
-
+DECLARE_int32(arrow_multi_threads);
 int AggNode::init(const pb::PlanNode& node) {
     int ret = 0;
     ret = ExecNode::init(node);
@@ -58,6 +58,9 @@ int AggNode::init(const pb::PlanNode& node) {
     _agg_tuple_id = node.derive_node().agg_node().agg_tuple_id();
     _hash_map.init(12301);
     _iter = _hash_map.end();
+    if (node.derive_node().agg_node().has_arrow_ignore_tuple_id()) {
+        _arrow_ignore_tuple_id = node.derive_node().agg_node().arrow_ignore_tuple_id();
+    }
     return 0;
 }
 
@@ -98,6 +101,166 @@ int AggNode::expr_optimize(QueryContext* ctx) {
     return 0;
 }
 
+bool AggNode::can_use_arrow_vector() {
+    for (auto& expr : _group_exprs) {
+        if (!expr->can_use_arrow_vector()) {
+            return false;
+        }
+        if (expr->col_type() == pb::DOUBLE || expr->col_type() == pb::FLOAT) {
+            return false;
+        }
+        if (!expr->is_slot_ref()) {
+            continue;
+        }
+    }
+    for (auto& expr : _agg_fn_calls) {
+        if (!expr->can_use_arrow_vector()) {
+            return false;
+        }
+    }
+    for (auto& c : _children) {
+        if (!c->can_use_arrow_vector()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+int AggNode::vectorize_build_group_by_exprs(RuntimeState* state, 
+                                            ExprNode* group_by_expr, 
+                                            std::vector<arrow::FieldRef>& group_by_fields,
+                                            std::set<std::string>& key_field_names,
+                                            std::vector<arrow::compute::Expression>& generate_projection_exprs,
+                                            std::vector<std::string>& generate_projection_exprs_names) {
+    int ret = group_by_expr->transfer_to_arrow_expression();
+    if (ret != 0) {
+        DB_FATAL_STATE(state, "get arrow groupby field ref fail");
+        return -1;
+    }
+    if (group_by_expr->arrow_expr().field_ref() != nullptr) {
+        auto field_ref = group_by_expr->arrow_expr().field_ref();
+        if (key_field_names.count(*(field_ref->name())) > 0) {
+            // 去重, 已经在group by字段里, 不需要额外添加, 重复添加会导致arrow执行失败
+            return 0;
+        }
+        group_by_fields.emplace_back(*field_ref);
+        key_field_names.insert(*(field_ref->name()));
+    } else {
+        // 需要构建临时列
+        generate_projection_exprs.emplace_back(group_by_expr->arrow_expr());
+        std::string tmp_name = "tmp_" + std::to_string(generate_projection_exprs.size());
+        generate_projection_exprs_names.emplace_back(tmp_name);
+        group_by_fields.emplace_back(arrow::FieldRef(tmp_name));
+    }
+    return 0;
+}
+
+int AggNode::build_arrow_declaration(RuntimeState* state) {
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
+    int ret = 0;
+    std::vector<arrow::FieldRef> group_by_fields;
+    std::vector<arrow::compute::Aggregate> aggregates;
+    // group by列
+    std::set<std::string> key_field_names;
+    std::vector<arrow::compute::Expression> generate_projection_exprs;
+    std::vector<std::string> generate_projection_exprs_names;
+    group_by_fields.reserve(_group_exprs.size());
+    aggregates.reserve(_agg_fn_calls.size());
+    for (auto& group_field : _group_exprs) {
+        if (0 != vectorize_build_group_by_exprs(state, group_field, group_by_fields, key_field_names, generate_projection_exprs, generate_projection_exprs_names)) {
+            return -1;
+        }
+    }
+    // 特殊处理multi distinct
+    // 如select count(distinct a), count(distinct b) from t group by c;
+    // merge agg node(multi_distinct expr) group by c -> merge agg node(multi_distinct expr) group by c -> agg node(multi_distinct expr) group by c
+    // ====>
+    // merge agg node(multi_distinct expr) group by c -> merge agg node(ignore multi_distinct expr) group by a,b,c -> agg node(ignore multi_distinct expr) group by a,b,c
+    // 同时store必须开启向量化执行避免行列混合
+    bool transfer_multi_distinct_to_group_by = false;
+    bool has_multi_distinct = false;
+    if (_node_type == pb::AGG_NODE || (_node_type == pb::MERGE_AGG_NODE && _parent->node_type() == pb::MERGE_AGG_NODE)) {
+        transfer_multi_distinct_to_group_by = true;
+    }
+    for (int i = 0; i < _agg_fn_calls.size(); ++i) {
+        if (_agg_fn_calls[i]->is_multi_distinct_agg()) { 
+            has_multi_distinct = true;
+        }
+    }
+
+    bool has_group_by = group_by_fields.size() > 0 || (transfer_multi_distinct_to_group_by && has_multi_distinct);
+    for (int i = 0; i < _agg_fn_calls.size(); ++i) {
+        if (transfer_multi_distinct_to_group_by && _agg_fn_calls[i]->is_multi_distinct_agg()) {
+            for (auto& c : _agg_fn_calls[i]->children()) {
+                if (0 != vectorize_build_group_by_exprs(state, c, group_by_fields, key_field_names, generate_projection_exprs, generate_projection_exprs_names)) {
+                    return -1;
+                }
+            }
+            continue;
+        }
+        ret = _agg_fn_calls[i]->transfer_to_arrow_agg_function(aggregates, 
+                                                               has_group_by, 
+                                                               _is_merger, 
+                                                               generate_projection_exprs, 
+                                                               generate_projection_exprs_names);
+        if (ret != 0) {
+            DB_FATAL_STATE(state, "get arrow agg function fail");
+            return ret;
+        }
+    }
+    bool need_add_projections = (generate_projection_exprs.size() > 0);
+    // aggnode很恶心, node输出schema是{groupBy key_fields list, agg_func_fields}
+    // 所以不在group by里的key, 需要额外加first聚合取第一个值
+    // 并且node输出会重排列顺序, 需要注意
+    for (auto& tuple : state->tuple_descs()) {
+        if (tuple.tuple_id() == _arrow_ignore_tuple_id
+                || tuple.tuple_id() == _agg_tuple_id) {
+            continue;
+        }
+        for (const auto& slot : tuple.slots()) {
+            std::string name = std::to_string(tuple.tuple_id()) + "_" + std::to_string(slot.slot_id());
+            if (key_field_names.count(name) == 0) {
+                if (FLAGS_arrow_multi_threads > 0 && group_by_fields.size() > 0) {
+                    aggregates.emplace_back("hash_one", 
+                                            /*options*/nullptr, 
+                                            arrow::FieldRef(name), 
+                                            /*new field name*/name);
+                } else {
+                    // AGG first需要arrow 13.0版本, first不能parallel
+                    aggregates.emplace_back(group_by_fields.empty() ? "first" : "hash_first", 
+                                            /*options*/nullptr, 
+                                            arrow::FieldRef(name), 
+                                            /*new field name*/name);
+                    state->vectorlized_parallel_execution = false;
+                }
+            }
+            if (need_add_projections) {
+                generate_projection_exprs.emplace_back(arrow::compute::field_ref(name));
+                generate_projection_exprs_names.emplace_back(name);
+            }
+        }
+    }
+    for (auto c : _children) {
+        ret = c->build_arrow_declaration(state);
+        if (ret < 0) {
+            return ret;
+        }
+    }
+    if (need_add_projections) {
+        for (int i = 0; i < _agg_fn_calls.size(); ++i) {
+            _agg_fn_calls[i]->add_agg_projection_slot_ref(_is_merger, generate_projection_exprs, generate_projection_exprs_names);
+        }
+        arrow::acero::Declaration dec{"project", arrow::acero::ProjectNodeOptions{std::move(generate_projection_exprs), std::move(generate_projection_exprs_names)}};
+        LOCAL_TRACE_ARROW_PLAN(dec);
+        state->append_acero_declaration(dec);
+    }
+    arrow::acero::Declaration dec{"aggregate",
+            arrow::acero::AggregateNodeOptions{aggregates, group_by_fields}};
+    LOCAL_TRACE_ARROW_PLAN(dec);
+    state->append_acero_declaration(dec);
+    return 0;
+}
+
 int AggNode::open(RuntimeState* state) {
     START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
     int ret = 0;
@@ -119,7 +282,13 @@ int AggNode::open(RuntimeState* state) {
             DB_WARNING_STATE(state, "agg open fail, ret:%d", ret);
             return ret;
         }
+        if (agg->is_multi_distinct_agg() && state->execute_type == pb::EXEC_ARROW_ACERO) {
+            state->force_vectorize = true; // store only, for rocksdb scan node
+        }
     }
+    ON_SCOPE_EXIT(([this]() {
+        _iter = _hash_map.begin();
+    }));
     _mem_row_desc = state->mem_row_desc();
 
     bool use_limit = false;
@@ -129,14 +298,15 @@ int AggNode::open(RuntimeState* state) {
         use_limit = true;
     }
 
+
     TimeCost cost;
     int64_t agg_time = 0;
     int64_t scan_time = 0;
+    int row_cnt = 0;
     for (auto child : _children) {
         bool eos = false;
         do {
             if (state->is_cancelled()) {
-                _iter = _hash_map.begin();
                 DB_WARNING_STATE(state, "cancelled");
                 return 0;
             }
@@ -144,9 +314,12 @@ int AggNode::open(RuntimeState* state) {
             RowBatch batch;
             ret = child->get_next(state, &batch, &eos);
             if (ret < 0) {
-                _iter = _hash_map.begin();
                 DB_WARNING_STATE(state, "child->get_next fail, ret:%d", ret);
                 return ret;
+            }
+            set_node_exec_type(child->node_exec_type());
+            if (_node_exec_type == pb::EXEC_ARROW_ACERO) {
+                return 0;
             }
             scan_time += cost.get_time();
             cost.reset();
@@ -154,10 +327,9 @@ int AggNode::open(RuntimeState* state) {
             int64_t release_size = 0;
             process_row_batch(state, batch, used_size, release_size);
             agg_time += cost.get_time();
-            _row_cnt += batch.size();
-            state->memory_limit_release(_row_cnt, release_size);
-            if (state->memory_limit_exceeded(_row_cnt, used_size) != 0) {
-                _iter = _hash_map.begin();
+            row_cnt += batch.size();
+            state->memory_limit_release(row_cnt, release_size);
+            if (state->memory_limit_exceeded(row_cnt, used_size) != 0) {
                 DB_WARNING_STATE(state, "memory limit exceeded");
                 return -1;
             }
@@ -171,7 +343,7 @@ int AggNode::open(RuntimeState* state) {
         } while (!eos);
     }
     LOCAL_TRACE_DESC << "agg time cost:" << agg_time << 
-        " scan time cost:" << scan_time << " rows:" << _row_cnt;
+        " scan time cost:" << scan_time << " rows:" << row_cnt;
 
     // 兼容mysql: select count(*) from t; 无数据时返回0
     if (_hash_map.size() == 0 && _group_exprs.size() == 0) {
@@ -188,7 +360,6 @@ int AggNode::open(RuntimeState* state) {
             _hash_map.insert(key.data(), row.release());
         }
     }
-    _iter = _hash_map.begin();
     return 0;
 }
 
@@ -234,6 +405,10 @@ void AggNode::process_row_batch(RuntimeState* state, RowBatch& batch, int64_t& u
         } else {
             release_size += cur_row->used_size();
         }
+        if (*agg_row == nullptr) {
+            DB_FATAL("seek nullptr, key:%s", str_to_hex(key.data()).c_str());
+            return;
+        }
         if (_is_merger) {
             AggFnCall::merge_all(_agg_fn_calls, key.data(), cur_row, *agg_row, used_size);
         } else {
@@ -246,7 +421,9 @@ int AggNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
     START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), GET_NEXT_TRACE, ([this](TraceLocalNode& local_node) {
         local_node.set_affect_rows(_num_rows_returned);
     }));
-
+    if (node_exec_type() == pb::EXEC_ARROW_ACERO) {
+        return 0;
+    }
     while (1) {
         if (state->is_cancelled()) {
             DB_WARNING_STATE(state, "cancelled");
@@ -260,7 +437,7 @@ int AggNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         if (batch->is_full()) {
             return 0;
         }
-        AggFnCall::finalize_all(_agg_fn_calls, _iter->first, _iter->second);
+        AggFnCall::finalize_all(_agg_fn_calls, _iter->first, _iter->second, _is_merger);
         batch->move_row(std::move(std::unique_ptr<MemRow>(_iter->second)));
         _num_rows_returned++;
         _iter->second = nullptr;

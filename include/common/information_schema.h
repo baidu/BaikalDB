@@ -51,6 +51,9 @@ private:
     void init_partition_split_info();
     void init_region_status();
     void init_learner_region_status();
+    void init_region_rollup_status();
+    void init_olap_tables();
+    void init_afs_partitions();
     void init_invalid_learner_region();
     void init_columns();
     void init_statistics();
@@ -114,6 +117,7 @@ private:
     void init_tablespaces();
     void init_user_privileges();
     void init_binlog_region_infos();
+    void init_db_infos();
     void query_regions_concurrency(std::unordered_map<int64_t, std::unordered_map<int64_t, std::vector<pb::StoreRes>>>& table_id_to_binlog_info, 
     std::unordered_map<int64_t, std::unordered_map<int64_t, std::vector<pb::RegionInfo>>>& partition_binlog_region_infos);
     void process_binlogs_region_info(std::vector<std::vector<std::string>>& result_rows, std::unordered_map<int64_t, 

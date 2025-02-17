@@ -33,6 +33,8 @@ int InsertNode::init(const pb::PlanNode& node) {
     _is_merge = insert_node.is_merge();
     _row_ttl_duration = insert_node.row_ttl_duration();
     DB_DEBUG("_row_ttl_duration:%ld", _row_ttl_duration);
+    _watt_stats_version = insert_node.watt_stats_version();
+    DB_DEBUG("_watt_stats_version: %lu", _watt_stats_version);
     _need_ignore = insert_node.need_ignore();
     _ddl_need_write = insert_node.ddl_need_write();
     _ddl_index_id = insert_node.ddl_index_id();
@@ -244,8 +246,11 @@ int InsertNode::insert_values_for_prepared_stmt(std::vector<SmartRecord>& insert
                 DB_WARNING("expr open fail");
                 return -1;
             }
-            if (0 != row->set_value(row->get_field_by_idx(insert_fields[col_idx]->pb_idx),
-                  expr->get_value(nullptr).cast_to(insert_fields[col_idx]->type))) {
+            ExprValue value = expr->get_value(nullptr);
+            value.cast_to(insert_fields[col_idx]->type);
+            if (value.is_null()) {
+                _factory->fill_default_value(row, *insert_fields[col_idx]);
+            } else if (0 != row->set_value(row->get_field_by_idx(insert_fields[col_idx]->pb_idx), value)) {
                 DB_WARNING("fill insert value failed");
                 expr->close();
                 return -1;

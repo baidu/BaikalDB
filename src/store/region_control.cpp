@@ -58,6 +58,33 @@ int RegionControl::remove_data(int64_t drop_region_id) {
     return 0;
 }
 
+int RegionControl::remove_data(int64_t drop_region_id, int64_t drop_index_id) {
+    rocksdb::WriteOptions options;
+    MutTableKey start_key;
+    MutTableKey end_key;
+    start_key.append_i64(drop_region_id).append_i64(drop_index_id);
+
+    end_key.append_i64(drop_region_id).append_i64(drop_index_id);
+    end_key.append_u64(UINT64_MAX);
+
+    auto rocksdb = RocksWrapper::get_instance();
+    auto data_cf = rocksdb->get_data_handle();
+    if (data_cf == nullptr) {
+        DB_WARNING("get rocksdb data column family failed, region_id: %ld, index_id: %ld", drop_region_id, drop_index_id);
+        return -1;
+    }
+    TimeCost cost;
+    auto res = rocksdb->remove_range(options, data_cf, 
+            start_key.data(), end_key.data(), true);
+    if (!res.ok()) {
+        DB_WARNING("remove_range error: code=%d, msg=%s, region_id: %ld, index_id: %ld", 
+            res.code(), res.ToString().c_str(), drop_region_id, drop_index_id);
+        return -1;
+    }
+    DB_WARNING("region clear data, remove_range cost:%ld, region_id: %ld, index_id: %ld", cost.get_time(), drop_region_id, drop_index_id);
+    return 0;
+}
+
 int RegionControl::remove_cold_data(int64_t drop_region_id) {
     TimeCost cost;
     MutTableKey region_start;
@@ -74,6 +101,25 @@ int RegionControl::remove_cold_data(int64_t drop_region_id) {
         return -1;
     }
     DB_WARNING("region_id: %ld delete files in range, cost: %ld", drop_region_id, cost.get_time());
+    return 0;
+}
+
+int RegionControl::remove_cold_index_data(int64_t drop_region_id, int64_t drop_index_id) {
+    TimeCost cost;
+    MutTableKey start_key;
+    MutTableKey end_key;
+    start_key.append_i64(drop_region_id).append_i64(drop_index_id);
+    end_key.append_i64(drop_region_id).append_i64(drop_index_id).append_u64(UINT64_MAX);
+
+    rocksdb::Slice begin(start_key.data());
+    rocksdb::Slice end(end_key.data());
+    auto rocksdb = RocksWrapper::get_instance();
+    auto s = rocksdb->remove_cold_range(begin, end);
+    if (!s.ok()) {
+        DB_FATAL("region_id: %ld, index_id: %ld delete files in range failed %s", drop_region_id, drop_index_id, s.ToString().c_str());
+        return -1;
+    }
+    DB_WARNING("region_id: %ld, index_id: %ld delete files in range, cost: %ld", drop_region_id, drop_index_id, cost.get_time());
     return 0;
 }
 

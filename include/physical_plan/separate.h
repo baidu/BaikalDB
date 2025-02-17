@@ -86,7 +86,9 @@ private:
 
     SelectManagerNode* create_select_manager_node();
     bool need_separate_single_txn(QueryContext* ctx, const int64_t main_table_id);
-    bool need_separate_plan(QueryContext* ctx, const int64_t main_table_id); 
+    bool need_separate_plan(QueryContext* ctx, const int64_t main_table_id);
+
+    int separate_subquery(QueryContext* ctx, ExecNode* exec_node);
 
     SchemaFactory* _factory = SchemaFactory::get_instance();
     int64_t _row_ttl_duration = 0;

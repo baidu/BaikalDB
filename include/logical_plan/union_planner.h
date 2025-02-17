@@ -25,8 +25,8 @@ public:
         LogicalPlanner(ctx),
         _union_stmt(nullptr) {}
 
-    UnionPlanner(QueryContext* ctx, const SmartPlanTableCtx& plan_state) : 
-        LogicalPlanner(ctx, plan_state),
+    UnionPlanner(QueryContext* ctx, const SmartUniqueIdCtx& uniq_ctx, const SmartPlanTableCtx& plan_state) : 
+        LogicalPlanner(ctx, uniq_ctx, plan_state),
         _union_stmt(nullptr) {}
 
     virtual ~UnionPlanner() {}
@@ -40,7 +40,8 @@ private:
     int create_common_plan_node();
     void create_union_node();
     int parse_limit();
-    void create_dual_tuple_descs();
+    int create_dual_scan_nodes();
+    int get_slot_column_mapping();
 
     bool is_literal(pb::Expr& expr) {
         switch (expr.nodes(0).node_type()) {
@@ -71,5 +72,8 @@ private:
     bool                         _is_distinct = false;
     std::vector<pb::PrimitiveType> _select_fields_type;
     std::map<std::string, int32_t> _name_slot_id_mapping;
+
+    // UnionNode下各个select对应子查询的tuple_id和table_id
+    std::vector<std::pair<int32_t, int64_t>> _subquery_tuple_table_id_vec;
 };
 } //namespace baikaldb

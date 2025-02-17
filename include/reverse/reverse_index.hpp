@@ -113,17 +113,22 @@ int ReverseIndex<Schema>::handle_reverse(
     std::shared_ptr<std::map<std::string, ReverseNode>> cache_seg_res;
     std::shared_ptr<std::map<std::string, ReverseNode>> seg_res =
         std::make_shared<std::map<std::string, ReverseNode>>();
+    int ret = 0;
     if (_is_seg_cache) {
         if (_seg_cache.find(word, &cache_seg_res) != 0) {
-            Schema::segment(word, pk, record, _segment_type, _name_field_id_map, flag, *seg_res, _charset);
+            ret = Schema::segment(word, pk, record, _segment_type, _name_field_id_map, flag, *seg_res, _charset);
             _seg_cache.add(word, seg_res);
         } else {
             *seg_res = *cache_seg_res;
             // 填充pk，flag信息
-            Schema::segment(word, pk, record, _segment_type, _name_field_id_map, flag, *seg_res, _charset);
+            ret = Schema::segment(word, pk, record, _segment_type, _name_field_id_map, flag, *seg_res, _charset);
         }
     } else {
-        Schema::segment(word, pk, record, _segment_type, _name_field_id_map, flag, *seg_res, _charset);
+        ret = Schema::segment(word, pk, record, _segment_type, _name_field_id_map, flag, *seg_res, _charset);
+    }
+    if (ret != 0) {
+        DB_FATAL("segment fail");
+        return -1;
     }
     auto map_it = seg_res->begin();
     while (map_it != seg_res->end()) {

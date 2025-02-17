@@ -66,16 +66,8 @@ OnRPCDone::OnRPCDone(FetcherStore* fetcher_store, RuntimeState* state, ExecNode*
     }
     std::string resource_tag = FLAGS_insulate_fetcher_resource_tag.empty() ? FLAGS_fetcher_resource_tag : FLAGS_insulate_fetcher_resource_tag;
     if (!resource_tag.empty()) {
-        std::string baikaldb_logical_room = SchemaFactory::get_instance()->get_logical_room();
-        for (auto& peer : _info.peers()) {
-            auto status = SchemaFactory::get_instance()->get_instance_status(peer);
-            if (status.status == pb::NORMAL 
-                    && status.resource_tag == resource_tag 
-                    && status.logical_room == baikaldb_logical_room) {
-                _store_addr = peer;
-                break;
-            }
-        }
+        // region分组优化，让每个store均匀请求region
+        pick_addr_for_resource_tag(resource_tag, _store_addr);
     } 
     if (_store_addr.empty()) {
         if (_info.leader() == "0.0.0.0:0" || _info.leader() == "") {
@@ -84,6 +76,7 @@ OnRPCDone::OnRPCDone(FetcherStore* fetcher_store, RuntimeState* state, ExecNode*
             _store_addr = _info.leader();
         }
     }
+    _meta_id = ::baikaldb::get_meta_id(_info.table_id());
     async_rpc_region_count << 1;
     DB_DONE(DEBUG, "OnRPCDone");
 }
@@ -151,6 +144,7 @@ ErrorType OnRPCDone::fill_request() {
     _request.set_log_id(_state->log_id());
     _request.set_sql_sign(_state->sign);
     _request.mutable_extra_req()->set_sign_latency(_fetcher_store->sign_latency);
+    _request.set_execute_type(_state->execute_type);
     for (auto& desc : _state->tuple_descs()) {
         if (desc.has_tuple_id()){
             _request.add_tuples()->CopyFrom(desc);
@@ -251,11 +245,20 @@ ErrorType OnRPCDone::fill_request() {
         scan_node->current_index_unlock();
     }
 
+    if (_meta_id != 0) {
+        if (del_meta_info(_request) != 0) {
+            DB_FATAL("Fail to del_meta_info");
+            return E_FATAL;
+        }
+    }
     return E_OK;
 }   
 
 // 指定访问resource_tag读从
 void OnRPCDone::select_resource_insulate_read_addr(const std::string& insulate_resource_tag) {
+    // offline强制隔离
+    // TODO:全局索引update也会有SELECT，查询不在事务会不会有问题
+    _state->txn_id = 0;
     std::vector<std::string> valid_addrs;
     if (_info.learners_size() > 0) {
         // 指定访问的resource tag, 可能是learner，可能是follower, 先判断有没有满足条件的learner
@@ -276,14 +279,14 @@ void OnRPCDone::select_resource_insulate_read_addr(const std::string& insulate_r
             // 有可选learner
             _addr = valid_addrs[0];
             pb::Status addr_status = pb::NORMAL;
-            FetcherStore::choose_opt_instance(_info.region_id(), valid_addrs, _addr, addr_status, nullptr);
+            FetcherStore::choose_opt_instance(_info.region_id(), valid_addrs, "", _addr, addr_status, nullptr);
             _resource_insulate_read = true;
         } else {
             // 无可选learner
             pb::Status addr_status = pb::NORMAL;
             std::set<std::string> cannot_access_peers;
             _fetcher_store->peer_status.get_cannot_access_peer(_info.region_id(), cannot_access_peers);
-            FetcherStore::choose_opt_instance(_info.region_id(), _info.peers(), _addr, addr_status, nullptr, cannot_access_peers);
+            FetcherStore::choose_opt_instance(_info.region_id(), _info.peers(), "", _addr, addr_status, nullptr, cannot_access_peers);
         }
         _request.set_select_without_leader(true);
         _resource_insulate_read = true;
@@ -292,11 +295,11 @@ void OnRPCDone::select_resource_insulate_read_addr(const std::string& insulate_r
         pb::Status addr_status = pb::NORMAL;
         if (valid_addrs.size() > 0) {
             _addr = valid_addrs[0];
-            FetcherStore::choose_opt_instance(_info.region_id(), valid_addrs, _addr, addr_status, nullptr);
+            FetcherStore::choose_opt_instance(_info.region_id(), valid_addrs, "", _addr, addr_status, nullptr);
         } else {
             std::set<std::string> cannot_access_peers;
             _fetcher_store->peer_status.get_cannot_access_peer(_info.region_id(), cannot_access_peers);
-            FetcherStore::choose_opt_instance(_info.region_id(), _info.peers(), _addr, addr_status, nullptr, cannot_access_peers);
+            FetcherStore::choose_opt_instance(_info.region_id(), _info.peers(), "", _addr, addr_status, nullptr, cannot_access_peers);
         }
         _request.set_select_without_leader(true);
         _resource_insulate_read = true;
@@ -324,24 +327,6 @@ void OnRPCDone::select_addr() {
         if (_state->need_use_read_index) {
             _request.mutable_extra_req()->set_use_read_idx(true);
         }
-        // 读随机访问所有peer
-        if (FLAGS_read_random_select_peer && _retry_times == 0) {
-            FetcherStore::other_normal_peer_to_leader(_info, "");
-            _addr = _info.leader();
-        }
-        // 倾向访问的store集群，仅第一次有效, 如pap-bj db第一次优先访问pap-bj的store
-        if (FLAGS_fetcher_resource_tag != "" && _retry_times == 0) {
-            std::string baikaldb_logical_room = SchemaFactory::get_instance()->get_logical_room();
-            for (auto& peer : _info.peers()) {
-                auto status = SchemaFactory::get_instance()->get_instance_status(peer);
-                if (status.status == pb::NORMAL 
-                        && status.resource_tag == FLAGS_fetcher_resource_tag
-                        && status.logical_room == baikaldb_logical_room) {
-                    _addr = peer;
-                    break;
-                }
-            }
-        }
     }
     
     // 是否指定访问资源隔离, 如offline
@@ -351,7 +336,7 @@ void OnRPCDone::select_addr() {
         && !_state->client_conn()->user_info->resource_tag.empty()) {
         insulate_resource_tag = _state->client_conn()->user_info->resource_tag;
     }
-    if (!insulate_resource_tag.empty() && _op_type == pb::OP_SELECT && _state->txn_id == 0) {
+    if (!insulate_resource_tag.empty() && _op_type == pb::OP_SELECT) {
         return select_resource_insulate_read_addr(insulate_resource_tag);
     }
 
@@ -363,11 +348,11 @@ void OnRPCDone::select_addr() {
         if (!valid_learners.empty()) {
             _addr = valid_learners[0];
             pb::Status addr_status = pb::NORMAL;
-            FetcherStore::choose_opt_instance(_info.region_id(), valid_learners, _addr, addr_status, nullptr);
+            FetcherStore::choose_opt_instance(_info.region_id(), valid_learners, "", _addr, addr_status, nullptr);
             _resource_insulate_read = true;
         } else {
             pb::Status addr_status = pb::NORMAL;
-            FetcherStore::choose_opt_instance(_info.region_id(), _info.peers(), _addr, addr_status, nullptr);
+            FetcherStore::choose_opt_instance(_info.region_id(), _info.peers(), "", _addr, addr_status, nullptr);
         }
         _request.set_select_without_leader(true);
     } else if (_op_type == pb::OP_SELECT && _state->txn_id == 0 
@@ -394,9 +379,9 @@ void OnRPCDone::select_addr() {
         // 多机房优化
         if (_info.learners_size() > 0) {
             pb::Status addr_status = pb::NORMAL;
-            FetcherStore::choose_opt_instance(_info.region_id(), _info.peers(), _addr, addr_status, nullptr);
+            FetcherStore::choose_opt_instance(_info.region_id(), _info.peers(), "", _addr, addr_status, nullptr);
             pb::Status backup_status = pb::NORMAL;
-            FetcherStore::choose_opt_instance(_info.region_id(), _info.learners(), _backup, backup_status, nullptr);
+            FetcherStore::choose_opt_instance(_info.region_id(), _info.learners(), "", _backup, backup_status, nullptr);
             bool backup_can_access = (!_backup.empty()) && (backup_status == pb::NORMAL) && 
                                         _fetcher_store->peer_status.can_access(_info.region_id(), _backup);
             if (addr_status != pb::NORMAL && backup_can_access && 
@@ -411,7 +396,11 @@ void OnRPCDone::select_addr() {
         } else {
             if (_retry_times == 0) {
                 pb::Status addr_status = pb::NORMAL;
-                FetcherStore::choose_opt_instance(_info.region_id(), _info.peers(), _addr, addr_status, &_backup);
+                bool read_random_select_peer = FLAGS_read_random_select_peer;
+                if (_state->need_read_rolling) {
+                    read_random_select_peer = true;
+                }
+                FetcherStore::choose_opt_instance(_info.region_id(), _info.peers(), FLAGS_fetcher_resource_tag, _addr, addr_status, &_backup, {}, read_random_select_peer);
             }
         }
         _request.set_select_without_leader(true);
@@ -428,6 +417,7 @@ void OnRPCDone::select_addr() {
 }
 
 ErrorType OnRPCDone::send_async() {
+    auto& _response = *_response_ptr;
     _cntl.Reset();
     _cntl.set_log_id(_state->log_id());
     _response.Clear();
@@ -443,7 +433,7 @@ ErrorType OnRPCDone::send_async() {
         option.backup_request_ms = _fetcher_store->dynamic_timeout_ms;
     }
 
-    if (!_state->is_ddl_work() && _request.op_type() == 4 && _state->explain_type == EXPLAIN_NULL) {
+    if (!_state->is_ddl_work() && _request.op_type() == pb::OP_SELECT && _state->explain_type == EXPLAIN_NULL) {
         int32_t sql_exec_time_left = FLAGS_fetcher_request_timeout;
         if (FLAGS_sql_exec_timeout > 0) {
             int64_t sql_exec_time_left = std::min(FLAGS_sql_exec_timeout - _state->get_cost_time() / 1000,
@@ -515,12 +505,13 @@ ErrorType OnRPCDone::send_async() {
 
 void OnRPCDone::Run() {
     DB_DONE(DEBUG, "fetch store req: %s", _request.ShortDebugString().c_str());
-    DB_DONE(DEBUG, "fetch store res: %s", _response.ShortDebugString().c_str());
+    DB_DONE(DEBUG, "fetch store res: %s", _response_ptr->ShortDebugString().c_str());
     std::string remote_side = butil::endpoint2str(_cntl.remote_side()).c_str();
     int64_t query_cost = _query_time.get_time();
     if (query_cost > FLAGS_print_time_us || _retry_times > 0) {
-        DB_DONE(WARNING, "version:%ld time:%ld rpc_time:%ld ip:%s",
-                 _info.version(), _total_cost.get_time(), query_cost, remote_side.c_str());
+        DB_DONE(WARNING, "version:%ld time:%ld rpc_time:%ld ip:%s, dynamic_timeout_ms:%ld vectorize:[%d, %d]",
+                 _info.version(), _total_cost.get_time(), query_cost, remote_side.c_str(), 
+                 _fetcher_store->dynamic_timeout_ms, _request.execute_type(), _response_ptr->execute_type());
     }
     total_send_request << query_cost;
     if (!_backup.empty() && _backup != _addr) {
@@ -581,6 +572,7 @@ void OnRPCDone::Run() {
 }
 
 ErrorType OnRPCDone::handle_version_old() {
+    auto& _response = *_response_ptr;
     SchemaFactory* schema_factory = SchemaFactory::get_instance();
     DB_DONE(WARNING, "VERSION_OLD, now:%s", _info.ShortDebugString().c_str());
     if (_response.regions_size() >= 2) {
@@ -684,15 +676,21 @@ ErrorType OnRPCDone::handle_version_old() {
 }
 
 ErrorType OnRPCDone::handle_response(const std::string& remote_side) {
+    auto& _response = *_response_ptr;
+    if (_meta_id != 0) {
+        if (add_meta_info(_response, _meta_id) != 0) {
+            DB_FATAL("Fail to del_meta_info");
+            return E_FATAL;
+        }
+    }
     SchemaFactory* schema_factory = SchemaFactory::get_instance();
     if (_cntl.has_backup_request()) {
-        DB_DONE(WARNING, "has_backup_request");
+        DB_DONE(WARNING, "has_backup_request, rpc_time:%ld ip:%s, dynamic_timeout_ms:%ld", 
+                _query_time.get_time(), remote_side.c_str(), _fetcher_store->dynamic_timeout_ms);
         has_backup_send_request << _query_time.get_time();
         // backup先回，整体时延包含dynamic_timeout_ms，不做统计
         // remote_side != _addr 说明backup先回
         if (remote_side != _addr) {
-            //业务快速置状态
-            schema_factory->update_instance(_addr, pb::BUSY, true, false);
             _state->need_statistics = false;
             // backup为learner需要设置_resource_insulate_read为true
             if (_info.learners_size() > 0) {
@@ -732,7 +730,8 @@ ErrorType OnRPCDone::handle_response(const std::string& remote_side) {
     // 要求读主、store version old、store正在shutdown/init，在leader重试
     if (_response.errcode() == pb::NOT_LEADER) {
         // 兼容not leader报警，匹配规则 NOT_LEADER.*retry:4
-        DB_DONE(WARNING, "NOT_LEADER, new_leader:%s, retry:%d", _response.leader().c_str(), _retry_times);
+        DB_DONE(WARNING, "NOT_LEADER, new_leader:%s, retry:%d, errmsg: %s", 
+            _response.leader().c_str(), _retry_times, _response.errmsg().c_str());
         // 临时修改，后面改成store_access
         if (_retry_times > 1 && _response.leader() == "0.0.0.0:0") {
             schema_factory->update_instance(remote_side, pb::FAULTY, false, false);
@@ -777,7 +776,7 @@ ErrorType OnRPCDone::handle_response(const std::string& remote_side) {
         return E_RETURN;
     }
     if (_response.errcode() == pb::REGION_NOT_EXIST || _response.errcode() == pb::INTERNAL_ERROR) {
-        DB_DONE(WARNING, "new_leader:%s，errcode: %s", _response.leader().c_str(), pb::ErrCode_Name(_response.errcode()).c_str());
+        DB_DONE(WARNING, "new_leader:%s, errcode: %s", _response.leader().c_str(), pb::ErrCode_Name(_response.errcode()).c_str());
         if (_response.errcode() == pb::REGION_NOT_EXIST) {
             pb::RegionInfo tmp_info;
             // 已经被merge了并且store已经删掉了，按正常处理
@@ -785,6 +784,10 @@ ErrorType OnRPCDone::handle_response(const std::string& remote_side) {
             if (ret != 0) {
                 DB_DONE(WARNING, "REGION_NOT_EXIST, region merge, new_leader:%s", _response.leader().c_str());
                 return E_OK;
+            }
+            // backup先回REGION_NOT_EXIST, 清空_backup 
+            if (remote_side == _backup) {
+                _backup.clear(); 
             }
         }
         schema_factory->update_instance(remote_side, pb::FAULTY, false, false);
@@ -894,64 +897,124 @@ ErrorType OnRPCDone::handle_response(const std::string& remote_side) {
         DB_DONE(FATAL, "_row_cnt:%ld > %ld max_select_rows", _fetcher_store->row_cnt.load(), FLAGS_max_select_rows);
         return E_BIG_SQL;
     }
-    std::shared_ptr<RowBatch> batch = std::make_shared<RowBatch>();
-    std::vector<int64_t> ttl_batch;
-    ttl_batch.reserve(100);
-    bool global_ddl_with_ttl = (_response.row_values_size() > 0 && _response.row_values_size() == _response.ttl_timestamp_size()) ? true : false;
-    int ttl_idx = 0;
-    int64_t used_size = 0;
-    for (auto& pb_row : _response.row_values()) {
-        if (pb_row.tuple_values_size() != _response.tuple_ids_size()) {
-            // brpc SelectiveChannel+backup_request有bug，pb的repeated字段merge到一起了
-            SQL_TRACE("backup_request size diff, tuple_values_size:%d tuple_ids_size:%d rows:%d", 
-                    pb_row.tuple_values_size(), _response.tuple_ids_size(), _response.row_values_size());
-            for (auto id : _response.tuple_ids()) {
-                SQL_TRACE("tuple_id:%d  ", id);
+    uint64_t returned_row_size = 0;
+    // EXEC_ROW: region只会返回memrow
+    // EXEC_ARROW_ACERO: region可能返回memrow, 可能返回arrow
+    if (_response.execute_type() == pb::EXEC_ROW) {
+        // 处理行存memrow
+        std::shared_ptr<RowBatch> batch = std::make_shared<RowBatch>();
+        std::vector<int64_t> ttl_batch;
+        ttl_batch.reserve(100);
+        bool global_ddl_with_ttl = (_response.row_values_size() > 0 && _response.row_values_size() == _response.ttl_timestamp_size()) ? true : false;
+        int ttl_idx = 0;
+        int64_t used_size = 0;
+        for (auto& pb_row : _response.row_values()) {
+            if (pb_row.tuple_values_size() != _response.tuple_ids_size()) {
+                // brpc SelectiveChannel+backup_request有bug，pb的repeated字段merge到一起了
+                SQL_TRACE("backup_request size diff, tuple_values_size:%d tuple_ids_size:%d rows:%d", 
+                        pb_row.tuple_values_size(), _response.tuple_ids_size(), _response.row_values_size());
+                for (auto id : _response.tuple_ids()) {
+                    SQL_TRACE("tuple_id:%d  ", id);
+                }
+                return E_RETRY;
             }
-            return E_RETRY;
+            std::unique_ptr<MemRow> row = _state->mem_row_desc()->fetch_mem_row();
+            for (int i = 0; i < _response.tuple_ids_size(); i++) {
+                int32_t tuple_id = _response.tuple_ids(i);
+                row->from_string(tuple_id, pb_row.tuple_values(i));
+            }
+            row->set_partition_id(_info.partition_id());
+            used_size += row->used_size();
+            if (used_size > 1024 * 1024LL) {
+                if (0 != _state->memory_limit_exceeded(_fetcher_store->row_cnt, used_size)) {
+                    BAIDU_SCOPED_LOCK(_fetcher_store->region_lock);
+                    _state->error_code = ER_TOO_BIG_SELECT;
+                    _state->error_msg.str("select reach memory limit");
+                    return E_FATAL;
+                }
+                used_size = 0;
+            }
+            batch->move_row(std::move(row));
+            if (global_ddl_with_ttl) {
+                int64_t time_us = _response.ttl_timestamp(ttl_idx++);
+                ttl_batch.emplace_back(time_us);
+                DB_DEBUG("region_id: %ld, ttl_timestamp: %ld", _region_id, time_us);
+            }
         }
-        std::unique_ptr<MemRow> row = _state->mem_row_desc()->fetch_mem_row();
-        for (int i = 0; i < _response.tuple_ids_size(); i++) {
-            int32_t tuple_id = _response.tuple_ids(i);
-            row->from_string(tuple_id, pb_row.tuple_values(i));
+        returned_row_size = batch->size();
+        if (global_ddl_with_ttl) {
+            BAIDU_SCOPED_LOCK(_fetcher_store->region_lock);
+            _fetcher_store->region_id_ttl_timestamp_batch[_region_id] = ttl_batch;
+            DB_DEBUG("_region_id: %ld, ttl_timestamp_size: %ld", _region_id, ttl_batch.size());
         }
-        used_size += row->used_size();
-        if (used_size > 1024 * 1024LL) {
-            if (0 != _state->memory_limit_exceeded(_fetcher_store->row_cnt, used_size)) {
-                BAIDU_SCOPED_LOCK(_fetcher_store->region_lock);
-                _state->error_code = ER_TOO_BIG_SELECT;
-                _state->error_msg.str("select reach memory limit");
+        if (_response.has_cmsketch() && _state->cmsketch != nullptr) {
+            _state->cmsketch->add_proto(_response.cmsketch());
+            DB_DONE(WARNING, "cmsketch:%s", _response.cmsketch().ShortDebugString().c_str());
+        }
+        {
+            BAIDU_SCOPED_LOCK(_fetcher_store->region_lock);
+            // merge可能会重复请求相同的region_id
+            if (_fetcher_store->region_batch.count(_region_id) == 1) {
+                _fetcher_store->region_batch[_region_id].set_row_data(batch);
+            } else {
+                //分裂单独处理start_key_sort
+                _fetcher_store->start_key_sort.emplace(_info.start_key(), _region_id);
+                _fetcher_store->region_batch[_region_id].set_row_data(batch);
+            }
+        }
+    } else {
+        // 处理列存arrow recordbatch
+        std::shared_ptr<arrow::Schema> schema = nullptr;
+        const auto& vector_rows = _response.mutable_extra_res()->vectorized_rows();
+        const auto& vector_schema = _response.mutable_extra_res()->vectorized_schema();
+        std::shared_ptr<arrow::RecordBatch> batch;
+        if (vector_rows.size() > 0) {
+            // 解析列存格式
+            std::shared_ptr<arrow::Buffer> schema_buffer = std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(vector_schema.data()),
+                static_cast<int64_t>(vector_schema.size()));
+            arrow::io::BufferReader schema_reader(schema_buffer);
+            auto schema_ret = arrow::ipc::ReadSchema(&schema_reader, nullptr);
+            if (schema_ret.ok()) {
+                schema = *schema_ret;
+            } else {
+                DB_WARNING("parser from schema error [%s]. ", schema_ret.status().ToString().c_str());
+                _state->error_code = ER_EXEC_PLAN_FAILED;
+                _state->error_msg.str("parse arrow schema fail");
                 return E_FATAL;
             }
-            used_size = 0;
+            // 解析列存数据
+            std::shared_ptr<arrow::Buffer> buffer = std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(vector_rows.data()),
+                static_cast<int64_t>(vector_rows.size()));
+            arrow::io::BufferReader buf_reader(buffer);
+            auto ret = arrow::ipc::ReadRecordBatch(schema, nullptr, arrow::ipc::IpcReadOptions::Defaults(), &buf_reader);
+            if (ret.ok()) {
+                batch = *ret;
+                returned_row_size = batch->num_rows();
+                //DB_WARNING("region: %ld return vector row: %ld, batch: %s", _region_id, returned_row_size, batch->ToString().c_str());
+            } else {
+                DB_WARNING("parser from array error [%s]. ", ret.status().ToString().c_str());
+                _state->error_code = ER_EXEC_PLAN_FAILED;
+                _state->error_msg.str("parse arrow data fail");
+                return E_FATAL;
+            }
+        } 
+        {
+            BAIDU_SCOPED_LOCK(_fetcher_store->region_lock);
+            if (schema != nullptr) {
+                _fetcher_store->arrow_schema = schema;
+            }
+            if (_fetcher_store->region_batch.count(_region_id) == 1) {
+                _fetcher_store->region_batch[_region_id].set_arrow_data(batch);
+            } else {
+                //分裂单独处理start_key_sort
+                _fetcher_store->start_key_sort.emplace(_info.start_key(), _region_id);
+                _fetcher_store->region_batch[_region_id].set_arrow_data(batch);
+            }
+            // buffer和解析出来的recordbatch是直接使用pb里的vectorized_rows内存, 是zero copy的
+            // 所以列存要求response生命周期比recordBatch生命周期长
+            _fetcher_store->region_vectorized_response[_region_id] = _response_ptr;
         }
-        batch->move_row(std::move(row));
-        if (global_ddl_with_ttl) {
-            int64_t time_us = _response.ttl_timestamp(ttl_idx++);
-            ttl_batch.emplace_back(time_us);
-            DB_DEBUG("region_id: %ld, ttl_timestamp: %ld", _region_id, time_us);
-        }
-    }
-    if (global_ddl_with_ttl) {
-        BAIDU_SCOPED_LOCK(_fetcher_store->region_lock);
-        _fetcher_store->region_id_ttl_timestamp_batch[_region_id] = ttl_batch;
-        DB_DEBUG("_region_id: %ld, ttl_timestamp_size: %ld", _region_id, ttl_batch.size());
-    }
-    if (_response.has_cmsketch() && _state->cmsketch != nullptr) {
-        _state->cmsketch->add_proto(_response.cmsketch());
-        DB_DONE(WARNING, "cmsketch:%s", _response.cmsketch().ShortDebugString().c_str());
-    }
-    {
-        BAIDU_SCOPED_LOCK(_fetcher_store->region_lock);
-        // merge可能会重复请求相同的region_id
-        if (_fetcher_store->region_batch.count(_region_id) == 1) {
-            _fetcher_store->region_batch[_region_id] = batch;
-        } else {
-            //分裂单独处理start_key_sort
-            _fetcher_store->start_key_sort.emplace(_info.start_key(), _region_id);
-            _fetcher_store->region_batch[_region_id] = batch;
-        }
-    }
+    } 
 
     if (_trace_node != nullptr) {
         std::string desc = "baikalDB FetcherStore send_request "
@@ -970,7 +1033,7 @@ ErrorType OnRPCDone::handle_response(const std::string& remote_side) {
         }
     }
     if (cost.get_time() > FLAGS_print_time_us) {
-        DB_DONE(WARNING, "parse time:%ld rows:%lu", cost.get_time(), batch->size());
+        DB_DONE(WARNING, "parse time:%ld rows:%lu", cost.get_time(), returned_row_size);
     }
     return E_OK;
 }
@@ -1174,9 +1237,11 @@ int FetcherStore::run_not_set_state(RuntimeState* state,
     client_conn = state->client_conn();
     region_count += region_infos.size();
     global_backup_type = backup_type;
+    arrow_schema.reset();
+    region_vectorized_response.clear();
     if (region_infos.size() == 0) {
         DB_WARNING("region_infos size == 0, op_type:%s", pb::OpType_Name(op_type).c_str());
-        return E_OK;
+        return 0;
     }
 
     dynamic_timeout_ms = get_dynamic_timeout_ms(store_request, op_type, state->sign);
@@ -1184,7 +1249,7 @@ int FetcherStore::run_not_set_state(RuntimeState* state,
     // 预分配空洞
     for (auto& pair : region_infos) {
         start_key_sort.emplace(pair.second.start_key(), pair.first);
-        region_batch[pair.first] = nullptr;
+        region_batch[pair.first] = RegionReturnData{nullptr, nullptr};
     }
     uint64_t log_id = state->log_id();
     // 选择primary region同时保证第一次请求primary region成功
@@ -1197,7 +1262,7 @@ int FetcherStore::run_not_set_state(RuntimeState* state,
             DB_WARNING("primary_region_id:%ld rollbacked, log_id:%lu op_type:%s",
                 client_conn->primary_region_id.load(), log_id, pb::OpType_Name(op_type).c_str());
             if (op_type == pb::OP_COMMIT || op_type == pb::OP_ROLLBACK) {
-                return E_OK;
+                return 0;
             } else {
                 client_conn->state = STATE_ERROR;
                 return -1;
@@ -1226,7 +1291,7 @@ int FetcherStore::run_not_set_state(RuntimeState* state,
         auto iter = client_conn->region_infos.find(primary_region_id);
         if (iter == client_conn->region_infos.end()) {
             DB_FATAL("something wrong primary_region_id: %ld", primary_region_id);
-            return E_OK;
+            return 0;
         }
         // commit命令获取commit_ts需要发送给store
         if (op_type == pb::OP_COMMIT && need_process_binlog(state, op_type)) {
@@ -1245,7 +1310,14 @@ int FetcherStore::run_not_set_state(RuntimeState* state,
             if (error == E_RETURN) {
                 DB_WARNING("primary_region_id:%ld rollbacked, log_id:%lu op_type:%s",
                     primary_region_id, log_id, pb::OpType_Name(op_type).c_str());
-                return E_OK;
+                if (op_type == pb::OP_COMMIT) {
+                    client_conn->state = STATE_ERROR;
+                    return -1;
+                } else {
+                    // 让其他region也能执行rollback
+                    error = E_OK;
+                    break;
+                }
             }
             if (error != E_OK) {
                 DB_FATAL("send optype:%s to region_id:%ld txn_id:%lu failed, log_id:%lu ", pb::OpType_Name(op_type).c_str(),
@@ -1297,7 +1369,7 @@ int FetcherStore::run_not_set_state(RuntimeState* state,
     if (op_type == pb::OP_COMMIT || op_type == pb::OP_ROLLBACK) {
         // 清除primary region信息
         client_conn->primary_region_id = -1;
-        return E_OK;
+        return 0;
     }
 
     if (error != E_OK) {

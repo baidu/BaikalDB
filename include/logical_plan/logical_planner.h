@@ -83,32 +83,43 @@ struct CreateExprOptions {
 };
 
 struct PlanTableContext {
-    int32_t              tuple_cnt = 0;
-    int32_t              derived_table_id = -1;
     //table_name => db
     std::unordered_map<std::string, std::unordered_set<std::string>> table_dbs_mapping;
     //field_name=>db.table
     std::unordered_map<std::string, std::unordered_set<std::string>> field_tbls_mapping;
     //db => databaseinfo
-    std::unordered_map<std::string, DatabaseInfo>  database_info;
+    std::unordered_map<std::string, DatabaseInfo> database_info;
     //db.table => tableinfo
-    std::unordered_map<std::string, SmartTable>    table_info;
+    std::unordered_map<std::string, SmartTable> table_info;
     //db.table.field => fieldinfo
-    std::unordered_map<std::string, FieldInfo*>    field_info;
+    std::unordered_map<std::string, FieldInfo*> field_info;
     //db.table => ScanTupleInfo
-    std::unordered_map<std::string, ScanTupleInfo>  table_tuple_mapping;
+    std::unordered_map<std::string, ScanTupleInfo> table_tuple_mapping;
+    // tuple_id => QueryContext
+    std::map<int64_t, std::shared_ptr<QueryContext>> derived_table_ctx_mapping;
+    //table_id => dblink tableinfo
+    std::unordered_map<int64_t, SmartTable> dblink_table_mapping;
+};
+
+struct UniqueIdContext {
+    int32_t              tuple_cnt = 0;
+    int32_t              sub_query_level = 0;
+    int32_t              derived_table_id = -1;
 };
 
 typedef std::shared_ptr<PlanTableContext> SmartPlanTableCtx;
+typedef std::shared_ptr<UniqueIdContext> SmartUniqueIdCtx;
 
 class LogicalPlanner {
 public:
     LogicalPlanner(QueryContext* ctx) : _ctx(ctx) {
         _factory = SchemaFactory::get_instance();
         _plan_table_ctx.reset(new (std::nothrow)PlanTableContext);
+        _unique_id_ctx.reset(new (std::nothrow)UniqueIdContext);
     }
 
-    LogicalPlanner(QueryContext* ctx, const SmartPlanTableCtx& plan_state) : _ctx(ctx), _plan_table_ctx(plan_state) {
+    LogicalPlanner(QueryContext* ctx, const SmartUniqueIdCtx& uniq_ctx, const SmartPlanTableCtx& plan_state) : 
+        _ctx(ctx), _unique_id_ctx(uniq_ctx), _plan_table_ctx(plan_state) {
         _factory = SchemaFactory::get_instance();
     }
 
@@ -131,9 +142,12 @@ public:
     std::multimap<std::string, size_t>& select_alias_mapping() {
         return _select_alias_mapping;
     }
+    int parse_view_select(parser::DmlNode* view_select_stmt,
+                        const parser::Vector<parser::ColumnName*>& column_names,
+                        pb::SchemaInfo& view);
 
 protected:
-    int gen_subquery_plan(parser::DmlNode* subquery, const SmartPlanTableCtx& plan_state,
+    int gen_subquery_plan(parser::DmlNode* subquery, SmartPlanTableCtx plan_state,
              const ExprParams& expr_params);
     // add table used in SQL to the context
     // and then do validation using schema info
@@ -173,6 +187,14 @@ protected:
         }
         return nullptr;
     }
+
+    TableInfo* get_dblink_table_info_ptr(const int64_t table_id) {
+        auto iter = _plan_table_ctx->dblink_table_mapping.find(table_id);
+        if (iter != _plan_table_ctx->dblink_table_mapping.end()) {
+            return iter->second.get();
+        }
+        return nullptr;
+    }
    
     int parse_db_tables(const parser::TableName* table_name);
     int parse_db_tables(const parser::TableSource* table_source);
@@ -206,6 +228,39 @@ protected:
                                         std::string& table, 
                                         std::string& alias,
                                         bool& is_derived_table);
+    int parse_table_source(const parser::TableSource* table_source, 
+                                        std::string& db, 
+                                        std::string& table,
+                                        std::string& alias,
+                                        bool& is_derived_table);
+    int add_view_select_stmt(parser::SelectStmt* view_select_stmt,
+            parser::Vector<parser::ColumnName*>  column_names, 
+            const std::string& view_select_field_str,
+            pb::SchemaInfo& view);
+    int parse_view_select_fields(parser::SelectStmt* view_select_stmt, 
+            const parser::Vector<parser::ColumnName*>&  column_names,
+            std::string& view_select_field_str,
+            pb::SchemaInfo& view);
+    int parse_view_select_star(parser::SelectField* select_field, 
+            const parser::Vector<parser::ColumnName*>& column_names, 
+            int& column_name_idx, 
+            std::set<std::string>& uniq_view_select_field_alias,
+            std::string& view_select_field_str,
+            pb::SchemaInfo& view);
+    int parse_view_select_field(parser::SelectField* select_field, 
+            const parser::Vector<parser::ColumnName*>& column_names, 
+            int& column_name_idx, 
+            std::set<std::string>& uniq_view_select_field_alias,
+            std::string& view_select_field_str,
+            pb::SchemaInfo& view);
+    int add_single_table_columns_for_view(
+            TableInfo* table_info,
+            const parser::Vector<parser::ColumnName*>& column_names,
+            std::set<std::string>& uniq_view_select_field_alias,
+            std::string& view_select_field_str,
+            int& column_name_idx,
+            pb::SchemaInfo& view);
+    int parse_select_name(parser::SelectField* field, std::string& select_name);
     // return empty str if failed
     std::string get_field_alias_name(const parser::ColumnName* col);
 
@@ -264,7 +319,7 @@ protected:
     int create_scan_nodes();
     int create_join_and_scan_nodes(JoinMemTmp* join_root, ApplyMemTmp* apply_root);
 
-
+    int need_dml_txn(const int64_t table_id);
     void set_dml_txn_state(int64_t table_id);
     void plan_begin_txn();
     void plan_commit_txn();
@@ -320,12 +375,16 @@ private:
             const CreateExprOptions& options);
     int construct_in_predicate_node(const parser::FuncExpr* func_item, pb::Expr& expr, pb::ExprNode** node);
 
+    int can_use_dblink(SmartTable table);
+
 protected:
     void construct_literal_expr(const ExprValue& value, pb::ExprNode* node);
+    int get_convert_charset_info();
 
 protected:
     QueryContext*       _ctx = nullptr;
     std::shared_ptr<QueryContext> _cur_sub_ctx = nullptr;
+    SmartUniqueIdCtx       _unique_id_ctx;
     SmartPlanTableCtx      _plan_table_ctx;
     SchemaFactory*      _factory = nullptr;
 
@@ -364,5 +423,6 @@ protected:
     // 同一层级的操作表集合，e.g:join的左右表
     std::vector<std::string>       _current_tables;
     std::vector<std::string>       _partition_names;
+    bool                        _need_multi_distinct = false;
 };
 } //namespace baikal

@@ -85,8 +85,6 @@ public:
             std::unordered_map<std::string, std::vector<pb::AddPeer>>& add_peer_requests);
     bool add_region_is_exist(int64_t table_id, const std::string& start_key, 
                                             const std::string& end_key, int64_t partition_id);
-    void check_update_region(const pb::BaikalHeartBeatRequest* request,
-                pb::BaikalHeartBeatResponse* response);
     bool binlog_peer_can_delete(const std::string& instance, int64_t region_id);
     bool check_binlog_regions_can_migrate(const std::string& instance);
 
@@ -104,8 +102,21 @@ public:
                                       pb::StoreHeartBeatResponse* response);
     void check_whether_update_region(int64_t region_id,
                                      bool peer_changed,
+                                     const std::string& leader,
                                      const pb::LeaderHeartBeat& leader_region,
-                                     const SmartRegionInfo& master_region_info);
+                                     const SmartRegionInfo& master_region_info,
+                                     pb::StoreHeartBeatResponse* response);
+    bool peer_is_equal(const pb::RegionInfo& left, const pb::RegionInfo& right) {
+        size_t hash_left = 0;
+        size_t hash_right = 0;
+        for (auto& state : left.peers()) {
+            hash_left += std::hash<std::string>{}(state);
+        }
+        for (auto& state : right.peers()) {
+            hash_right += std::hash<std::string>{}(state);
+        }
+        return hash_left == hash_right;
+    }
     //是否有超过replica_num数量的region, 这种region需要删掉多余的peer
     void check_peer_count(int64_t region_id,
                         const pb::LeaderHeartBeat& leader_region,
@@ -525,8 +536,8 @@ public:
     }
     void put_incremental_regioninfo(const int64_t apply_index, std::vector<pb::RegionInfo>& region_infos);
     bool check_and_update_incremental(
-            const pb::BaikalHeartBeatRequest* request, pb::BaikalHeartBeatResponse* response, 
-            int64_t applied_index, const std::unordered_set<int64_t>& heartbeat_table_ids); 
+            const pb::BaikalHeartBeatRequest* request, pb::BaikalHeartBeatResponse* response, int64_t applied_index, 
+            const std::unordered_map<int64_t, std::unordered_set<int64_t>>& heartbeat_table_partition_map); 
 
     bool check_table_in_resource_tags(int64_t table_id, const std::set<std::string>& resource_tags);
     

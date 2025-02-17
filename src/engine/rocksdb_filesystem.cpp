@@ -28,41 +28,6 @@ namespace baikaldb {
 static bvar::Adder<int64_t> g_external_sst_count("external_afs_sst_count");
 static bvar::Adder<int64_t> g_external_sst_size_bytes("external_sst_size_bytes");
 const std::string SstExtLinker::SST_EXT_MAP_FILE_PREFIX = "sst_ext_map";
-int get_size_by_external_file_name(uint64_t* size, const std::string& external_file) {
-    std::vector<std::string> split_vec;
-    boost::split(split_vec, external_file, boost::is_any_of("/"));
-    if (split_vec.empty()) {
-        DB_FATAL("split %s failed", external_file.c_str());
-        return -1;
-    }
-
-    std::vector<std::string> vec;
-    vec.reserve(4);
-    boost::split(vec, split_vec.back(), boost::is_any_of("._"));
-    if (vec.empty()) {
-        DB_FATAL("split %s failed", external_file.c_str());
-        return -1;
-    }
-    if (vec.back() == "extsst") {
-        // olap sst: regionID_lines_size_time.extsst
-        if (vec.size() != 5) {
-            DB_FATAL("split %s failed", external_file.c_str());
-            return -1;
-        }
-        *size = boost::lexical_cast<uint64_t>(vec[2]);
-    } else if (vec.back() == "binlogsst" || vec.back() == "datasst") {
-        // backup binlog sst: regionID_startTS_endTS_idx_now()_size_lines.(binlogsst/datasst)
-        if (vec.size() != 8) {
-            DB_FATAL("split %s failed", external_file.c_str());
-            return -1;
-        }
-        *size = boost::lexical_cast<uint64_t>(vec[5]);
-    } else {
-        DB_FATAL("external file: %s with abnormal file type: %s", external_file.c_str(), vec.back().c_str());
-        return -1;
-    }
-    return 0;
-}
 
 rocksdb::IOStatus ExtRandomAccessFile::Read(uint64_t offset, size_t n, const rocksdb::IOOptions& options,
                     rocksdb::Slice* result, char* scratch, rocksdb::IODebugContext* dbg) const {
@@ -118,7 +83,7 @@ int SstExtLinker::sst_size(const std::string& short_name, uint64_t* size) {
 }
 
 int SstExtLinker::extsst_size(const std::string& ext_file, uint64_t* size) {
-    int ret = get_size_by_external_file_name(size, ext_file);
+    int ret = get_size_by_external_file_name(size, nullptr, ext_file);
     if (ret != 0) {
         DB_FATAL("get file: %s size failed", ext_file.c_str());
         return -1;
@@ -236,7 +201,7 @@ int SstExtLinker::sst_rename(const std::string& src_short_name, const std::strin
 
 int SstExtLinker::sst_link(const std::string& ext_src_name, const std::string& dst_short_name) {
     uint64_t ext_file_size = 0;
-    int ret = get_size_by_external_file_name(&ext_file_size, ext_src_name);
+    int ret = get_size_by_external_file_name(&ext_file_size, nullptr, ext_src_name);
     if (ret != 0) {
         DB_FATAL("get file: %s size failed", ext_src_name.c_str());
         return -1;
@@ -276,7 +241,7 @@ int SstExtLinker::sst_link(const std::string& ext_src_name, const std::string& d
 int SstExtLinker::new_ext_random_access_file(const std::string& ext_file_name,
                         std::unique_ptr<rocksdb::FSRandomAccessFile>* result) {
     result->reset();
-    std::unique_ptr<ExtFileReader> file_reader;
+    std::shared_ptr<ExtFileReader> file_reader;
     int ret = _ext_fs->open_reader(ext_file_name, &file_reader);
     if (ret != 0) {
         DB_FATAL("open ext file: %s failed", ext_file_name.c_str());

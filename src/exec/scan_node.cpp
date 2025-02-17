@@ -35,7 +35,7 @@ int64_t AccessPathMgr::select_index_common() {
         _multi_reverse_index.clear();
         _fulltext_use_arrow = false;
     }
-    
+    std::multimap<uint32_t, int64_t> vector_hit_field_count_mapping;
     for (auto& pair : _paths) {
         int64_t index_id = pair.first;
         const auto& path = pair.second;
@@ -45,7 +45,7 @@ int64_t AccessPathMgr::select_index_common() {
             continue;
         }
         IndexInfo& info = *info_ptr;
-        if (!path->is_possible && info.type != pb::I_PRIMARY) {
+        if (!path->is_possible && info.type != pb::I_PRIMARY && info.type != pb::I_ROLLUP) {
             continue;
         }
         auto index_state = info.state;
@@ -54,14 +54,21 @@ int64_t AccessPathMgr::select_index_common() {
                 index_id, pb::IndexState_Name(index_state).c_str());
             continue;
         }
-
         int field_count = path->hit_index_field_ids.size();
         if (info.fields.size() == 0) {
             continue;
         }
+        // 向量索引需要字段全命中
+        if (info.type == pb::I_VECTOR && field_count != info.fields.size()) {
+            continue;
+        }
+        if (info.type == pb::I_VECTOR) {
+            vector_hit_field_count_mapping.insert(std::make_pair(field_count, index_id));
+            continue;
+        }
         uint16_t prefix_ratio_round = field_count * 100 / info.fields.size();
         uint16_t index_priority = 0;
-        if (info.type == pb::I_PRIMARY) {
+        if (info.type == pb::I_PRIMARY || info.type == pb::I_ROLLUP) {
             index_priority = 300;
         } else if (info.type == pb::I_UNIQ) {
             index_priority = 200;
@@ -93,13 +100,15 @@ int64_t AccessPathMgr::select_index_common() {
             case pb::I_FULLTEXT:
                 _multi_reverse_index.push_back(index_id);
                 break;
-            case pb::I_VECTOR:
-                return index_id;
-                break;
             default:
                 break;
         }
     }
+    // 优先选命中字段最多的向量索引
+    for (auto iter = vector_hit_field_count_mapping.crbegin(); iter != vector_hit_field_count_mapping.crend(); ++iter) {
+        return iter->second;
+    }
+    // 优先选倒排
     if (choose_arrow_pb_reverse_index() != 0) {
         DB_WARNING("choose arrow pb reverse index error.");
         return -1;
@@ -130,6 +139,7 @@ int ScanNode::init(const pb::PlanNode& node) {
     }
     _main_path.init(_table_id);
     _learner_path.init(_table_id);
+    _join_path.init(_table_id);
     return 0;
 }
 
@@ -475,7 +485,8 @@ int64_t AccessPathMgr::pre_process_select_index() {
 
         if (outer_loop_iter->second->index_type != pb::I_PRIMARY && 
             outer_loop_iter->second->index_type != pb::I_UNIQ &&
-            outer_loop_iter->second->index_type != pb::I_KEY) {
+            outer_loop_iter->second->index_type != pb::I_KEY &&
+            outer_loop_iter->second->index_type != pb::I_ROLLUP) {
             continue;
         }
 
@@ -525,6 +536,27 @@ int64_t AccessPathMgr::select_index() {
     }
 
     return select_idx; 
+}
+
+int64_t ScanNode::select_join_index_in_baikaldb(const std::string& sample_sql) {
+    _select_index_for_join = _join_path.select_index();
+    auto path = _join_path.path(_select_index_for_join);
+
+    if (path->is_virtual) {
+        // 删除，确保下次不再选择该虚拟索引
+        _join_path.delete_possible_index(_select_index_for_join);
+        _join_path.reset();
+        std::string& name = path->index_info_ptr->short_name;
+        SchemaFactory::get_instance()->update_virtual_index_info(_select_index_for_join, name, sample_sql);
+        DB_WARNING("hit virtual index, table_id: %ld, virtual_index_id: %ld, virtual_index_name: %s, sample_sql: %s", 
+            _table_id, _select_index_for_join, name.c_str(), sample_sql.c_str());
+        return select_join_index_in_baikaldb(sample_sql);
+    }
+    std::vector<int64_t> multi_reverse_index = _join_path.multi_reverse_index();
+    if (multi_reverse_index.size() > 0) {
+        _select_index_for_join = multi_reverse_index[0];
+    }
+    return _select_index_for_join;
 }
 
 int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {

@@ -66,7 +66,22 @@ public:
     virtual void transfer_pb(pb::ExprNode* pb_node) {
         ExprNode::transfer_pb(pb_node);
     }
-
+    virtual bool can_use_arrow_vector() {
+        for (auto& c : _children) {
+            if (!c->can_use_arrow_vector()) {
+                return false;
+            }
+        }
+        return true;
+    }
+    virtual int transfer_to_arrow_expression() {
+        for (int i = 0; i < children_size(); ++i) {
+            if (children(i)->transfer_to_arrow_expression() != 0) {
+                return -1;
+            }
+        }
+        return 0;
+    }
 private:
     std::map<std::pair<int32_t, int32_t>, size_t> _idx_map;
     friend ExprNode;

@@ -50,22 +50,6 @@ struct FieldRange {
     std::set<ExprNode*> conditions;
 };
 
-struct IndexRange {
-    RangeType type = NONE;
-    bool is_exact_like = false; // EXACT_LIKE，内部语法，ES迁移用
-    bool is_row_expr = false; // (x,y) > (1,2) 类表达式
-    bool left_open = false;
-    bool right_open = false;
-    std::vector<int32_t> left_row_field_ids;
-    std::vector<int32_t> right_row_field_ids;
-    ExprNode* left_expr = nullptr;
-    ExprNode* right_expr = nullptr;
-    std::vector<ExprValue> left;
-    std::vector<ExprValue> right;
-    std::vector<ExprValue> eq_in_values;
-    std::vector<ExprValue> like_values;
-    std::set<ExprNode*> conditions;
-};
 }
 }
 

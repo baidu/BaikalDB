@@ -51,7 +51,7 @@ public:
 private:
     QueryTableManager() {}
     void check_table_and_update(
-                  const std::unordered_map<int64_t, std::tuple<pb::SchemaInfo, int64_t, int64_t>> table_schema_map,
+                  const std::unordered_map<int64_t, TableMem>& table_schema_map,
                   std::unordered_map<int64_t, int64_t>& report_table_map,
                   pb::ConsoleHeartBeatResponse* response, uint64_t log_id);  
     void construct_query_table(const TableMem& table, pb::QueryTable* query_table);

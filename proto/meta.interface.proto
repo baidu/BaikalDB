@@ -22,6 +22,10 @@ message NameSpaceInfo {
     optional int64 replica_num             = 10;
     optional int64 region_split_lines      = 11; //region分裂行数阈值
     optional bool  if_exist                = 13;
+    repeated ReplicaDist dists             = 14;
+    optional string main_logical_room      = 15;
+    repeated string learner_resource_tags  = 16;
+    repeated BinlogInfo binlog_infos       = 17;
 };
 
 message DataBaseInfo {
@@ -37,7 +41,12 @@ message DataBaseInfo {
     optional Charset charset               = 10;
     optional int64 byte_size_per_record    = 11;
     optional int64 replica_num             = 12;
-    optional int64 region_split_lines      = 13; //region分裂行数阈值
+    optional int64 region_split_lines      = 13; // region分裂行数阈值
+    repeated ReplicaDist dists             = 14;
+    optional string main_logical_room      = 15;
+    repeated string learner_resource_tags  = 16;
+    repeated BinlogInfo binlog_infos       = 17;
+    optional string partition_info_str     = 18; 
 };
 
 enum Status {
@@ -70,6 +79,10 @@ enum IndexHintStatus {
     IHS_VIRTUAL = 3; // 虚拟索引，只选择不使用，选出虚拟索引后需重选
 };
 
+enum RollupType {
+    SUM = 1;
+};
+
 //每个逻辑机房的副本数量。第一个逻辑机房为主机房. 目前leader均衡不考虑机房分布。
 message ReplicaDist {
     optional string logical_room  = 1;
@@ -87,8 +100,10 @@ message SplitKey {
 message BinlogInfo {
     repeated int64 target_table_ids = 1;
     optional int64 binlog_table_id = 2; // binlog表自己不设置
-    optional FieldInfo link_field  = 3;
+    optional FieldInfo link_field = 3;
     optional bool partition_is_same_hint = 4; // 普通表和binlog表分区方式不一样的hit
+    optional string database = 5;
+    optional string table_name = 6;
 };
 /*
     普通表    binlog表
@@ -110,7 +125,8 @@ message PartitionRange {
 
 enum RangePartitionType {
     RPT_DEFAULT = 0;
-    RPT_NEW_StatsEngine = 1;
+    RPT_NEW_StatsEngine = 1; // 用于StatsEngine切换场景的新分区
+    RPT_ADDITIONAL = 2; // 用于轻舸2.0报表数据回写到凤巢冷数据场景的外挂分区
 };
 
 message RangePartitionInfo {
@@ -122,6 +138,7 @@ message RangePartitionInfo {
     optional bool is_cold            = 6;
     repeated SplitKey split_keys     = 7; // 仅创建动态分区时使用该字段
     optional RangePartitionType type = 8; // 默认值为第一个枚举值
+    optional bool is_pre_split       = 9; // 增加分区是否进行预分裂
 };
 
 message DynamicPartitionAttr {
@@ -132,6 +149,7 @@ message DynamicPartitionAttr {
     optional int32 end                = 5;
     optional string prefix            = 6;
     optional int32 start_day_of_month = 7;
+    optional string isolation         = 8;
 };
 
 message PartitionInfo {
@@ -146,10 +164,26 @@ message PartitionInfo {
     repeated RangePartitionInfo range_partition_infos = 9;
     optional DynamicPartitionAttr dynamic_partition_attr = 10;
     optional int64 max_range_partition_id = 11;
+
+    // 数据隔离使用
     repeated RangePartitionType gen_range_partition_types = 12;
-    optional RangePartitionType primary_range_partition_type = 13 [default = RPT_DEFAULT];
+    optional RangePartitionType primary_range_partition_type = 13;
 };
 
+enum DBLinkType {
+    LT_BAIKALDB = 1;
+};
+
+message DBLinkInfo {
+    optional DBLinkType type       = 1;
+    optional string meta_name      = 2;
+    optional string namespace_name = 3;
+    optional string database_name  = 4;
+    optional string table_name     = 5;
+    optional int64  meta_id        = 6;
+};
+
+// 增加新字段时，考虑是否对该字段增删meta标识，对应dblink表场景!!!
 message SchemaInfo {
     optional int64 table_id                 = 1;
     required string table_name              = 2;
@@ -200,6 +234,9 @@ message SchemaInfo {
     optional bool  if_exist                 = 47;
     optional bool partition_is_same_hint    = 48;
     repeated BinlogInfo    binlog_infos     = 49;
+    optional DBLinkInfo dblink_info         = 50; // DBLink表信息，namespace_name心跳时不需要删除或增加meta标识
+    optional bool  or_replace               = 51;
+    optional string  view_select_stmt       = 52;
 };
 
 message PartitionRegion {
@@ -233,6 +270,7 @@ enum IndexType {
     I_KEY           = 3;
     I_FULLTEXT      = 4; //query切词，word切词，node无额外信息
     I_VECTOR        = 5; //向量索引，使用faiss库
+    I_ROLLUP        = 6;
 };
 
 enum SegmentType {
@@ -285,6 +323,10 @@ message IndexInfo {
     optional int32 dimension = 14; //向量维度
     optional MetricType metric_type = 15;// MetricType，默认是METRIC_L2
     optional int32 nprobe = 16; //IVF查询的质心数量，默认是5
+    optional int32 efsearch = 17; //HNSW查询期间要访问的最近邻居的数量，默认是16
+    optional int32 efconstruction = 18; //HNSW构建索引期间要访问的最近邻居的数量，默认是40
+    optional RollupType rollup_type = 19;
+    optional int64 publish_timestamp = 20;
 };
 
 //address format: ip:port
@@ -362,8 +404,11 @@ message UserPrivilege {
     optional bool use_read_index                             = 15; // 读是否走folloewr read use read idx
     optional bool enable_plan_cache                          = 16; // 是否缓存执行计划
     optional RangePartitionType request_range_partition_type = 17; // 访问的Range分区类型
+    optional bool is_super                                   = 18; // 是否为超级账号，有所有库表权限
+    repeated int64 switch_tables                             = 19; // 读写进行切换的表
     optional uint32 acl                                      = 20; //权限控制列表,bitmap
     optional bool  if_exist                                  = 21;
+    optional bool is_request_additional                      = 24; // 是否访问外挂分区
 };
 
 //集群信息
@@ -515,7 +560,6 @@ enum RecoverOpt {
     DO_INIT_REGION         = 4; // 3个peer都不在集群，init_peer
 };
 
-
 message VirtualIndexInfluence{
     optional int64   virtual_index_id                = 1;
     optional string  virtual_index_name              = 2;
@@ -551,7 +595,7 @@ message MetaManagerRequest {
     optional IndexDdlRequest     index_ddl_request      = 26;
     optional int64               learner_replica_num    = 27;
     optional bool                is_dynamic_change      = 28; // 标识是否为动态分区变更
-
+    optional bool                is_force_setting       = 29; // 标识是否为强制设置，用于删除默认配置
 };
 
 message CreateTableResponse {
@@ -569,7 +613,7 @@ message MetaManagerResponse {
     optional uint64 end_id                              = 7;
     optional RegionMergeResponse merge_response         = 8;
     optional RegionRecoverResponse recover_response     = 9;
-    optional CreateTableResponse create_table_response  = 10; // 新增
+    optional CreateTableResponse create_table_response  = 10; // 用于新建普通表/视图
 };
 
 message RegionRecoverResponse {
@@ -620,6 +664,7 @@ message LeaderHeartBeat {
     required RegionInfo     region       = 1;
     optional RegionStatus   status       = 2;
     repeated PeerStateInfo  peers_status = 3;
+    optional bool           simple       = 4;
 };
 
 message LearnerHeartBeat {
@@ -680,6 +725,7 @@ message StoreHeartBeatResponse {
     repeated int64 trans_leader_count           = 9;
     repeated DdlWorkInfo ddlwork_infos          = 10;
     repeated InstanceParam  instance_params     = 11;
+    optional bool need_report                   = 12;
 };
 
 message RegionHeartBeat {
@@ -692,18 +738,22 @@ message RegionHeartBeat {
     optional int64  used_size            = 7;
 };
 
+message BaikalSchemaHeartBeat {
+    required int64 table_id             = 1;
+    required int64 version              = 2;
+    //repeated RegionHeartBeat regions    = 3;
+};
+
 message BaikalHeartBeatTable {
     required string namespace_name = 1;
     required string database       = 2;
     required string table_name     = 3;
+    optional int64 table_id        = 4; // 用于处理表删除和表重命名场景
+    optional bool is_new           = 5; // DBLINK场景，指定是否为需要获取心跳基准的表
+    repeated int64 partition_ids   = 6; // 需要获取哪些分区的信息
 };
 
-message BaikalSchemaHeartBeat {
-    required int64 table_id             = 1;
-    required int64 version              = 2;
-    repeated RegionHeartBeat regions    = 3;
-};
-
+// 增加新字段时，考虑是否对该字段增删meta标识，对应dblink表场景!!!
 message BaikalHeartBeatRequest {
     //物理机房和逻辑机房对应关系
     repeated BaikalSchemaHeartBeat schema_infos    = 1;
@@ -717,6 +767,7 @@ message BaikalHeartBeatRequest {
     optional bool need_heartbeat_table             = 9;  // 指定是否心跳按需返回
     optional bool need_binlog_heartbeat            = 10; // 指定是否binlog capturer的心跳 
     repeated BaikalHeartBeatTable heartbeat_tables = 11; // 指定需要进行同步的表全名
+    optional bool need_global_index_heartbeat      = 12; // 指定心跳按需返回是否包含全局索引
 };
 
 message BaikalOtherHeartBeat {
@@ -744,6 +795,7 @@ message IdcInfo {
     repeated InstanceInfo   instance_infos      = 2;
 };
 
+// 增加新字段时，考虑是否对该字段增删meta标识，对应dblink表场景!!!
 message BaikalHeartBeatResponse {
     required ErrCode errcode                      = 1;
     optional string errmsg                        = 2;
@@ -757,6 +809,7 @@ message BaikalHeartBeatResponse {
     repeated Statistics   statistics              = 10;
     repeated RegionDdlWork region_ddl_works       = 11;
     repeated DdlWorkInfo  ddl_works               = 12;
+    repeated NameSpaceInfo ns_info                = 13; //全部同步
 };
 
 enum QueryOpType {
@@ -930,7 +983,7 @@ message QueryTable {
     required string             namespace_name      = 1;
     required string             database            = 2;
     required string             table_name          = 3;
-    required string             upper_table_name    = 4;
+    optional string             upper_table_name    = 4;
     required int64              region_size         = 5;
     required int64              replica_num         = 6;
     required string             resource_tag        = 7;
@@ -1033,6 +1086,7 @@ message DdlWorkInfo {
     optional bool drop_index                        = 14;
     optional ColumnDdlInfo column_ddl_info          = 15;
     optional string   opt_sql                       = 16;
+    optional bool is_rollup                         = 17;
 };
 
 enum DdlWorkStatus {

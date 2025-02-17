@@ -111,6 +111,10 @@ message SchemaConf {
     optional int32 tail_split_step          = 14;
     optional int64 auto_inc_rand_max        = 15; //meta挂掉后降级到随机id
     optional int32 binlog_backup_days       = 16; //binlog备份天数
+    optional string sign_rolling            = 17; //轮询
+    optional string sign_exec_type          = 18;
+    optional string snapshot_blacklist      = 19; // 用于watt报表数据修复
+    optional string del_snapshot_blacklist  = 20; // 用于手动删除snapshot
 };
 
 enum Engine {
@@ -119,6 +123,7 @@ enum Engine {
     ROCKSDB_CSTORE = 3;
     BINLOG = 4;
     INFORMATION_SCHEMA = 5;
+    DBLINK = 6;
 };
 
 message SlotDescriptor {

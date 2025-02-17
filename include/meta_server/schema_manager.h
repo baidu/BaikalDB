@@ -83,7 +83,9 @@ private:
         if (op_type == pb::OP_CREATE_TABLE
             || op_type == pb::OP_DROP_TABLE
             || op_type == pb::OP_RESTORE_TABLE
-            || op_type == pb::OP_RENAME_TABLE) {
+            || op_type == pb::OP_RENAME_TABLE
+            || op_type == pb::OP_CREATE_VIEW
+            || op_type == pb::OP_DROP_VIEW) {
             return true;
         }
         return false;

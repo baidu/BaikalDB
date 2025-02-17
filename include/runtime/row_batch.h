@@ -18,6 +18,7 @@
 #include <vector>
 #include <memory>
 #include "mem_row_compare.h"
+#include "chunk.h"
 
 namespace baikaldb {
 class RowBatch {
@@ -32,7 +33,11 @@ public:
         return _capacity;
     }
     size_t size() {
-        return _rows.size();
+        if (_use_memrow) {
+            return _rows.size();
+        } else {
+            return _chunk->size();
+        }
     }
     void reset() {
         _idx = 0;
@@ -106,8 +111,12 @@ public:
 
     int64_t used_bytes_size() {
         int64_t used_size = 0;
-        for (size_t i = 0; i < size(); i++) {
-            used_size += _rows[i]->used_size();
+        if (_use_memrow) {
+            for (size_t i = 0; i < size(); i++) {
+                used_size += _rows[i]->used_size();
+            }
+        } else {
+            used_size = _chunk->used_bytes_size();
         }
         return used_size;
     }
@@ -115,12 +124,91 @@ public:
     size_t index() {
         return _idx;
     }
+
+    bool use_memrow() {
+        return _use_memrow;
+    }
+    /*
+     *  以下是列存专用
+     */ 
+    std::shared_ptr<Chunk> get_chunk() {
+        return _chunk;
+    }
+    void reserve_chunk(int row_len) {
+        _chunk->reserve(row_len);
+    }
+    int finish_and_make_record_batch(std::shared_ptr<arrow::RecordBatch>* batch, std::shared_ptr<arrow::Schema> schema = nullptr) {
+        return _chunk->finish_and_make_record_batch(batch, schema);
+    }
+    int init_chunk(const std::vector<const pb::TupleDescriptor*> tuples, std::shared_ptr<arrow::Schema>* schema) {
+        _use_memrow = false;
+        _chunk = std::make_shared<Chunk>();
+        int ret = _chunk->init(tuples);
+        if (ret != 0) {
+            DB_FATAL("chunk init failed");
+            return 0;
+        }
+        *schema = _chunk->get_arrow_schema();
+        return 0;
+    }
+    int set_chunk_tmp_row_value(int tuple_id, int slot_id, const ExprValue& value) {
+        if (_chunk == nullptr) {
+            DB_FATAL("chunk is null");
+            return -1;
+        }
+        ExprValue* tmp_value = _chunk->get_tmp_field_value(tuple_id, slot_id);
+        if (tmp_value == nullptr) {
+            DB_FATAL("tmp value is null");
+            return -1;
+        }
+        *tmp_value = value;
+        return 0;
+    }
+    int add_chunk_row() {
+        return _chunk->add_tmp_row();
+    }
+
+    int transfer_rowbatch_to_arrow(const std::vector<const pb::TupleDescriptor*>& tuples, 
+                                   std::shared_ptr<Chunk> chunk, 
+                                   std::shared_ptr<arrow::Schema> schema, 
+                                   std::shared_ptr<arrow::RecordBatch>* out) {
+        if (0 != add_row_batch_to_chunk(tuples, chunk)) {
+            return -1;
+        }
+        if (0 != chunk->finish_and_make_record_batch(out, schema)) {
+            return -1;
+        }
+        return 0;
+    }
+    int add_row_batch_to_chunk(const std::vector<const pb::TupleDescriptor*>& tuples, std::shared_ptr<Chunk> chunk) {
+        if (chunk == nullptr) {
+            return -1;
+        }
+        if (_rows.size() == 0) {
+            return 0;
+        }
+        for (_idx = 0; _idx < _rows.size(); ++_idx) {
+            MemRow* row = get_row().get();
+            if (row == nullptr) {
+                continue;
+            }
+            int ret = chunk->add_row(tuples, row);
+            if (ret != 0) {
+                DB_FATAL("add row to chunk failed");
+                return -1;
+            }
+        }
+        _idx = 0;
+        return 0;
+    }
 private:
     //采用unique_ptr来维护内存，减少内存占用
     //后续考虑直接用MemRow，因为MemRow内部也只有几个指针
     std::vector<std::unique_ptr<MemRow> > _rows;
     size_t _idx;
     size_t _capacity = ROW_BATCH_CAPACITY;
+    std::shared_ptr<Chunk> _chunk;
+    bool _use_memrow = true;
 };
 }
 

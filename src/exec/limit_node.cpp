@@ -142,6 +142,10 @@ int LimitNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         DB_WARNING("_children get_next fail");
         return ret;
     }
+    set_node_exec_type(_children[0]->node_exec_type());
+    if (_node_exec_type == pb::EXEC_ARROW_ACERO) {
+        return 0;
+    }
     while (_num_rows_skipped < _offset) {
         if (_num_rows_skipped + (int)batch->size() <= _offset) {
             _num_rows_skipped += batch->size();
@@ -169,6 +173,15 @@ int LimitNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         batch->keep_first_rows(keep_nums);
         _num_rows_returned = _limit;
         return 0;
+    }
+    return 0;
+}
+ 
+int LimitNode::build_arrow_declaration(RuntimeState* state) {
+    for (auto c : _children) {
+        if (c->build_arrow_declaration(state) != 0) {
+            return -1;
+        }
     }
     return 0;
 }

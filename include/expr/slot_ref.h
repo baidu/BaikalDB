@@ -66,7 +66,16 @@ public:
         pb_node->mutable_derive_node()->set_slot_id(_slot_id);
         pb_node->mutable_derive_node()->set_field_id(_field_id);
     }
-
+    virtual bool can_use_arrow_vector() {
+        return true;
+    }
+    virtual int transfer_to_arrow_expression() {
+        _arrow_expr = arrow::compute::field_ref(std::to_string(_tuple_id) + "_" + std::to_string(_slot_id));
+        return 0;
+    }
+    std::string arrow_field_name() {
+        return std::to_string(_tuple_id) + "_" + std::to_string(_slot_id);
+    }
 private:
     int32_t _field_id;
     friend ExprNode;

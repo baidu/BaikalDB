@@ -64,6 +64,14 @@ std::string datetime_to_str(uint64_t datetime, int precision_len) {
 }
 
 uint64_t str_to_datetime(const char* str_time, bool* is_full_datetime) {
+    return str_to_datetime_internal(str_time, strlen(str_time), is_full_datetime);
+}
+
+uint64_t str_to_datetime(const char* str_time, size_t length) {
+    return str_to_datetime_internal(str_time, length, nullptr);
+}
+
+uint64_t str_to_datetime_internal(const char* str_time, size_t length, bool* is_full_datetime) {
     //[YY]YY-MM-DD HH:MM:SS.xxxxxx
     //[YY]YYMMDDHHMMSS.xxxxxx
 
@@ -73,7 +81,7 @@ uint64_t str_to_datetime(const char* str_time, bool* is_full_datetime) {
         str_time++;
     }
     const static size_t max_time_size = 26;
-    size_t len = std::min(strlen(str_time), (size_t)max_time_size);
+    size_t len = std::min(length, (size_t)max_time_size);
     char buf[max_time_size + 1] = {0};
     memcpy(buf, str_time, len);
     
@@ -245,6 +253,25 @@ time_t datetime_to_timestamp(uint64_t datetime) {
     tm.tm_mon--;
     time_t t = mktime(&tm);
     return t <= 0 ? 0 : t;
+}
+
+time_t snapshot_to_timestamp(uint64_t snapshot) {
+    uint64_t date_tm = (snapshot % 10000000000) / 100;
+    int year = date_tm / 10000;
+    int month = (date_tm % 10000) / 100;
+    int day = date_tm % 100;
+
+    struct tm tm;
+    tm.tm_year = year - 1900;
+    tm.tm_mon = month - 1;
+    tm.tm_mday = day;
+    tm.tm_hour = 0;
+    tm.tm_min = 0; 
+    tm.tm_sec = 0;
+    tm.tm_isdst = 0;
+
+    time_t ts = mktime(&tm);
+    return ts;
 }
 
 uint64_t timestamp_to_datetime(time_t timestamp) {
@@ -664,31 +691,122 @@ int64_t timestamp_to_ts(uint32_t  timestamp) {
     return (((int64_t)timestamp) * 1000 - tso::base_timestamp_ms) << 18;
 }
 
-// Dynamic Partition
-int get_current_timestamp(time_t& current_ts) {
-    current_ts = ::time(NULL);
-    return 0;
+bool is_leap_year(int year) {
+    return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
 }
-
-int get_specified_timestamp(const time_t& ts, const int64_t offset, TimeUnit time_unit, time_t& specified_ts) {
-    struct tm tm;
-    localtime_r(&ts, &tm);
-
-    if (time_unit == TimeUnit::DAY) {
-        tm.tm_mday += offset; 
-    } else if (time_unit == TimeUnit::MONTH) {
-        tm.tm_mon += offset;
+// 判断字符串是否为YYYYMMDD(不包含hour)/YYYYMMDDHH(包含hour)格式
+bool is_valid_date(const std::string& date_str, const bool has_hour) {
+    static const int32_t days_in_month[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if (has_hour) {
+        if (date_str.size() != 10) {
+            return false;
+        }
     } else {
-        return -1;
+        if (date_str.size() != 8) {
+            return false;
+        }
     }
+    for (int i = 0; i < 8; ++i) {
+        if (date_str[i] < '0' || date_str[i] > '9') {
+            return false;
+        }
+    }
+    const int year = std::stoi(date_str.substr(0, 4));
+    const int mon = std::stoi(date_str.substr(4, 2));
+    const int mday = std::stoi(date_str.substr(6, 2));
+    if (mon < 1 || mon > 12) {
+        return false;
+    }
+    int mday_max = days_in_month[mon - 1];
+    if (mon == 2 && is_leap_year(year)) {
+        mday_max++;
+    }
+    if (mday < 1 || mday > mday_max) {
+        return false;
+    }
+    if (has_hour) {
+        for (int i = 8; i < 10; ++i) {
+            if (date_str[i] < '0' || date_str[i] > '9') {
+                return false;
+            }
+        }
+        const int hour = std::stoi(date_str.substr(8, 2));
+        if (hour < 0 || hour > 23) {
+            return false;
+        }
+    }
+    return true;
+}
 
-    specified_ts = mktime(&tm);
+int date_add_interval(time_t& ts, const int64_t interval, const TimeUnit time_unit) {
+    static const int32_t days_in_month[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+
+    switch (time_unit) {
+    case TimeUnit::YEAR:
+    case TimeUnit::MONTH: {
+        struct tm tm;
+        localtime_r(&ts, &tm);
+        int year = tm.tm_year + 1900;
+        int mon = tm.tm_mon;
+        int day = tm.tm_mday;
+        if (time_unit == TimeUnit::YEAR) {
+            // 与mysql保持一致，根据是否闰年，调整2月日期值
+            // 往前一年: 
+            //      2024-02-29 -> 2023-02-28
+            //      2024-02-20 -> 2023-02-20
+            year += interval;
+            if (mon + 1 == 2 && day == 29 && !is_leap_year(year)) {
+                day = 28;
+            }
+        } else {
+            // 与mysql保持一致，如果这个月没有足够的天数，调整日期值
+            // 往前一个月: 
+            //      2023-03-31 -> 2023-02-28
+            //      2024-03-31 -> 2024-02-29
+            //      2024-03-20 -> 2024-02-20
+            mon += interval;
+            year = year + mon / 12 + (mon < 0 ? -1 : 0);
+            mon = (mon % 12 + 12) % 12;
+            if (day > days_in_month[mon]) {
+                day = days_in_month[mon];
+                if (mon + 1 == 2 && is_leap_year(year)) {
+                    day++;
+                }
+            }
+        }
+        tm.tm_year = year - 1900;
+        tm.tm_mon = mon;
+        tm.tm_mday = day;
+        ts = mktime(&tm);
+        break;
+    }
+    case TimeUnit::DAY:
+        ts += interval * 86400;
+        break;
+    case TimeUnit::HOUR:
+        ts += interval * 3600;
+        break;
+    case TimeUnit::MINUTE:
+        ts += interval * 60;
+        break;
+    case TimeUnit::SECOND:
+        ts += interval;
+        break;
+    default:
+        break;
+    }
     return 0;
 }
 
-int get_current_day_timestamp(time_t& current_day_ts) {
+int date_sub_interval(time_t& ts, const int64_t interval, const TimeUnit time_unit) {
+    return date_add_interval(ts, -interval, time_unit);
+}
+
+int get_current_day_timestamp(time_t& current_day_ts, time_t current_ts) {
     struct tm tm;
-    time_t current_ts = ::time(NULL);
+    if (current_ts == -1) {
+        current_ts = ::time(NULL);
+    }
     localtime_r(&current_ts, &tm);
     
     tm.tm_hour = 0;

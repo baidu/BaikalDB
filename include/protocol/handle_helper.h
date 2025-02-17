@@ -90,6 +90,7 @@ const std::string SQL_HANDLE_STORE_RM_TXN               = "store_rm_txn";
 // handle region_adjustkey tableID regionID start_key_region_id end_key_region_id 
 const std::string SQL_HANDLE_REGION_ADJUSTKEY           = "region_adjustkey";
 const std::string SQL_HANDLE_MODIFY_PARTITION           = "modify_partition";
+const std::string SQL_HANDLE_MODIFY_PARTITION_RESOURCETAG = "modify_partition_resourcetag";
 // HANDLE specify_split_keys dbName tableName [split_key1 split_key2]
 const std::string SQL_HANDLE_SPECIFY_SPLIT_KEYS         = "specify_split_keys";
 // handle convert_partition dbName tableName primary_range_partition_type [gen_range_partition_types]
@@ -142,6 +143,8 @@ private:
     bool _handle_rm_privilege(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // handle modify_partition dbname tbname
     bool _handle_modify_partition(const SmartSocket& client, const std::vector<std::string>& split_vec);
+    // handle modify_partition_resourcetag dbname tbname resourcetag start_date end_date
+    bool _handle_modify_partition_resourcetag(const SmartSocket& client, const std::vector<std::string>& split_vec);
     // handle delete_ddl tableName
     // handle suspend_ddl tableName
     // handle restart_ddl tableName
@@ -209,6 +212,12 @@ private:
     int _make_common_resultset_packet(const SmartSocket& sock,
             std::vector<ResultField>& fields,
             std::vector< std::vector<std::string> >& rows);
+
+    // 检查UserPrivilege变更项数量是否合法
+    int check_user_privilege_change(const pb::UserPrivilege& user_privilege);
+
+    // 修改resouce_tag 是否安全
+    bool _can_change_resourcetag_safely(SmartTable table, std::vector<std::string>* unsafe_list);
 
     // Key -> function
     std::unordered_map<std::string, std::function<

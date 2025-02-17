@@ -19,8 +19,12 @@
 #include "scan_node.h"
 #include "query_context.h"
 #include "single_txn_manager_node.h"
+#include "index_ddl_manager_node.h"
+#include "common.h"
 
 namespace baikaldb {
+DECLARE_int64(ddl_work_limit);
+DECLARE_int64(rollup_ddl_work_limit);
 
 class DDLWorkPlanner : public LogicalPlanner {
 public:
@@ -47,6 +51,7 @@ public:
             }
             _is_uniq = index_ptr->type == pb::I_UNIQ;
             _is_global_index = index_ptr->is_global;
+            _is_rollup_index = index_ptr->type == pb::I_ROLLUP;
         }
         _is_column_ddl = (_work.op_type() == pb::OP_MODIFY_FIELD);
         auto pri_index_ptr = SchemaFactory::get_instance()->get_index_info_ptr(_table_id);
@@ -65,8 +70,9 @@ public:
 
     int create_index_ddl_plan();
     int create_column_ddl_plan();
-
     int create_txn_dml_node(std::unique_ptr<SingleTxnManagerNode>& tnx_node, std::unique_ptr<ScanNode> scan_node);
+    void create_index_ddl_manager_node(std::unique_ptr<IndexDDLManagerNode>& index_ddl_manager_node, std::unique_ptr<ScanNode> scan_node);
+    int exec_rollup_node(RuntimeState& state, NetworkSocket* client_conn, pb::OpType op_type);
     std::unique_ptr<ScanNode> create_scan_node();
 private:
     pb::RegionDdlWork _work;
@@ -79,14 +85,15 @@ private:
     std::string _router_start_key;
     std::string _router_end_key;
     int64_t _limit = 100;
-    int64_t _last_num = 100;
     bool _is_uniq = false;
     bool _is_global_index = false;
     bool _is_column_ddl = false;
+    bool _is_rollup_index = false;
     int64_t _partition_id = 0;
     std::string _task_id;
     int32_t _field_num = 0;
     pb::PossibleIndex _pos_index;
+    FetcherStore _fetcher_store;
 };
     
 } // namespace baikaldb

@@ -16,6 +16,7 @@
 #include <unordered_map>
 #include "hll_common.h"
 #include "slot_ref.h"
+#include <arrow/compute/cast.h>
 
 namespace baikaldb {
 
@@ -34,6 +35,9 @@ int AggFnCall::init(const pb::ExprNode& node) {
         {"sum_distinct", SUM},
         {"avg", AVG},
         {"avg_distinct", AVG},
+        {"multi_count_distinct", MULTI_COUNT_DISTINCT},
+        {"multi_sum_distinct", MULTI_SUM_DISTINCT},
+        {"multi_group_concat_distinct", MULTI_GROUP_CONCAT_DISTINCT},
         {"min", MIN},
         {"max", MAX},
         {"hll_add_agg", HLL_ADD_AGG},
@@ -65,7 +69,10 @@ int AggFnCall::init(const pb::ExprNode& node) {
     if (_fn.name() == "count_distinct" ||
             _fn.name() == "sum_distinct" ||
             _fn.name() == "avg_distinct" ||
-            _fn.name() == "group_concat_distinct") {
+            _fn.name() == "group_concat_distinct" ||
+            _fn.name() == "multi_count_distinct" ||
+            _fn.name() == "multi_sum_distinct" ||
+            _fn.name() == "multi_group_concat_distinct") {
         _is_distinct = true;
     }
     return 0;
@@ -80,12 +87,14 @@ int AggFnCall::type_inferer() {
     switch (_agg_type) {
         case COUNT_STAR:
         case COUNT:
+        case MULTI_COUNT_DISTINCT:
             _col_type = pb::INT64;
             return 0;
         case AVG: 
             _col_type = pb::DOUBLE;
             return 0;
         case SUM:
+        case MULTI_SUM_DISTINCT:
             if (_children.size() == 0) {
                 return -1;
             }
@@ -140,7 +149,8 @@ int AggFnCall::type_inferer() {
             _col_type = pb::TDIGEST;
             return 0;
         }
-        case GROUP_CONCAT: {
+        case GROUP_CONCAT:
+        case MULTI_GROUP_CONCAT_DISTINCT: {
             if (_children.size() == 0) {
                 DB_FATAL("children.size is 0");
                 return -1;
@@ -199,6 +209,9 @@ int AggFnCall::open() {
         case SUM:
         case MIN:
         case MAX:
+        case MULTI_COUNT_DISTINCT:
+        case MULTI_SUM_DISTINCT:
+        case MULTI_GROUP_CONCAT_DISTINCT:
         case HLL_ADD_AGG:
         case HLL_MERGE_AGG:
         case RB_OR_AGG:
@@ -225,7 +238,7 @@ int AggFnCall::open() {
             _agg_type = COUNT_STAR;
         }
     }
-    if (_agg_type == GROUP_CONCAT) {
+    if (_agg_type == GROUP_CONCAT || _agg_type == MULTI_GROUP_CONCAT_DISTINCT) {
         int children_size = _children.size();
         if (children_size < 2) {
             DB_WARNING("children_size %d less than 2", children_size);
@@ -305,7 +318,10 @@ struct AvgIntermediate {
 };
 
 bool AggFnCall::is_initialize(const std::string& key, MemRow* dst) {
-    if (_is_distinct) {
+    if (_is_distinct 
+            && _agg_type != MULTI_COUNT_DISTINCT 
+            && _agg_type != MULTI_SUM_DISTINCT
+            && _agg_type != MULTI_GROUP_CONCAT_DISTINCT) {
         return false;
     }
 
@@ -325,6 +341,16 @@ bool AggFnCall::is_initialize(const std::string& key, MemRow* dst) {
             ExprValue value(pb::STRING);
             AvgIntermediate avg;
             value.str_val.assign((char*)&avg, sizeof(avg));
+            if (dst->get_value(_tuple_id, _intermediate_slot_id).compare(value) == 0) {
+                return true;
+            } else {
+                return false;
+            }
+        }
+        case MULTI_COUNT_DISTINCT:
+        case MULTI_SUM_DISTINCT:
+        case MULTI_GROUP_CONCAT_DISTINCT: {
+            ExprValue value(pb::STRING);
             if (dst->get_value(_tuple_id, _intermediate_slot_id).compare(value) == 0) {
                 return true;
             } else {
@@ -376,6 +402,15 @@ int AggFnCall::initialize(const std::string& key, MemRow* dst, int64_t& used_siz
         case MAX: {
             if (dst_val.is_null()) {
                 dst->set_value(_tuple_id, _intermediate_slot_id, ExprValue::Null());
+            }
+            return 0;
+        }
+        case MULTI_COUNT_DISTINCT:
+        case MULTI_SUM_DISTINCT:
+        case MULTI_GROUP_CONCAT_DISTINCT: {
+            if (dst_val.is_null()) {
+                dst->set_value(_tuple_id, _intermediate_slot_id, ExprValue::Null());
+                dst->set_value(_tuple_id, _final_slot_id, ExprValue::Null());
             }
             return 0;
         }
@@ -515,6 +550,34 @@ int AggFnCall::update(const std::string& key, MemRow* src, MemRow* dst, int64_t&
             }
             return 0;
         }
+        case MULTI_COUNT_DISTINCT:
+        case MULTI_SUM_DISTINCT: {
+            ExprValue value = _children[0]->get_value(src);
+            if (!value.is_null()) {
+                ExprValue value = _children[0]->get_value(src);
+                _multi_distinct_intermediate_val_map[key].insert(value);
+            }
+            used_size += value.size();
+            return 0;
+        }
+        case MULTI_GROUP_CONCAT_DISTINCT: {
+            std::string val = "";
+            bool all_is_null = true;
+            for (size_t i = 0; i < _children[0]->children_size(); i++) {
+                ExprValue value = _children[0]->children(i)->get_value(src);
+                if (!value.is_null()) {
+                    all_is_null = false;
+                    val += value.get_string();
+                }
+            }
+            if (!all_is_null) {
+                ExprValue result = ExprValue(pb::STRING);
+                result.str_val = val;
+                _multi_distinct_intermediate_val_map[key].insert(result);
+            }
+            used_size += val.size();
+            return 0;
+        }
         case HLL_ADD_AGG: {
             ExprValue value = _children[0]->get_value(src);
             if (!value.is_null()) {
@@ -651,7 +714,10 @@ int AggFnCall::update(const std::string& key, MemRow* src, MemRow* dst, int64_t&
     }
 }
 int AggFnCall::merge(const std::string& key, MemRow* src, MemRow* dst, int64_t& used_size) {
-    if (_is_distinct) {
+    if (_is_distinct 
+        && _agg_type != MULTI_COUNT_DISTINCT 
+        && _agg_type != MULTI_SUM_DISTINCT
+        && _agg_type != MULTI_GROUP_CONCAT_DISTINCT) {
         //distinct agg, 无merge概念
         //普通agg与distinct agg一起出现时，普通agg需要多计算一次，因此需要merge
         return update(key, src, dst, used_size);
@@ -673,7 +739,7 @@ int AggFnCall::merge(const std::string& key, MemRow* src, MemRow* dst, int64_t& 
     //首行不需要merge
     if (src == dst) {
         ExprValue dst_value = src->get_value(_tuple_id, _intermediate_slot_id);
-        if (is_bitmap_agg() || is_tdigest_agg() || is_hll_agg()){
+        if (is_bitmap_agg() || is_tdigest_agg() || is_hll_agg()) {
             if (is_bitmap_agg()) {
                 dst_value.cast_to(pb::BITMAP);
             } else if (is_tdigest_agg()) {
@@ -685,6 +751,24 @@ int AggFnCall::merge(const std::string& key, MemRow* src, MemRow* dst, int64_t& 
                 hll::hll_merge_agg(intermediate_val.val.str_val, dst_value.str_val);
             } else {
                 intermediate_val.val = dst_value;
+            }
+        }
+        if (_agg_type == MULTI_COUNT_DISTINCT 
+                || _agg_type == MULTI_SUM_DISTINCT 
+                || _agg_type == MULTI_GROUP_CONCAT_DISTINCT ) {
+            if (!dst_value.is_null()) {
+                int64_t old_used_size = 0;
+                for(auto val : _multi_distinct_intermediate_val_map[key]) {
+                    old_used_size += val.size();
+                }        
+                ExprValueUniqSet tmp_set;
+                multi_distinct_unserialize(dst_value, tmp_set);
+                _multi_distinct_intermediate_val_map[key].merge(tmp_set);
+                int64_t cur_used_size = 0;
+                for(auto val : _multi_distinct_intermediate_val_map[key]) {
+                    cur_used_size += val.size();
+                }
+                used_size += cur_used_size - old_used_size;
             }
         }
         return 0;
@@ -730,6 +814,26 @@ int AggFnCall::merge(const std::string& key, MemRow* src, MemRow* dst, int64_t& 
                 if (result.is_null() || result.compare(value) < 0) {
                     dst->set_value(_tuple_id, _intermediate_slot_id, value);
                 }
+            }
+            return 0;
+        }
+        case MULTI_COUNT_DISTINCT:
+        case MULTI_SUM_DISTINCT:
+        case MULTI_GROUP_CONCAT_DISTINCT: {
+            ExprValue value = src->get_value(_tuple_id, _intermediate_slot_id);
+            if (!value.is_null()) {
+                int64_t old_used_size = 0;
+                for(auto val : _multi_distinct_intermediate_val_map[key]) {
+                    old_used_size += val.size();
+                } 
+                ExprValueUniqSet tmp_set;
+                multi_distinct_unserialize(value, tmp_set);
+                _multi_distinct_intermediate_val_map[key].merge(tmp_set);
+                int64_t cur_used_size = 0;
+                for(auto val : _multi_distinct_intermediate_val_map[key]) {
+                    cur_used_size += val.size();
+                }
+                used_size += cur_used_size - old_used_size;
             }
             return 0;
         }
@@ -817,7 +921,7 @@ int AggFnCall::merge(const std::string& key, MemRow* src, MemRow* dst, int64_t& 
             return -1;
     }
 }
-int AggFnCall::finalize(const std::string& key, MemRow* dst) {
+int AggFnCall::finalize(const std::string& key, MemRow* dst, bool is_merger) {
     if (_agg_type == GROUP_CONCAT && _mem_row_compare != nullptr) {
         auto& intermediate_row_batch = _intermediate_row_batch_map[key];
         if (intermediate_row_batch == nullptr || intermediate_row_batch->size() == 0) {
@@ -827,7 +931,6 @@ int AggFnCall::finalize(const std::string& key, MemRow* dst) {
         _sorter = std::make_shared<Sorter>(_mem_row_compare.get());
         _sorter->add_batch(intermediate_row_batch);
         _sorter->sort();
-
         ExprValue result(pb::STRING);
         bool eos = false;
         do {
@@ -850,6 +953,7 @@ int AggFnCall::finalize(const std::string& key, MemRow* dst) {
         dst->set_value(_tuple_id, _intermediate_slot_id, result);
         return 0;
     }
+
     if (_intermediate_slot_id == _final_slot_id) {
         if (is_bitmap_agg() || is_tdigest_agg() || is_hll_agg()) {
             auto& val = _intermediate_val_map[key];
@@ -894,9 +998,401 @@ int AggFnCall::finalize(const std::string& key, MemRow* dst) {
             dst->set_value(_tuple_id, _final_slot_id, result);
             return 0;
         }
+        case MULTI_COUNT_DISTINCT:
+        case MULTI_SUM_DISTINCT:
+        case MULTI_GROUP_CONCAT_DISTINCT: {
+            if (!is_merger) {
+                ExprValue result(pb::STRING);
+                if (0 != multi_distinct_serialize(result, key)) {
+                    return -1;
+                }
+                dst->set_value(_tuple_id, _intermediate_slot_id, result);
+            } else {
+                ExprValue dst_value = dst->get_value(_tuple_id, _intermediate_slot_id);
+                if (!dst_value.is_null()) {
+                    ExprValueUniqSet tmp_set;
+                    multi_distinct_unserialize(dst_value, tmp_set);
+                    _multi_distinct_intermediate_val_map[key].merge(tmp_set);
+                }
+                ExprValue final_result(pb::INT64);
+                if (_agg_type == MULTI_COUNT_DISTINCT) {
+                    final_result._u.int64_val = _multi_distinct_intermediate_val_map[key].size();
+                } else if (_agg_type == MULTI_SUM_DISTINCT) {
+                    if (_multi_distinct_intermediate_val_map[key].size() != 0) {
+                        if (_multi_distinct_intermediate_val_map[key].begin()->type == pb::DOUBLE
+                            || _multi_distinct_intermediate_val_map[key].begin()->type == pb::FLOAT) {
+                            final_result.type = pb::DOUBLE;
+                        }
+                    }
+                    for (auto value : _multi_distinct_intermediate_val_map[key]) {
+                        final_result.add(value);
+                    }
+                } else if (_agg_type == MULTI_GROUP_CONCAT_DISTINCT) {
+                    final_result = ExprValue(pb::STRING);
+
+                    bool is_asc = _is_asc.size() == 1 && _is_asc[0];
+                    std::vector<std::string> value_list;
+
+                    for (const auto& value : _multi_distinct_intermediate_val_map[key]) {
+                        if (!value.is_null()) {
+                            value_list.emplace_back(value.get_string());
+                        }
+                    }
+                    std::sort(value_list.begin(), value_list.end(), [is_asc] (const std::string& s1, const std::string& s2) {
+                        if (s1.size() == s2.size()) {
+                            return s1 < s2;
+                        } else {
+                            return s1.size() < s2.size();
+                        }
+                    });
+                    if (!is_asc) {
+                        std::reverse(value_list.begin(), value_list.end());
+                    }
+                    for (const auto& value : value_list) {
+                        if (final_result.str_val.length() > 0) {
+                            final_result.str_val += _sep;
+                        }
+                        final_result.str_val += value;
+                    }
+                }
+                ExprValue intermediate_result(pb::STRING);
+                if (0 != multi_distinct_serialize(intermediate_result, key)) {
+                    return -1;
+                }
+                dst->set_value(_tuple_id, _final_slot_id, final_result);
+                dst->set_value(_tuple_id, _intermediate_slot_id, intermediate_result);
+            }
+            return 0;
+        }
         default:
             return 0;
     }
+}
+
+int AggFnCall::multi_distinct_serialize(ExprValue& value, const std::string& key) {
+    if (_multi_distinct_intermediate_val_map[key].size() == 0) {
+        return 0;
+    }
+    pb::PrimitiveType col_type = _multi_distinct_intermediate_val_map[key].begin()->type;
+    switch (col_type) {
+        case pb::BOOL:
+            multi_distinct_serialize_numberic<bool>(value, key);
+            break;
+        case pb::INT8:
+            multi_distinct_serialize_numberic<int8_t>(value, key);
+            break;
+        case pb::INT16:
+            multi_distinct_serialize_numberic<int16_t>(value, key);
+            break;
+        case pb::INT32:
+        case pb::TIME:
+            multi_distinct_serialize_numberic<int32_t>(value, key);
+            break;
+        case pb::INT64:
+            multi_distinct_serialize_numberic<int64_t>(value, key);
+            break;
+        case pb::UINT8:
+            multi_distinct_serialize_numberic<uint8_t>(value, key);
+            break;
+        case pb::UINT16:
+            multi_distinct_serialize_numberic<uint16_t>(value, key);
+            break;
+        case pb::UINT32:
+        case pb::TIMESTAMP:
+        case pb::DATE:
+            multi_distinct_serialize_numberic<uint32_t>(value, key);
+            break;
+        case pb::UINT64:
+        case pb::DATETIME:
+            multi_distinct_serialize_numberic<uint64_t>(value, key);
+            break;
+        case pb::FLOAT:
+            multi_distinct_serialize_numberic<float>(value, key);
+            break;
+        case pb::DOUBLE:
+            multi_distinct_serialize_numberic<double>(value, key);
+            break;
+        case pb::STRING:
+        case pb::HEX:
+            multi_distinct_serialize_string(value, key);
+            break;
+        default:
+            DB_WARNING("unsupport type: %s", pb::PrimitiveType_Name(col_type).c_str());
+            return -1;
+    }
+    return 0;
+}
+
+
+// 序列化数字类型 
+template<typename T>
+int AggFnCall::multi_distinct_serialize_numberic(ExprValue& value, const std::string& key) {
+    pb::PrimitiveType col_type = _multi_distinct_intermediate_val_map[key].begin()->type;
+    int type_size = sizeof(T);
+    const int serialized_set_length = sizeof(char) + type_size * _multi_distinct_intermediate_val_map[key].size();
+    const int total_serialized_length = serialized_set_length + sizeof(int);
+    value.str_val.reserve(total_serialized_length);
+    value.str_val.append((char*)&serialized_set_length, sizeof(int)); // 32位代表序列化后的长度
+    value.str_val.append((char*)&col_type, 1); // 1位代表类型
+    for (auto& val : _multi_distinct_intermediate_val_map[key]) {
+        T numberic_val = val.get_numberic<T>();
+        value.str_val.append((char*)&numberic_val, type_size); // 聚合数据
+    }
+    return 0;
+}
+
+static const int STRING_LENGTH_RECORD_LENGTH = 4;
+int AggFnCall::multi_distinct_serialize_string(ExprValue& value, const std::string& key) {
+    pb::PrimitiveType col_type = _multi_distinct_intermediate_val_map[key].begin()->type;
+    int serialized_set_length = 1;
+    for (auto& val : _multi_distinct_intermediate_val_map[key]) {
+        serialized_set_length += STRING_LENGTH_RECORD_LENGTH + val.str_val.size();
+    }
+    const int total_serialized_length = serialized_set_length + sizeof(int);
+    value.str_val.reserve(total_serialized_length);
+    value.str_val.append((char*)&serialized_set_length, sizeof(int)); // 32位代表序列化后的长度
+    value.str_val.append((char*)&col_type, 1); // 1位代表类型
+    for (auto& val : _multi_distinct_intermediate_val_map[key]) {
+        int str_length = val.str_val.size();
+        const std::string& str = val.get_string();
+        value.str_val.append((char*)&str_length, STRING_LENGTH_RECORD_LENGTH); // 长度
+        value.str_val.append(str.c_str(), str_length); // 聚合数据
+    }
+    return 0;
+}
+
+int AggFnCall::multi_distinct_unserialize(const ExprValue& value, ExprValueUniqSet& set) {
+    char* type_reader = (char*)value.str_val.c_str();
+    int serialized_set_length = 0;
+    memcpy(&serialized_set_length, type_reader, sizeof(int));
+    type_reader += sizeof(int);
+
+    char* end = (char*)value.str_val.c_str() + serialized_set_length + sizeof(int);
+    // type
+    pb::PrimitiveType col_type = (pb::PrimitiveType)* type_reader;
+    type_reader++; // 聚合数据类型
+    int ret = 0;
+    switch (col_type) {
+        case pb::BOOL:
+            ret = multi_distinct_unserialize_numberic<bool>(type_reader, end, set, col_type);
+            break;
+        case pb::INT8:
+            ret = multi_distinct_unserialize_numberic<int8_t>(type_reader, end, set, col_type);
+            break;
+        case pb::INT16:
+            ret = multi_distinct_unserialize_numberic<int16_t>(type_reader, end, set, col_type);
+            break;
+        case pb::INT32:
+        case pb::TIME:
+            ret = multi_distinct_unserialize_numberic<int32_t>(type_reader, end, set, col_type);
+            break;
+        case pb::INT64:
+            ret = multi_distinct_unserialize_numberic<int64_t>(type_reader, end, set, col_type);
+            break;
+        case pb::UINT8:
+            ret = multi_distinct_unserialize_numberic<uint8_t>(type_reader, end, set, col_type);
+            break;
+        case pb::UINT16:
+            ret = multi_distinct_unserialize_numberic<uint16_t>(type_reader, end, set, col_type);
+            break;
+        case pb::UINT32:
+        case pb::TIMESTAMP:
+        case pb::DATE:
+            ret = multi_distinct_unserialize_numberic<uint32_t>(type_reader, end, set, col_type);
+            break;
+        case pb::UINT64:
+        case pb::DATETIME:
+            ret = multi_distinct_unserialize_numberic<uint64_t>(type_reader, end, set, col_type);
+            break;
+        case pb::FLOAT:
+            ret = multi_distinct_unserialize_numberic<float>(type_reader, end, set, col_type);
+            break;
+        case pb::DOUBLE:
+            ret = multi_distinct_unserialize_numberic<double>(type_reader, end, set, col_type);
+            break;
+        case pb::STRING:
+        case pb::HEX:
+            ret = multi_distinct_unserialize_string(type_reader, end, set, col_type);
+            break;
+        default:
+            DB_WARNING("unsupport type: %s", pb::PrimitiveType_Name(col_type).c_str());
+            return -1;
+    }
+    return ret;
+}
+
+template<typename T>
+int AggFnCall::multi_distinct_unserialize_numberic(char* type_reader, char* end, ExprValueUniqSet& set, const pb::PrimitiveType& col_type) {
+    int type_size = sizeof(T);
+    while (type_reader < end) {
+        T val;
+        memcpy(&val, type_reader, type_size);
+        ExprValue expr_value(col_type);
+        if (0 != expr_value.set_numeric<T>(val)) {
+            return -1;
+        }
+        set.insert(expr_value);
+        type_reader += type_size;
+    }
+    return 0;
+}
+
+int AggFnCall::multi_distinct_unserialize_string(char* type_reader, char* end, ExprValueUniqSet& set, const pb::PrimitiveType& col_type) {
+    while (type_reader < end) {
+        int type_size = *(int*)type_reader;
+        type_reader += STRING_LENGTH_RECORD_LENGTH;
+        ExprValue expr_value(col_type);
+        expr_value.str_val.append(type_reader, type_size); ;
+        set.insert(expr_value);
+        type_reader += type_size;
+    }
+    return 0;
+}
+
+bool AggFnCall::can_use_arrow_vector() {
+    switch (_agg_type) {
+        case COUNT_STAR:
+            return true;
+        case COUNT: 
+        case SUM: 
+        case MIN:
+        case MAX: 
+        case MULTI_COUNT_DISTINCT:
+            break;
+        case AVG: 
+        case HLL_ADD_AGG:
+        case HLL_MERGE_AGG: 
+        case RB_OR_AGG:
+        case RB_OR_CARDINALITY_AGG:
+        case RB_AND_AGG:
+        case RB_AND_CARDINALITY_AGG:
+        case RB_XOR_AGG:
+        case RB_XOR_CARDINALITY_AGG:
+        case RB_BUILD_AGG: 
+        case TDIGEST_AGG:
+        case TDIGEST_BUILD_AGG: 
+        case GROUP_CONCAT:
+        default:
+            return false;
+    }
+    if (_children.size() != 1) {
+        return false; // count(distinct fieldA, filedB) not supported.
+    }
+    if (_agg_type == COUNT && _children[0]->is_literal()) {
+        if (_children[0]->get_value(nullptr).is_null()) {
+            return false; // count(null)
+        }
+    }
+    for (auto& c : _children) {
+        if (!c->can_use_arrow_vector()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void AggFnCall::add_agg_projection_slot_ref(bool is_merge, 
+                                    std::vector<arrow::compute::Expression>& generate_projection_exprs,
+                                    std::vector<std::string>& generate_projection_exprs_names) {
+    // 非distinct的MergeAggNode作用列是中间聚合列, 如需要加projection,应该将agg_tuple_id.final_slot_id中间聚合列加入到project映射中
+    if (is_merge && !_is_distinct) {
+        std::string field_name = std::to_string(_tuple_id) + "_" + std::to_string(_final_slot_id);
+        generate_projection_exprs.emplace_back(arrow::compute::field_ref(field_name));
+        generate_projection_exprs_names.emplace_back(field_name);
+    }
+}
+
+int AggFnCall::transfer_to_arrow_agg_function(std::vector<arrow::compute::Aggregate>& aggs, 
+                                              bool has_group_by, 
+                                              bool is_merge, 
+                                              std::vector<arrow::compute::Expression>& generate_projection_exprs,
+                                              std::vector<std::string>& generate_projection_exprs_names) {
+    // arrow里有没有group by用的两套算子, 有group by算子需要加前缀hash_
+    std::string func_name;
+    bool need_check_type = false;  // 处理sum(string)需要先加cast
+    if (has_group_by) {
+        func_name = "hash_";
+    }
+    switch (_agg_type) {
+        case COUNT_STAR:
+            if (_is_distinct) {
+                func_name += "count_distinct";
+            } else {
+                func_name += is_merge ? "sum" : "count_all";
+            }
+            break;
+        case COUNT: 
+        case MULTI_COUNT_DISTINCT: 
+            if (_is_distinct) {
+                func_name += "count_distinct";
+            } else {
+                func_name += is_merge ? "sum" : "count";
+            }
+            break;
+        case SUM: 
+            func_name += "sum";
+            need_check_type = true;
+            break;
+        case MIN:
+            func_name += "min";
+            break;
+        case MAX: 
+            func_name += "max";
+            break;
+        default:
+            DB_FATAL("not support now: type: %d", _agg_type);
+            return -1;
+    }
+
+    // 构建args
+    std::vector<arrow::FieldRef> args;
+    std::string new_field_name = std::to_string(_tuple_id) + "_" + std::to_string(_final_slot_id);
+    if (is_merge && !_is_distinct) {
+        // 非distinct作用列是中间聚合列
+        args.emplace_back(new_field_name);
+    } else {
+        for (int i = 0; i < _children.size(); ++i) {
+            if (_agg_type == COUNT_STAR && _children[i]->is_literal()) {
+                continue;
+            }
+            if (_children[i]->transfer_to_arrow_expression() != 0) {
+                DB_FATAL("get arrow agg function fail, id: %d", i);
+                return -1;
+            }
+            if (_children[i]->is_slot_ref() 
+                    &&   !(need_check_type && is_string(_children[i]->col_type()))) {
+                // 直接使用作用列
+                args.emplace_back(*(_children[i]->arrow_expr().field_ref()));
+            } else {
+                // 以下情况需要生成一个临时列, 用于后续的聚合
+                // 1. 作用列是slot_ref, 但是需要先加cast, 如sum(string slot_ref)
+                // 2. 作用列是function, 如sum(a+b)
+                if (need_check_type 
+                        &&  (_children[i]->is_slot_ref()
+                            || (_children[i]->arrow_expr().type() != nullptr && arrow::is_base_binary_like(_children[i]->arrow_expr().type()->id())))) {
+                    generate_projection_exprs.emplace_back(arrow::compute::call("cast", 
+                                                                {_children[i]->arrow_expr()}, 
+                                                                arrow::compute::CastOptions::Unsafe(arrow::int64())));
+                } else {
+                    generate_projection_exprs.emplace_back(_children[i]->arrow_expr());
+                }
+                std::string tmp_name = "tmp_" + std::to_string(generate_projection_exprs.size());
+                generate_projection_exprs_names.emplace_back(tmp_name);
+                args.emplace_back(arrow::FieldRef(tmp_name));
+            }
+        }
+    }
+    //DB_WARNING("agg func: %s, arg: %s, new_field_name: %s", func_name.c_str(), arg_str.c_str(), new_field_name.c_str());
+    aggs.emplace_back(func_name, nullptr, args, new_field_name);
+    if (is_merge && _is_distinct && _final_slot_id != _intermediate_slot_id) {
+        // arrow执行遇到distinct会忽略_intermediate_slot_id
+        // 会导致如上层order by scalar func, 需要先根据tuple构建projection算子产生orderby临时列, 而agg缺失TupleId_IntermediateSlotId的列
+        // 因此在这里补上intermediate_slot_id的列
+        // [MPP TODO] mpp维护每个execnode的schema, 这里可以优化
+        std::string new_field_name = std::to_string(_tuple_id) + "_" + std::to_string(_intermediate_slot_id);
+        aggs.emplace_back(func_name, nullptr, args, new_field_name);
+    }
+    return 0;
 }
 }
 

@@ -41,6 +41,7 @@ DEFINE_int32(rocks_data_compaction_pri, 3, "rocksdb data_cf compaction_pri, defa
 DEFINE_double(rocks_level_multiplier, 10, "data_cf rocksdb max_bytes_for_level_multiplier, default: 10");
 DEFINE_double(rocks_high_pri_pool_ratio, 0.5, "rocksdb cache high_pri_pool_ratio, default: 0.5");
 DEFINE_int32(rocks_max_open_files, 1024, "rocksdb max_open_files, default: 1024");
+DEFINE_int32(cold_rocks_max_open_files, 4096, "cold rocksdb max_open_files, default: 1024");
 DEFINE_int32(rocks_max_subcompactions, 4, "rocks_max_subcompactions");
 DEFINE_int32(rocks_max_background_compactions, 20, "max_background_compactions");
 DEFINE_bool(rocks_optimize_filters_for_hits, false, "rocks_optimize_filters_for_hits");
@@ -81,10 +82,8 @@ DEFINE_bool(cold_sst_use_zstd, false, "default LZ4");
 DEFINE_int32(max_dict_bytes, 16 * 1024, "default 16K");
 DEFINE_int32(zstd_max_train_bytes, 256 * 1024, "default 256K");
 DEFINE_bool(olap_import_mode, false, "is olap import, default: false");
-
-DEFINE_bool(enable_blob_files, false, "set it to true to enable key-value separation");
-DEFINE_int32(min_blob_size, 1 * 1024,
-             "values at or above this threshold will be written to blob files during flush or compaction");
+DEFINE_bool(rocks_enable_blob_files, false, "rocksdb enable_blob_files, default: false");
+DEFINE_uint64(rocks_min_blob_size, 4096, "rocksdb min_blob_size, default: 4096");
 
 const std::string RocksWrapper::RAFT_LOG_CF = "raft_log";
 const std::string RocksWrapper::BIN_LOG_CF  = "bin_log_new";
@@ -156,7 +155,8 @@ int32_t RocksWrapper::init(const std::string& path) {
     db_options.max_open_files = FLAGS_rocks_max_open_files;
     db_options.skip_stats_update_on_db_open = FLAGS_rocks_skip_stats_update_on_db_open;
     db_options.compaction_readahead_size = FLAGS_rocks_compaction_readahead_size;
-    db_options.table_cache_numshardbits = 8;
+    // rocksdb默认是6，之前配错了8，导致很大概率频繁read_file，大量加载了index和filter block
+    db_options.table_cache_numshardbits = 6;
     db_options.WAL_ttl_seconds = 10 * 60;
     db_options.WAL_size_limit_MB = 0;
     //打开后有些集群内存严重上涨
@@ -258,6 +258,14 @@ int32_t RocksWrapper::init(const std::string& path) {
     _data_cf_option.max_write_buffer_number_to_maintain = _data_cf_option.max_write_buffer_number;
     _data_cf_option.write_buffer_size = FLAGS_write_buffer_size;
     _data_cf_option.min_write_buffer_number_to_merge = FLAGS_min_write_buffer_number_to_merge;
+    _data_cf_option.enable_blob_files = FLAGS_rocks_enable_blob_files;
+    _data_cf_option.min_blob_size = FLAGS_rocks_min_blob_size;
+    _data_cf_option.blob_file_size = FLAGS_write_buffer_size;
+    _data_cf_option.blob_compression_type = rocksdb::CompressionType::kLZ4Compression;
+    _data_cf_option.enable_blob_garbage_collection = true;
+    _data_cf_option.blob_garbage_collection_age_cutoff = 0.25;
+    _data_cf_option.blob_garbage_collection_force_threshold = 0.8;
+    _data_cf_option.blob_compaction_readahead_size = FLAGS_rocks_compaction_readahead_size;
 
     _data_cf_option.max_bytes_for_level_base = FLAGS_max_bytes_for_level_base;
     // 保证L0层sst往下compaction使用LZ4, 否则快速导入发来的LZ4 sst ingest到L0层, 再往下compaction会解压, 导致磁盘暴涨
@@ -277,17 +285,6 @@ int32_t RocksWrapper::init(const std::string& path) {
         _data_cf_option.bottommost_compression = rocksdb::kZSTD;
         _data_cf_option.bottommost_compression_opts.max_dict_bytes = 1 << 14; // 16KB
         _data_cf_option.bottommost_compression_opts.zstd_max_train_bytes = 1 << 18; // 256KB
-    }
-
-    // key-value separation
-    if (FLAGS_enable_blob_files) {
-        _data_cf_option.enable_blob_files = true;
-        _data_cf_option.min_blob_size = FLAGS_min_blob_size;
-        _data_cf_option.blob_file_size = 1ULL << 28;
-        _data_cf_option.blob_compression_type = rocksdb::CompressionType::kLZ4Compression;
-        _data_cf_option.enable_blob_garbage_collection  = true;
-        _data_cf_option.blob_garbage_collection_age_cutoff  = 0.25;
-        _data_cf_option.blob_garbage_collection_force_threshold  = 0.8;
     }
 
     //todo
@@ -514,7 +511,7 @@ int32_t RocksWrapper::init_cold_rocksdb(const std::string& path) {
     db_options.create_if_missing = true;
     db_options.skip_stats_update_on_db_open = true;
     db_options.skip_checking_sst_file_sizes_on_db_open = true;
-    db_options.max_open_files = FLAGS_rocks_max_open_files;
+    db_options.max_open_files = FLAGS_cold_rocks_max_open_files;
     db_options.env = _cold_env.get();
 
     // prefix length: regionid(8 Bytes) tableid(8 Bytes)

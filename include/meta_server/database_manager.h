@@ -126,6 +126,10 @@ private:
     }
 
 private:
+    void add_privilege_for_database(const pb::MetaManagerRequest& request);
+    void drop_privilege_for_database(const pb::MetaManagerRequest& request, const int64_t database_id);
+
+private:
     //std::mutex                                          _database_mutex;
     bthread_mutex_t                                          _database_mutex;
     int64_t                                             _max_database_id;
