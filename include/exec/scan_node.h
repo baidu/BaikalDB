@@ -268,16 +268,24 @@ public:
         index.use_for = use_for;
         _scan_indexs.emplace_back(std::move(index));
         bool has_index = false;
+        if (pos_index.has_sort_index()) {
+            _has_index = true;
+            return;
+        }
+        if (pos_index.left_field_cnt() > 0) {
+            _has_index = true;
+            return;
+        }
+        if (pos_index.right_field_cnt() > 0) {
+            _has_index = true;
+            return;
+        }
         for (auto& range : pos_index.ranges()) {
             if (range.left_field_cnt() > 0) {
                 has_index = true;
                 break;
             }
             if (range.right_field_cnt() > 0) {
-                has_index = true;
-                break;
-            }
-            if (pos_index.has_sort_index()) {
                 has_index = true;
                 break;
             }

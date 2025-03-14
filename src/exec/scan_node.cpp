@@ -214,9 +214,8 @@ void ScanNode::show_explain(std::vector<std::map<std::string, std::string>>& out
         explain_info["type"] = "range";
         auto& pos_index = _main_path.path(index_id)->pos_index;
         if (pos_index.ranges_size() == 1) {
-            int field_cnt = pos_index.ranges(0).left_field_cnt();
-            if (field_cnt == (int)index_info.fields.size() && 
-                    pos_index.ranges(0).left_pb_record() == pos_index.ranges(0).right_pb_record()) {
+            int field_cnt = pos_index.has_left_field_cnt() ? pos_index.left_field_cnt() : pos_index.ranges(0).left_field_cnt();
+            if (field_cnt == (int)index_info.fields.size() && pos_index.is_eq()) {
                 explain_info["type"] = "eq_ref";
                 if (index_info.type == pb::I_UNIQ || index_info.type == pb::I_PRIMARY) {
                     explain_info["type"] = "const";
