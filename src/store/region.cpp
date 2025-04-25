@@ -4779,7 +4779,11 @@ void Region::transfer_leader_after_split() {
         }
         int64_t peer_applied_index = 0;
         int64_t peer_dml_latency = 0;
-        RpcSender::get_peer_applied_index(peer_string, _region_id, peer_applied_index, peer_dml_latency);
+        int get_apply_index_ret = RpcSender::get_peer_applied_index(peer_string, _region_id, peer_applied_index, peer_dml_latency);
+        if (get_apply_index_ret != 0) {
+            DB_WARNING("get_peer_applied_index fail,region_id: %ld", _region_id);
+            return;
+        }
         DB_WARNING("region_id: %ld, peer:%s, applied_index:%ld, dml_latency:%ld after split",
                    _region_id, peer_string.c_str(), peer_applied_index, peer_dml_latency);
         int64_t peer_catchup_time = (_applied_index - peer_applied_index) * peer_dml_latency;
