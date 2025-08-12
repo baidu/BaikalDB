@@ -852,7 +852,7 @@ void Store::manual_split_region(google::protobuf::RpcController* controller,
             int64_t region_id = region_ids[i];
             int64_t userid = userids[i];
             SmartRegion region = get_region(region_id);
-            if (region->get_version() == 0 || region->is_binlog_region() || region->is_learner() || 
+            if (region != nullptr && region->get_version() == 0 || region->is_binlog_region() || region->is_learner() || 
                     region->removed() || region->olap_state() != pb::OLAP_ACTIVE || !region->is_leader()) {
                 response->set_errcode(pb::EXEC_FAIL);
                 response->set_errmsg("cant do manual split");

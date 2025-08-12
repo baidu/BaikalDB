@@ -274,7 +274,8 @@ int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node,
     }
     //如果该表没有全局二级索引
     //full_export+join也需要把主键放入slot
-    if (!schema_factory->has_global_index(main_table_id) && !is_full_export) {
+    // merge_index需要返回主键排重
+    if (!schema_factory->has_global_index(main_table_id) && !is_full_export && !scan_node->has_merge_index()) {
         return 0;
     }
     bool need_put_pk = false;
@@ -286,6 +287,8 @@ int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node,
         need_put_pk = true;
     } else if (hit_global && !covering_index) {
         // 如果只是索引覆盖，则不需要进行后续的操作
+        need_put_pk = true;
+    } else if (scan_node->has_merge_index()) {
         need_put_pk = true;
     }
     if (!need_put_pk) {

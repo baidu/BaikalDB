@@ -16,6 +16,12 @@
 
 namespace baikaldb {
 
+// 构造大根堆
+// 当前堆中个数 < limit时，加入并调整堆(shiftup)
+// 当前堆中个数 = limit是，对比堆顶元素和当前数据
+//    A. 堆顶值 > 当前值， 继续
+//    B. 堆顶值 < 当前值， 用当前数据替换堆顶，调整堆(shiftdown)
+//    C. 堆顶值 = 当前值， 按照先后顺序，先来者小，则保留堆顶值
 void TopNSorter::add_batch(std::shared_ptr<RowBatch>& batch){ 
     while (!batch->is_traverse_over()) {
         _current_idx ++;
@@ -43,16 +49,7 @@ void TopNSorter::sort() {
     if (_comp->need_not_compare()) {
         return;
     }
-    auto compare_func = [&](const TopNHeapItem& left, const TopNHeapItem& right) {
-        auto comp = _comp->compare(left.row.get(), right.row.get());
-        if (comp < 0) {
-            return true;
-        } else if (comp == 0 && left.idx < right.idx) {
-            return true;
-        }
-        return false;
-    };
-    std::sort(_mem_row_heap.begin(), _mem_row_heap.end(), compare_func);
+    std::sort(_mem_row_heap.begin(), _mem_row_heap.end(), get_less_func());
 }
 
 int TopNSorter::get_next(RowBatch* batch, bool* eos) {
@@ -78,18 +75,14 @@ void TopNSorter::shiftdown(size_t index) {
     }
     size_t min_index = index;
     if (left_index < _current_count) {
-        int64_t com = _comp->compare(_mem_row_heap[left_index].row.get(),
-                _mem_row_heap[min_index].row.get());
-        if (com > 0) {
+        if (get_less_func()(_mem_row_heap[min_index], _mem_row_heap[left_index])) {
             min_index = left_index;
-        }
+        } 
     }
     if (right_index < _current_count) {
-        int64_t com = _comp->compare(_mem_row_heap[right_index].row.get(),
-                _mem_row_heap[min_index].row.get());
-        if (com > 0) {
-            min_index = right_index;  
-        }
+        if (get_less_func()(_mem_row_heap[min_index], _mem_row_heap[right_index])) {
+            min_index = right_index;
+        } 
     }
     if (min_index != index) {
         std::iter_swap(_mem_row_heap.begin() + min_index, _mem_row_heap.begin() + index);
@@ -102,11 +95,11 @@ void TopNSorter::shiftup(size_t index) {
         return;
     }
     size_t parent = (index - 1) / 2;
-    auto com = _comp->compare(_mem_row_heap[index].row.get(), _mem_row_heap[parent].row.get());
-    if (com > 0) {
+
+    if (get_less_func()(_mem_row_heap[parent], _mem_row_heap[index])) {
         std::iter_swap(_mem_row_heap.begin() + index, _mem_row_heap.begin() + parent);
         shiftup(parent);
-    }
+    } 
 }
 
 }

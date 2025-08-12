@@ -441,6 +441,9 @@ bool ExprNode::like_node_optimize(ExprNode** root, std::vector<ExprNode*>& new_e
     if (!is_prefix || old_val.length() > prefix_value.str_val.length() + 1) {
         return false;
     }
+    if (is_prefix && old_val!= prefix_value.str_val + '%') {
+        return false;
+    }
     if (is_eq) {
         ScalarFnCall * eqexpr = new ScalarFnCall();
         SlotRef *sloteq = slot->clone();

@@ -40,6 +40,18 @@ public:
 private:
     virtual void shiftdown(size_t index);
     virtual void shiftup(size_t index);
+    std::function<bool(const TopNHeapItem& left, const TopNHeapItem& right)>
+    get_less_func() {
+        return [this](const TopNHeapItem& left, const TopNHeapItem& right) {
+            auto comp = _comp->compare(left.row.get(), right.row.get());
+            if (comp < 0) {
+                return true;
+            } else if (comp == 0 && left.idx < right.idx) {
+                return true;
+            }
+            return false;
+        };
+    }
 
 private:
     std::vector<TopNHeapItem> _mem_row_heap;
