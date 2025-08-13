@@ -94,6 +94,7 @@ if (WITH_SYSTEM_LIBS)
     ADD_LIBRARY(boost SHARED IMPORTED GLOBAL)
 else ()
     include(boost)
+    include_directories(SYSTEM ${BOOST_INSTALL_DIR}/include)
 endif ()
 message(boost: ${Boost_VERSION}, ${Boost_LIB_VERSION}, DIRS: ${Boost_INCLUDE_DIRS}, LIBS: ${Boost_LIBRARIES})
 
@@ -447,6 +448,7 @@ add_definitions(
 )
 
 file(GLOB ENGINE src/engine/*.cpp)
+file(GLOB COLUMN src/column/*.cpp)
 file(GLOB EXEC src/exec/*.cpp)
 file(GLOB EXPR src/expr/*.cpp)
 file(GLOB LOGICAL_PLAN src/logical_plan/*.cpp)
@@ -470,6 +472,7 @@ set(COMMON_INC
         ${CMAKE_CURRENT_BINARY_DIR}/sqlparser
         include/common
         include/engine
+        include/column
         include/exec
         include/expr
         include/logical_plan
@@ -490,6 +493,7 @@ file(GLOB COMMON
         ${CMAKE_CURRENT_BINARY_DIR}/proto/*.pb.*
         src/common/*.cpp
         ${ENGINE}
+        ${COLUMN}
         ${EXEC}
         ${EXPR}
         ${LOGICAL_PLAN}

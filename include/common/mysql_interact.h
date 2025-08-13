@@ -20,6 +20,10 @@
 #else
 namespace baikal {
 namespace client {
+enum ErrorCode {
+    SUCCESS = 0,
+    VALUE_IS_NULL = -11
+};
 class ResultSet {
 public:
     uint64_t get_affected_rows() {
@@ -29,6 +33,12 @@ public:
         return false;
     }
     int get_uint64(const std::string& col, uint64_t* val) {
+        return 0;
+    }
+    int get_int64(const std::string& col, int64_t* val) {
+        return 0;
+    }
+    int get_string(uint32_t column_index, std::string* value) {
         return 0;
     }
 };
