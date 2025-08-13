@@ -37,10 +37,6 @@ ExternalProject_Add(
         GIT_TAG "9.7.x"
         #URL "https://github.com/facebook/rocksdb/archive/v7.10.2.tar.gz"
         UPDATE_COMMAND ""
-#        CONFIGURE_COMMAND ""
-#        BUILD_IN_SOURCE 1
-#        BUILD_COMMAND mv ../build.sh . COMMAND sh build.sh
-#        INSTALL_COMMAND mkdir -p ${ROCKSDB_INSTALL_DIR}/lib COMMAND cp -r include ${ROCKSDB_INSTALL_DIR}/ COMMAND cp librocksdb.a ${ROCKSDB_LIBRARIES}
         CMAKE_ARGS -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
         -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
         -DCMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS}
@@ -70,10 +66,7 @@ ExternalProject_Add(
         -DCMAKE_POSITION_INDEPENDENT_CODE:BOOL=ON
         -DCMAKE_BUILD_TYPE:STRING=${THIRD_PARTY_BUILD_TYPE}
         BUILD_COMMAND make -j2
-        INSTALL_COMMAND
-            make install &&
-            mkdir -p ${ROCKSDB_INSTALL_DIR}/include/rocksdb/db/compaction &&
-            cp ${ROCKSDB_SOURCES_DIR}/src/extern_rocksdb/db/compaction/*.h ${ROCKSDB_INSTALL_DIR}/include/rocksdb/db/compaction
+        INSTALL_COMMAND ${CMAKE_COMMAND} -E echo "Installing RocksDB..." && make install && ${CMAKE_COMMAND} -E make_directory ${ROCKSDB_INSTALL_DIR}/include/rocksdb/db/compaction && ${CMAKE_COMMAND} -E echo "mkdir success" && ${CMAKE_COMMAND} -E copy_directory <SOURCE_DIR>/db/compaction ${ROCKSDB_INSTALL_DIR}/include/db/compaction
 )
 
 ADD_DEPENDENCIES(extern_rocksdb zlib snappy zstd lz4 gflags liburing)
