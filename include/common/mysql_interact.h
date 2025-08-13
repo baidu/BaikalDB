@@ -14,7 +14,61 @@
 
 #pragma once
 
+#include "common.h"
+#ifdef BAIDU_INTERNAL
 #include "baikal_client.h"
+#else
+namespace baikal {
+namespace client {
+class ResultSet {
+public:
+    uint64_t get_affected_rows() {
+        return 0;
+    }
+    bool next() {
+        return false;
+    }
+    int get_uint64(const std::string& col, uint64_t* val) {
+        return 0;
+    }
+};
+class Service {
+public:
+    int query(int i, const std::string& sql, ResultSet* res) {
+        return -1;
+    }
+};
+class Manager {
+public:
+    int init(const std::string& path, const std::string& conf) {
+        return -1;
+    }
+    Service* get_service(const std::string& name) {
+        return nullptr;
+    }
+};
+typedef int MYSQL;
+class MysqlShortConnection {
+    int execute(const std::string& sql, ResultSet* result) {
+        return 0;
+    }
+    int execute(const std::string& sql, bool store, ResultSet* result) {
+        return 0;
+    }
+    MYSQL* get_mysql_handle() {
+        return NULL;
+    }
+    int get_error_code(int* error_code) {
+        return 0;
+    }
+    std::string get_error_des() {
+        return 0;
+    }
+};
+
+}
+}
+#endif
 #include "proto/common.pb.h"
 
 namespace baikaldb {

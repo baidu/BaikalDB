@@ -348,6 +348,8 @@ bool AfsExtFileWriter::close() {
     return all_succ ? true : false;
 }
 
+#endif
+
 int64_t CompactionExtFileReader::read(char* buf, uint32_t count, uint32_t offset, bool* eof) {
     if (!_is_open) {
         DB_FATAL("File: %s is not open for reading", _file_name.c_str());
@@ -487,6 +489,8 @@ bool CompactionExtFileWriter::close() {
     _is_open = false;
     return true;
 }
+
+#ifdef BAIDU_INTERNAL
 
 AfsExtFileSystem::~AfsExtFileSystem() {
     for (auto& info : _ugi_infos) {

@@ -575,7 +575,9 @@ std::shared_ptr<FileSystem> create_filesystem(const std::string& cluster_name,
                                               const std::string& conf_file) {
     std::shared_ptr<FileSystem> fs;
     if (cluster_name.find("afs") != std::string::npos) {
+#ifdef BAIDU_INTERNAL
         fs.reset(new (std::nothrow) AfsFileSystem(cluster_name, user_name, password, conf_file));
+#endif
     } else {
         fs.reset(new (std::nothrow) PosixFileSystem());
     }

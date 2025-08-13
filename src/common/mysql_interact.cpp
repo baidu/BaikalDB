@@ -63,7 +63,9 @@ std::string MysqlInteract::mysql_escape_string(baikal::client::MysqlShortConnect
     std::string escape_value;
     if (conn != nullptr) {
         MYSQL* RES = conn->get_mysql_handle();
+#ifdef BAIDU_INTERNAL
         mysql_real_escape_string(RES, str, value.c_str(), value.size());
+#endif
         escape_value = str;
     } else {
         delete[] str;
@@ -79,6 +81,7 @@ std::unique_ptr<baikal::client::MysqlShortConnection> MysqlInteract::fetch_conne
         DB_WARNING("Fail to new MysqlShortConnection");
         return nullptr;
     }
+#ifdef BAIDU_INTERNAL
     baikal::client::ConnectionConf conn_conf;
     conn_conf.username = _mysql_info.username();
     conn_conf.password = _mysql_info.password();
@@ -119,6 +122,7 @@ std::unique_ptr<baikal::client::MysqlShortConnection> MysqlInteract::fetch_conne
     if (ret != 0) {
         return nullptr;
     }
+#endif
     return conn;
 }
 

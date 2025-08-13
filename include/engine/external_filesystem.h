@@ -269,6 +269,8 @@ private:
     std::vector<AfsRWInfo> _afs_rw_infos;
 };
 
+#endif
+
 class CompactionExtFileReader : public ExtFileReader {
 public:
     explicit CompactionExtFileReader(const std::string& file_name, const std::string& server_address, const std::string& remote_compaction_id)
@@ -343,8 +345,6 @@ private:
     std::string _remote_compaction_id;
     int64_t _offset;
 };
-
-#endif
 
 class ExtFileSystem {
 public:
@@ -478,7 +478,7 @@ private:
     static bool need_delete_partition(const std::string& partition, const std::string& start_str);
     static int check_partition(const std::string& partition, std::string* start_date, std::string* end_date);
 };
-
+#endif
 
 class CompactionExtFileSystem : public ExtFileSystem {
 public:
@@ -524,7 +524,5 @@ private:
     bool _is_open;
     std::string _remote_compaction_id;
 };
-
-#endif
 
 }  // namespace baikaldb

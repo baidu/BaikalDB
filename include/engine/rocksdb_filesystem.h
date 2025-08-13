@@ -879,7 +879,7 @@ public:
         std::vector<std::string> split_vec;
         boost::split(split_vec, d, boost::is_any_of("/"));
         if (split_vec.size() == 3) {
-            const string& db_path = split_vec[0] + "/" + split_vec[1];
+            const std::string& db_path = split_vec[0] + "/" + split_vec[1];
             auto s = target_->CreateDirIfMissing(db_path, options, dbg);
             FS_LOG(WARNING, "dir: %s, status: %s", db_path.c_str(), s.ToString().c_str());
         }

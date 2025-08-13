@@ -66,7 +66,7 @@ ExternalProject_Add(
         -DCMAKE_POSITION_INDEPENDENT_CODE:BOOL=ON
         -DCMAKE_BUILD_TYPE:STRING=${THIRD_PARTY_BUILD_TYPE}
         BUILD_COMMAND make -j2
-        INSTALL_COMMAND ${CMAKE_COMMAND} -E echo "Installing RocksDB..." && make install && ${CMAKE_COMMAND} -E make_directory ${ROCKSDB_INSTALL_DIR}/include/rocksdb/db/compaction && ${CMAKE_COMMAND} -E echo "mkdir success" && ${CMAKE_COMMAND} -E copy_directory <SOURCE_DIR>/db/compaction ${ROCKSDB_INSTALL_DIR}/include/db/compaction
+        INSTALL_COMMAND ${CMAKE_COMMAND} -E echo "Installing RocksDB..." && make install && ${CMAKE_COMMAND} -E make_directory ${ROCKSDB_INSTALL_DIR}/include/db/compaction && ${CMAKE_COMMAND} -E echo "mkdir success" && ${CMAKE_COMMAND} -E copy_directory <SOURCE_DIR>/db/compaction ${ROCKSDB_INSTALL_DIR}/include/db/compaction
 )
 
 ADD_DEPENDENCIES(extern_rocksdb zlib snappy zstd lz4 gflags liburing)

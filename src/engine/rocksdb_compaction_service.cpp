@@ -47,20 +47,19 @@ rocksdb::CompactionServiceScheduleResponse MyCompactionService::Schedule(const r
     if (!FLAGS_enable_remote_compaction) {
         return rocksdb::CompactionServiceScheduleResponse("", rocksdb::CompactionServiceJobStatus::kUseLocal);
     }
+    const std::string& remote_compaction_id_str = rocksdb::Env::Default()->GenerateUniqueId();  
 #ifdef REMOTE_COMPACTION
     // store端口未启动时，先local compaction
     if (!Store::get_instance()->is_init()) {
         DB_WARNING("store port is not open, use local compaction");
         return rocksdb::CompactionServiceScheduleResponse("", rocksdb::CompactionServiceJobStatus::kUseLocal);
     }
-#endif
 
     rocksdb::CompactionServiceInput compaction_input;
     rocksdb::Status s = rocksdb::CompactionServiceInput::Read(compaction_service_input, &compaction_input);
     if (!s.ok()) {
          return rocksdb::CompactionServiceScheduleResponse("", rocksdb::CompactionServiceJobStatus::kUseLocal);
     }
-    const std::string& remote_compaction_id_str = rocksdb::Env::Default()->GenerateUniqueId();  
     // 统计file大小
     size_t total_file_size = 0;
     for (const auto& file : compaction_input.input_files) {
@@ -111,14 +110,42 @@ rocksdb::CompactionServiceScheduleResponse MyCompactionService::Schedule(const r
     }
     // 异步调用 RPC，并传入 OnRPCDone 回调
     stub.do_compaction(&closure->cntl, &request, &closure->_response, closure.get());
+#endif
     return rocksdb::CompactionServiceScheduleResponse(remote_compaction_id_str, rocksdb::CompactionServiceJobStatus::kSuccess);
 }
+
+#ifdef REMOTE_COMPACTION
+static int check_file_vaild(const pb::RemoteCompactionResponse& response,
+                                        const rocksdb::CompactionServiceResult& compaction_result,
+                                        const std::string& remote_compaction_id,
+                                        const std::string& file_dir) {
+    std::map<std::string, int64_t> file_size_map;
+    for (int i = 0; i < response.output_file_info_size(); i++) {
+        file_size_map[response.output_file_info(i).file_path()] = response.output_file_info(i).file_size();
+    }
+    for (int i = 0; i < compaction_result.output_files.size(); ++i) {
+        std::string file_path_str = file_dir + "/" + compaction_result.output_files[i].file_name;
+        butil::FilePath file_path(file_path_str);
+        butil::File::Info info;
+        if (!butil::GetFileInfo(file_path, &info)) {
+            DB_FATAL("File does not exist: %s, remote_compaction_id: %s", 
+                file_path_str.c_str(), remote_compaction_id.c_str());
+            return -1;
+        }
+        if (info.size != file_size_map[compaction_result.output_files[i].file_name]) {
+            DB_FATAL("File size not match: %s, remote_compaction_id: %s", 
+                file_path_str.c_str(), remote_compaction_id.c_str());
+            return -1;
+        }
+    }
+    return 0;
+}
+#endif
 
 rocksdb::CompactionServiceJobStatus MyCompactionService::Wait(const std::string& remote_compaction_id_str, std::string* result) {
     std::string current_dir = "";
 #ifdef REMOTE_COMPACTION
     current_dir = FLAGS_db_path + "/" + FLAGS_secondary_db_path + "/" + remote_compaction_id_str;
-#endif
     ON_SCOPE_EXIT(([this, remote_compaction_id_str]() {
         BAIDU_SCOPED_LOCK(_mutex);
         _time_cost_map.erase(remote_compaction_id_str);
@@ -205,6 +232,7 @@ rocksdb::CompactionServiceJobStatus MyCompactionService::Wait(const std::string&
         finish_time,
         total_file_size
     );
+#endif
     return rocksdb::CompactionServiceJobStatus::kSuccess;
 }
 
@@ -227,30 +255,5 @@ void MyCompactionService::OnInstallation(const std::string& remote_compaction_id
     _final_updated_status = status;
 }
 
-int MyCompactionService::check_file_vaild(const pb::RemoteCompactionResponse& response,
-                                        const rocksdb::CompactionServiceResult& compaction_result,
-                                        const std::string& remote_compaction_id,
-                                        const std::string& file_dir) {
-    std::map<std::string, int64_t> file_size_map;
-    for (int i = 0; i < response.output_file_info_size(); i++) {
-        file_size_map[response.output_file_info(i).file_path()] = response.output_file_info(i).file_size();
-    }
-    for (int i = 0; i < compaction_result.output_files.size(); ++i) {
-        std::string file_path_str = file_dir + "/" + compaction_result.output_files[i].file_name;
-        butil::FilePath file_path(file_path_str);
-        butil::File::Info info;
-        if (!butil::GetFileInfo(file_path, &info)) {
-            DB_FATAL("File does not exist: %s, remote_compaction_id: %s", 
-                file_path_str.c_str(), remote_compaction_id.c_str());
-            return -1;
-        }
-        if (info.size != file_size_map[compaction_result.output_files[i].file_name]) {
-            DB_FATAL("File size not match: %s, remote_compaction_id: %s", 
-                file_path_str.c_str(), remote_compaction_id.c_str());
-            return -1;
-        }
-    }
-    return 0;
-}
 
 }  // namespace baikaldb

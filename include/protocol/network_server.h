@@ -24,41 +24,7 @@
 #include "common.h"
 #include "meta_server_interact.hpp"
 #include "baikal_heartbeat.h"
-#ifdef BAIDU_INTERNAL
-#include "baikal_client.h"
-#else
-namespace baikal {
-namespace client {
-class ResultSet {
-public:
-    uint64_t get_affected_rows() {
-        return 0;
-    }
-    bool next() {
-        return false;
-    }
-    int get_uint64(const std::string& col, uint64_t* val) {
-        return 0;
-    }
-};
-class Service {
-public:
-    int query(int i, const std::string& sql, ResultSet* res) {
-        return -1;
-    }
-};
-class Manager {
-public:
-    int init(const std::string& path, const std::string& conf) {
-        return -1;
-    }
-    Service* get_service(const std::string& name) {
-        return nullptr;
-    }
-};
-}
-}
-#endif
+#include "mysql_interact.h"
 
 namespace baikaldb {
 DECLARE_uint64(limit_slow_sql_size);

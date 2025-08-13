@@ -9,7 +9,9 @@
 #include "rocksdb/options.h"
 #include "proto/compaction.interface.pb.h"
 #include "common.h"
+#ifdef REMOTE_COMPACTION
 #include "db/compaction/compaction_job.h"
+#endif
 
 namespace baikaldb {
 
@@ -65,10 +67,6 @@ public:
 
     void OnInstallation(const std::string& scheduled_job_id,
                         rocksdb::CompactionServiceJobStatus status) override;
-    int check_file_vaild(const pb::RemoteCompactionResponse& response,
-                            const rocksdb::CompactionServiceResult& compaction_result,
-                            const std::string& remote_compaction_id,
-                            const std::string& file_dir);
 private:
     std::map<std::string, std::shared_ptr<OnRPCDone>> _doing_map;
     std::map<std::string, TimeCost> _time_cost_map;

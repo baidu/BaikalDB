@@ -29,7 +29,7 @@ ExternalProject_Add(
         DEPENDS ssl crypto zlib protobuf leveldb gflags glog
 #        GIT_REPOSITORY "https://github.com/apache/brpc"
 #        GIT_TAG "0.9.7"
-        URL "https://github.com/apache/brpc/archive/1.3.0.tar.gz"
+        URL "https://github.com/apache/brpc/archive/1.11.0.tar.gz"
         PREFIX ${BRPC_SOURCES_DIR}
         UPDATE_COMMAND ""
         CMAKE_ARGS -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
