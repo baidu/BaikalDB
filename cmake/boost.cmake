@@ -41,7 +41,7 @@ set_directory_properties(PROPERTIES CLEAN_NO_CUSTOM 1)
 include_directories(${BOOST_INCLUDE_DIR})
 
 FILE(WRITE ${BOOST_DOWNLOAD_DIR}/build.sh
-        "cd ${BOOST_DOWNLOAD_DIR} && mkdir -p build && sh bootstrap.sh --prefix=${BOOST_INSTALL_DIR} --with-libraries=thread,filesystem,regex,system && ./b2 install --quiet"
+        "cd ${BOOST_DOWNLOAD_DIR} && mkdir -p build && sh bootstrap.sh --prefix=${BOOST_INSTALL_DIR} --with-libraries=thread,filesystem,regex,system && ./b2 install --quiet cxxflags='-Wno-nonnull'"
         )
 
 ExternalProject_Add(
@@ -52,11 +52,11 @@ ExternalProject_Add(
         #GIT_TAG "boost-1.63.0"
         DOWNLOAD_DIR ${BOOST_DOWNLOAD_DIR}
         DOWNLOAD_NO_PROGRESS 1
-        DOWNLOAD_COMMAND wget --no-check-certificate ${BOOST_URL} -O ${BOOST_TAR}.tar.gz COMMAND tar -zxf ${BOOST_TAR}.tar.gz --strip-components=1
+        DOWNLOAD_COMMAND wget --quiet --no-check-certificate ${BOOST_URL} -O ${BOOST_TAR}.tar.gz COMMAND tar -zxf ${BOOST_TAR}.tar.gz --strip-components=1
         UPDATE_COMMAND ""
         CONFIGURE_COMMAND ""
         #BUILD_COMMAND sh bootstrap.sh --prefix=${BOOST_INSTALL_DIR} --with-libraries=thread && ./b2 install
-        BUILD_COMMAND sh ${BOOST_DOWNLOAD_DIR}/build.sh
+        BUILD_COMMAND bash -c "sh ${BOOST_DOWNLOAD_DIR}/build.sh 2>&1 | grep -v 'common\\.'"
         INSTALL_COMMAND ""
 )
 

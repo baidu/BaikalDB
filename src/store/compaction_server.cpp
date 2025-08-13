@@ -2,7 +2,11 @@
 #include "split_compaction_filter.h"
 #include "rocksdb/filter_policy.h"
 #include "rocksdb_merge_operator.h"
+#ifdef BAIDU_INTERNAL
 #include <base/file_util.h>
+#else
+#include <butil/file_util.h>
+#endif
 // #include "db/compaction/compaction_job.h"
 #include "my_listener.h"
 #include "db/compaction/compaction_job.h"

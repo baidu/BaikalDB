@@ -232,6 +232,7 @@ if (WITH_SYSTEM_LIBS)
     ADD_LIBRARY(rocksdb SHARED IMPORTED GLOBAL)
 else ()
     include(rocksdb)
+    include_directories(SYSTEM ${ROCKSDB_INSTALL_DIR}/include)
 endif ()
 
 #brpc
@@ -294,6 +295,7 @@ if (WITH_GPERF)
     else ()
         message("GPERFTOOLS NOT FOUND, downloading and compiling")
         include(gperftools)
+    include_directories(SYSTEM ${ROCKSDB_INSTALL_DIR}/include)
     endif ()
 endif ()
 
@@ -307,6 +309,7 @@ if (WITH_SYSTEM_LIBS)
     ADD_LIBRARY(arrow SHARED IMPORTED GLOBAL)
 else ()
     include(arrow)
+    include_directories(SYSTEM ${GPERF_INSTALL_DIR}/include)
 endif ()
 
 message(CUR_DIR : ${CMAKE_CURRENT_BINARY_DIR}, SRC_DIR : ${CMAKE_SOURCE_DIR})
