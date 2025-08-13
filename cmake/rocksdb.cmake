@@ -33,7 +33,9 @@ ExternalProject_Add(
         ${EXTERNAL_PROJECT_LOG_ARGS}
         DEPENDS gflags zlib snappy zstd lz4 liburing
         PREFIX ${ROCKSDB_SOURCES_DIR}
-        URL "https://github.com/facebook/rocksdb/archive/v7.10.2.tar.gz"
+        GIT_REPOSITORY "https://github.com/baikalgroup/rocksdb.git"
+        GIT_TAG "9.7.x"
+        #URL "https://github.com/facebook/rocksdb/archive/v7.10.2.tar.gz"
         UPDATE_COMMAND ""
 #        CONFIGURE_COMMAND ""
 #        BUILD_IN_SOURCE 1

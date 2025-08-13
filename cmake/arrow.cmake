@@ -29,9 +29,9 @@ FILE(WRITE ${ARROW_SOURCES_DIR}/src/build.sh
 ExternalProject_Add(
         extern_arrow
         ${EXTERNAL_PROJECT_LOG_ARGS}
-#        GIT_REPOSITORY "https://github.com/apache/arrow.git"
-#        GIT_TAG "apache-arrow-0.17.1"
-        URL "https://github.com/baikalgroup/arrow/archive/refs/tags/16.1.0.tar.gz"
+        GIT_REPOSITORY "https://github.com/baikalgroup/arrow.git"
+        GIT_TAG "release-16.1.0"
+        #URL "https://github.com/baikalgroup/arrow/archive/refs/tags/16.1.0.tar.gz"
         PREFIX ${ARROW_SOURCES_DIR}
         UPDATE_COMMAND ""
         CONFIGURE_COMMAND ""

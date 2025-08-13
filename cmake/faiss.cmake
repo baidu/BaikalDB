@@ -23,7 +23,8 @@ ExternalProject_Add(
         extern_faiss
         ${EXTERNAL_PROJECT_LOG_ARGS}
         DEPENDS openblas
-        URL "https://github.com/facebookresearch/faiss/archive/refs/tags/v1.7.4.tar.gz"
+        GIT_REPOSITORY "https://github.com/baikalgroup/faiss.git"
+        GIT_TAG "v1.7.4"
         PREFIX ${FAISS_SOURCES_DIR}
         UPDATE_COMMAND ""
         CMAKE_ARGS -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
