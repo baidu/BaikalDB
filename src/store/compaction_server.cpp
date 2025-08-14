@@ -1,6 +1,7 @@
 #include "compaction_server.h"
 #include "split_compaction_filter.h"
 #include "rocksdb/filter_policy.h"
+#include "rocksdb/statistics.h"
 #include "rocksdb_merge_operator.h"
 #ifdef BAIDU_INTERNAL
 #include <base/file_util.h>

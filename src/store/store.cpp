@@ -1503,7 +1503,7 @@ int Store::write_file(const pb::CompactionFileRequest* request,
     static bvar::LatencyRecorder remote_compaction_write_rate("remote_compaction_write_rate");
     std::vector<std::string> split_vec;
     boost::split(split_vec, request->file_name(), boost::is_any_of("/"));
-    const string& file_path_str = FLAGS_db_path + "/" + 
+    const std::string& file_path_str = FLAGS_db_path + "/" + 
                         FLAGS_secondary_db_path + "/" + 
                         request->remote_compaction_id() + "/" + split_vec.back();
     butil::FilePath file_path(file_path_str);
@@ -1586,7 +1586,7 @@ int Store::path_exists(const pb::CompactionFileRequest* request,
                     pb::CompactionFileResponse* response) {
     std::vector<std::string> split_vec;
     boost::split(split_vec, request->file_name(), boost::is_any_of("/"));
-    const string& file_path_str = FLAGS_db_path + "/" + split_vec.back();
+    const std::string& file_path_str = FLAGS_db_path + "/" + split_vec.back();
     butil::FilePath file_path(file_path_str);
     // 检查文件是否存在
     if (!butil::PathExists(file_path)) {
@@ -1629,7 +1629,7 @@ int Store::get_file_info_list(const pb::CompactionFileRequest* request,
 
 int Store::delete_path(const pb::CompactionFileRequest* request,
                                     pb::CompactionFileResponse* response) {
-    const string& dir_str = FLAGS_db_path + "/" + 
+    const std::string& dir_str = FLAGS_db_path + "/" + 
                         FLAGS_secondary_db_path + "/" + 
                         request->remote_compaction_id();
     butil::FilePath dir_path(dir_str);

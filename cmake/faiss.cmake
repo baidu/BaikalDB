@@ -47,7 +47,7 @@ ExternalProject_Add(
         -DCMAKE_INSTALL_LIBDIR:PATH=${FAISS_INSTALL_DIR}/lib
         -DCMAKE_BUILD_TYPE:STRING=${THIRD_PARTY_BUILD_TYPE}
         BUILD_IN_SOURCE 1
-        BUILD_COMMAND $(MAKE) -j ${NUM_OF_PROCESSOR} faiss
+        BUILD_COMMAND $(MAKE) -j4 faiss
         INSTALL_COMMAND $(MAKE) install
 )
 ADD_DEPENDENCIES(extern_faiss openblas)

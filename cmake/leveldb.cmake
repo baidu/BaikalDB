@@ -27,7 +27,7 @@ ExternalProject_Add(
         GIT_TAG "v1.18"
         CONFIGURE_COMMAND sed -i "s/CXXFLAGS += -fPIC//" ${LEVELDB_SOURCES_DIR}/src/extern_leveldb/Makefile COMMAND sed -i "/CXXFLAGS +=/aCXXFLAGS += -fPIC" ${LEVELDB_SOURCES_DIR}/src/extern_leveldb/Makefile
         BUILD_IN_SOURCE 1
-        BUILD_COMMAND $(MAKE) -j ${NUM_OF_PROCESSOR} libleveldb.a
+        BUILD_COMMAND $(MAKE) -j4 libleveldb.a
         INSTALL_COMMAND mkdir -p ${LEVELDB_INSTALL_DIR}/lib/ COMMAND cp ${LEVELDB_SOURCES_DIR}/src/extern_leveldb/libleveldb.a ${LEVELDB_LIBRARIES} COMMAND cp -r ${LEVELDB_SOURCES_DIR}/src/extern_leveldb/include ${LEVELDB_INSTALL_DIR}/
 )
 

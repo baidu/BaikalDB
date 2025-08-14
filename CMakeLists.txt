@@ -295,7 +295,7 @@ if (WITH_GPERF)
     else ()
         message("GPERFTOOLS NOT FOUND, downloading and compiling")
         include(gperftools)
-    include_directories(SYSTEM ${ROCKSDB_INSTALL_DIR}/include)
+        include_directories(SYSTEM ${GPERF_INSTALL_DIR}/include)
     endif ()
 endif ()
 
@@ -309,7 +309,7 @@ if (WITH_SYSTEM_LIBS)
     ADD_LIBRARY(arrow SHARED IMPORTED GLOBAL)
 else ()
     include(arrow)
-    include_directories(SYSTEM ${GPERF_INSTALL_DIR}/include)
+    include_directories(SYSTEM ${ARROW_INSTALL_DIR}/include)
 endif ()
 
 message(CUR_DIR : ${CMAKE_CURRENT_BINARY_DIR}, SRC_DIR : ${CMAKE_SOURCE_DIR})
@@ -366,7 +366,6 @@ SET(DEP_INC
         ${LZ4_INCLUDE_DIR}
         ${LIBURING_INCLUDE_DIR}
         ${ZSTD_INCLUDE_DIR}
-        ${RE2_INCLUDE_DIR}
 
         ${ROCKSDB_INCLUDE_DIR}
 
@@ -404,7 +403,6 @@ SET(DEP_LIB
         ${ZSTD_LIBRARIES}
         ${LZ4_LIBRARIES}
         ${LIBURING_LIBRARIES}
-        ${RE2_LIBRARIES}
         ${FAISS_LIBRARIES}
         ${OPENBLAS_LIBRARIES}
         ${CROARING_LIBRARIES}
@@ -439,8 +437,8 @@ if (NOT DEBUG)
     SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DNDEBUG")
 endif ()
 
-SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 ${DEBUG_SYMBOL} -O2 -pipe -m64 -fopenmp -Wall -W -fPIC -Wno-unused-parameter -Wno-strict-aliasing -Wno-parentheses -fno-omit-frame-pointer ")
-SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c99 ${DEBUG_SYMBOL} -O2 -pipe -m64 -fopenmp -Wall -W -fPIC -Wno-unused-parameter -Wno-strict-aliasing -Wno-parentheses -fno-omit-frame-pointer")
+SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 ${DEBUG_SYMBOL} -O2 -pipe -m64 -fopenmp -Wall -W -fPIC -Wno-unused-parameter -Wno-strict-aliasing -Wno-parentheses -fno-omit-frame-pointer -Wno-unused-result")
+SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c99 ${DEBUG_SYMBOL} -O2 -pipe -m64 -fopenmp -Wall -W -fPIC -Wno-unused-parameter -Wno-strict-aliasing -Wno-parentheses -fno-omit-frame-pointer -Wno-unused-result")
 
 add_definitions(
         -D_GNU_SOURCE
@@ -448,6 +446,8 @@ add_definitions(
         -D__STDC_LIMIT_MACROS
         -D__STDC_CONSTANT_MACROS
         -DBRPC_WITH_GLOG=1
+        -DFASTFLOAT_ALLOWS_LEADING_PLUS 
+        -DFASTFLOAT_SKIP_WHITE_SPACE
 )
 
 file(GLOB ENGINE src/engine/*.cpp)
@@ -515,7 +515,7 @@ file(GLOB COMMON
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/output/bin)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/output/bin)
 
-set(COMMON_DEPS ssl crypto zlib boost rapidjson arrow openblas faiss croaring glog gflags protobuf re2 snappy lz4 zstd rocksdb brpc braft liburing)
+set(COMMON_DEPS ssl crypto zlib boost rapidjson arrow openblas faiss croaring glog gflags protobuf snappy lz4 zstd rocksdb brpc braft liburing)
 if (WITH_GPERF)
     set(COMMON_DEPS ${COMMON_DEPS} gperf)
 endif ()
