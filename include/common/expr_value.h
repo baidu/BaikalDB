@@ -1113,14 +1113,14 @@ struct ExprValue {
         return ret;
     }
     static ExprValue UTC_TIMESTAMP(int32_t precision = 0) {
-        // static int UTC_OFFSET = 8 * 60 * 60;
-        time_t current_time;
-        struct tm timeinfo;
-        localtime_r(&current_time, &timeinfo);
-        long offset = timeinfo.tm_gmtoff;
+        static int UTC_OFFSET = 8 * 60 * 60;
+        //time_t current_time;
+        //struct tm timeinfo;
+        //localtime_r(&current_time, &timeinfo);
+        //long offset = timeinfo.tm_gmtoff;
 
         ExprValue tmp(pb::TIMESTAMP);
-        tmp._u.uint32_val = time(NULL) - offset;
+        tmp._u.uint32_val = time(NULL) - UTC_OFFSET;
         tmp.cast_to(pb::DATETIME);
         timeval tv;
         gettimeofday(&tv, NULL);

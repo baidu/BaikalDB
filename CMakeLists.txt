@@ -366,6 +366,7 @@ SET(DEP_INC
         ${LZ4_INCLUDE_DIR}
         ${LIBURING_INCLUDE_DIR}
         ${ZSTD_INCLUDE_DIR}
+        ${RE2_INCLUDE_DIR}
 
         ${ROCKSDB_INCLUDE_DIR}
 
@@ -403,6 +404,7 @@ SET(DEP_LIB
         ${ZSTD_LIBRARIES}
         ${LZ4_LIBRARIES}
         ${LIBURING_LIBRARIES}
+        ${RE2_LIBRARIES}
         ${FAISS_LIBRARIES}
         ${OPENBLAS_LIBRARIES}
         ${CROARING_LIBRARIES}
@@ -515,7 +517,7 @@ file(GLOB COMMON
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/output/bin)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/output/bin)
 
-set(COMMON_DEPS ssl crypto zlib boost rapidjson arrow openblas faiss croaring glog gflags protobuf snappy lz4 zstd rocksdb brpc braft liburing)
+set(COMMON_DEPS ssl crypto zlib boost rapidjson arrow openblas faiss croaring glog gflags protobuf re2 snappy lz4 zstd rocksdb brpc braft liburing)
 if (WITH_GPERF)
     set(COMMON_DEPS ${COMMON_DEPS} gperf)
 endif ()
