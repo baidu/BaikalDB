@@ -7,9 +7,10 @@
 #else
 #include <butil/file_util.h>
 #endif
-// #include "db/compaction/compaction_job.h"
 #include "my_listener.h"
+#ifdef REMOTE_COMPACTION
 #include "db/compaction/compaction_job.h"
+#endif
 #include "concurrency.h"
 
 namespace baikaldb {
@@ -145,6 +146,7 @@ void CompactionServer::do_compaction(google::protobuf::RpcController* controller
                    const pb::RemoteCompactionRequest* request,
                    pb::RemoteCompactionResponse* response,
                    google::protobuf::Closure* done) {
+#ifdef REMOTE_COMPACTION
     brpc::ClosureGuard done_guard(done);
     ScopeGuard auto_decrease([&response]() {
         response->set_errcode(pb::REMOTE_COMPACTION_ERROR);
@@ -306,6 +308,7 @@ void CompactionServer::do_compaction(google::protobuf::RpcController* controller
         CompactionSstCache::get_instance()->size(),
         linker_data->read_file_time
     );
+#endif
     return;
 }
 
