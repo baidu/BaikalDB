@@ -75,9 +75,9 @@ public:
         }
         if (_db != nullptr && _snapshot != nullptr) {
             if (_use_cold_db) {
-                _db->relase_cold_snapshot(_snapshot);
+                _db->release_cold_snapshot(_snapshot);
             } else {
-                _db->relase_snapshot(_snapshot);
+                _db->release_snapshot(_snapshot);
             }
         }
         delete _txn;
@@ -192,7 +192,8 @@ public:
         RowBatch* row_batch,
         std::map<int32_t, FieldInfo*>& fields,
         std::vector<int32_t>& field_slot,
-        bool sorted_input);
+        bool sorted_input,
+        BatchRecord* reverse_cols_records = nullptr);
 
     int multiget_primary(
         int64_t region,
@@ -356,17 +357,7 @@ public:
         last_active_time = butil::gettimeofday_us();
     }
 
-    void push_cmd_to_cache(int seq_id, pb::CachePlan plan_item) {
-        BAIDU_SCOPED_LOCK(_cache_map_mutex);
-        _seq_id = seq_id;
-        if (_cache_plan_map.count(seq_id) > 0) {
-            return;
-        }
-        if (plan_item.op_type() != pb::OP_BEGIN) {
-            _has_dml_executed = true;
-        }
-        _cache_plan_map.insert(std::make_pair(seq_id, plan_item));
-    }
+    void push_cmd_to_cache(int seq_id, pb::CachePlan plan_item);
 
     bool has_write() {
         BAIDU_SCOPED_LOCK(_cache_map_mutex);
@@ -611,8 +602,8 @@ private:
             bool              check_region);
     
     void add_kvop_put(std::string& key, std::string& value, int64_t ttl_timestamp_us, bool is_primary_key) {
-        //DB_WARNING("txn:%p, add kvop put key:%s, value:%s", this,
-        //           str_to_hex(key).c_str(), str_to_hex(value).c_str());
+        DB_DEBUG("txn:%p, add kvop put key:%s, value:%s", this,
+                   str_to_hex(key).c_str(), str_to_hex(value).c_str());
         pb::KvOp* kv_op = _store_req.add_kv_ops();
         kv_op->set_op_type(pb::OP_PUT_KV);
         kv_op->set_key(key);

@@ -143,6 +143,7 @@ public:
     virtual butil::EndPoint get_leader() {
         return _node.leader_id().addr;                                                    
     }
+    void list_normal_peers(std::set<std::string>& peers);
     virtual void shutdown_raft()  {
         _node.shutdown(NULL);
         DB_WARNING("raft node was shutdown"); 

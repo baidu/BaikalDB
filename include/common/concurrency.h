@@ -23,7 +23,7 @@ DECLARE_int32(new_sign_read_concurrency);
 DECLARE_int32(baikal_heartbeat_concurrency);
 DECLARE_int32(upload_sst_streaming_concurrency);
 DECLARE_int32(global_select_concurrency);
-
+DECLARE_int32(remote_compaction_server_concurrency);
 struct Concurrency {
     static Concurrency* get_instance() {
         static Concurrency _instance;
@@ -40,6 +40,7 @@ struct Concurrency {
     BthreadCond baikal_other_heartbeat_concurrency;
     BthreadCond upload_sst_streaming_concurrency;
     BthreadCond global_select_concurrency; // 全局读并发控制
+    BthreadCond remote_compaction_server_concurrency;
 private:
     Concurrency(): snapshot_load_concurrency(-FLAGS_snapshot_load_num), 
                    recieve_add_peer_concurrency(-FLAGS_snapshot_load_num), 
@@ -50,7 +51,8 @@ private:
                    baikal_heartbeat_concurrency(-FLAGS_baikal_heartbeat_concurrency),
                    baikal_other_heartbeat_concurrency(-FLAGS_baikal_heartbeat_concurrency),
                    upload_sst_streaming_concurrency(-FLAGS_upload_sst_streaming_concurrency),
-                   global_select_concurrency(-FLAGS_global_select_concurrency) {
+                   global_select_concurrency(-FLAGS_global_select_concurrency),
+                   remote_compaction_server_concurrency(-FLAGS_remote_compaction_server_concurrency) {
                    }
 };
 }

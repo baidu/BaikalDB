@@ -113,6 +113,8 @@ private:
     int fetch_instance_info();
     int make_worker_process();
     void connection_timeout_check();
+    void dump_slow_sqls();
+    void kill_timeout_query();
     int heartbeat(bool is_sync, bool is_backup);
     void report_heart_beat();
     void report_other_heart_beat();
@@ -137,6 +139,9 @@ private:
     // 收集慢查询涉及的相关函数
     int insert_slow_query_infos(const std::string& slow_query_info_values);
     void process_slow_query_map();
+    // mpp signs统计信息
+    void load_mpp_signs();
+    int query_sql(const std::string& sql, baikal::client::ResultSet* result_set);
 
 private:
     // Server info.
@@ -154,6 +159,8 @@ private:
     Bthread         _health_check_bth;
     Bthread         _conn_bvars_update_bth;
     Bthread         _ext_fs_gc_bth;
+    Bthread         _dump_slow_sqls_bth;
+    Bthread         _kill_timeout_query_bth;
     uint32_t        _driver_thread_num;
     uint64_t        _instance_id = 0;
     std::string     _physical_room;
@@ -164,6 +171,12 @@ private:
     // for print_agg_sql
     baikal::client::Manager _manager;
     baikal::client::Service* _baikaldb;
+
+    bthread::Mutex  _slow_sqls_mutex;
+    // sign -> logid:sql
+    std::unordered_map<uint64_t, std::unordered_map<uint64_t, std::string>> _slow_sqls;
+    std::map<std::string, std::string> _slow_sql_files;
+    bool _load_slow_sql_files = false;
 public:
     // bvar保存慢查询信息
     bvar::Adder<BvarSlowQueryMap> slow_query_map;

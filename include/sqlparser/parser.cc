@@ -13,11 +13,11 @@
 // limitations under the License.
 
 #include "parser.h"
+#include <gflags/gflags.h>
 #ifdef BAIDU_INTERNAL
 #include <bthread.h>
 #include "uconv.h"
 #include "log.h"
-#include <gflags/gflags.h>
 #endif
 #include "sql_lex.flex.h"
 

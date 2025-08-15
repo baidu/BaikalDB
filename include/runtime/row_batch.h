@@ -49,6 +49,12 @@ public:
     bool is_full() {
         return size() >= _capacity;
     }
+    bool chunk_exceed_max_size() {
+        if (_use_memrow || _chunk == nullptr) {
+            return false;
+        }
+        return _chunk->exceed_max_size();
+    }
     bool is_traverse_over() {
         return _idx >= size();
     }
@@ -172,6 +178,14 @@ public:
                                    std::shared_ptr<Chunk> chunk, 
                                    std::shared_ptr<arrow::Schema> schema, 
                                    std::shared_ptr<arrow::RecordBatch>* out) {
+        if (chunk == nullptr) {
+            return -1;
+        }
+        if (!chunk->has_init()) {
+            if (0 != chunk->init(tuples)) {
+                return -1;
+            }
+        }
         if (0 != add_row_batch_to_chunk(tuples, chunk)) {
             return -1;
         }

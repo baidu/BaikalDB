@@ -95,7 +95,7 @@ void FunctionManager::register_operators() {
     //REGISTER_BINARY_OP(logic_and, bool);
     //REGISTER_BINARY_OP(logic_or, bool);
     auto register_object_ret = [this](const std::string& name, 
-            std::function<ExprValue(const std::vector<ExprValue>&)> T, 
+            ExprValue(*T)(const std::vector<ExprValue>&),
             pb::PrimitiveType ret_type) {
         register_object(name, T);
         return_type_map[name] = ret_type;
@@ -161,7 +161,7 @@ void FunctionManager::register_operators() {
     register_object_ret("json_object", json_object, pb::STRING);
     register_object_ret("json_valid", json_valid, pb::BOOL);
     register_object_ret("split_part", split_part, pb::STRING);
-
+    register_object_ret("regexp_replace", regexp_replace, pb::STRING);
     register_object_ret("export_set", export_set, pb::STRING);
     register_object_ret("to_base64", to_base64, pb::STRING);
     register_object_ret("from_base64", from_base64, pb::STRING);
@@ -512,6 +512,184 @@ void FunctionManager::complete_common_fn(pb::Function& fn, std::vector<pb::Primi
         fn.set_return_type(pb::BOOL);
     }
 }
+
+// ToSqlFunctionManager
+int ToSqlFunctionManager::init() {
+    register_operators();
+    return 0;
+}
+
+void ToSqlFunctionManager::register_operators() {
+    // ~ -
+    register_object("bit_not", bit_not);
+    register_object("uminus", uminus);
+    // + - * /
+    register_object("add", add);
+    register_object("minus", minus);
+    register_object("multiplies", multiplies);
+    register_object("divides", divides);
+    // % << >> & | ^ 
+    register_object("mod", mod);
+    register_object("left_shift", left_shift);
+    register_object("right_shift", right_shift);
+    register_object("bit_and", bit_and);
+    register_object("bit_or", bit_or);
+    register_object("bit_xor", bit_xor);
+    // == != > >= < <=
+    register_object("eq", eq);
+    register_object("ne", ne);
+    register_object("gt", gt);
+    register_object("ge", ge);
+    register_object("lt", lt);
+    register_object("le", le);    
+    // num funcs
+    register_object("round", round);
+    register_object("floor", floor);
+    register_object("abs", abs);
+    register_object("sqrt", sqrt);
+    register_object("rand", rand);
+    register_object("sign", sign);
+    register_object("sin", sin);
+    register_object("asin", asin);
+    register_object("cos", cos);
+    register_object("acos", acos);
+    register_object("tan", tan);
+    register_object("cot", cot);
+    register_object("atan", atan);
+    register_object("ln", ln);
+    register_object("log", log);
+    register_object("pi", pi);
+    register_object("pow", pow);
+    register_object("power", pow);
+    register_object("greatest", greatest);
+    register_object("least", least);
+    register_object("ceil", ceil);
+    register_object("ceiling", ceil);
+    // str funcs
+    register_object("length", length);
+    register_object("bit_length", bit_length);
+    register_object("upper", upper);
+    register_object("lower", lower);
+    register_object("ucase", upper);
+    register_object("lcase", lower);
+    register_object("concat", concat);
+    register_object("substr", substr);
+    register_object("mid", substr);
+    register_object("left", left);
+    register_object("right", right);
+    register_object("trim", trim);
+    register_object("ltrim", ltrim);
+    register_object("rtrim", rtrim);
+    register_object("concat_ws", concat_ws);
+    register_object("ascii", ascii);
+    register_object("strcmp", strcmp);
+    register_object("insert", insert);
+    register_object("replace", replace);
+    register_object("repeat", repeat);
+    register_object("reverse", reverse);
+    register_object("locate", locate);
+    register_object("substring_index", substring_index);
+    register_object("lpad", lpad);
+    register_object("rpad", rpad);
+    register_object("instr", instr);
+    register_object("json_extract", json_extract);
+    register_object("export_set", export_set);
+    register_object("make_set", make_set);
+    register_object("oct", oct);
+    register_object("hex", hex);
+    register_object("unhex", unhex);
+    register_object("bin", bin);
+    register_object("space", space);
+    register_object("elt", elt);
+    register_object("char_length", char_length);
+    register_object("format", format);
+    register_object("field", field);
+    register_object("quote", quote);
+    register_object("char", func_char);
+    register_object("soundex", soundex);
+    // date funcs
+    register_object("unix_timestamp", unix_timestamp);
+    register_object("from_unixtime", from_unixtime);
+    register_object("now", now);
+    register_object("sysdate", now);
+    register_object("utc_timestamp", utc_timestamp);
+    register_object("utc_date", utc_date);
+    register_object("utc_time", utc_time);
+    register_object("date_format", date_format);
+    register_object("period_diff", period_diff);
+    register_object("period_add", period_add);
+    register_object("minute", minute);
+    register_object("second", second);
+    register_object("time", func_time);
+    register_object("quarter", func_quarter);
+    register_object("microsecond", microsecond);
+    register_object("timestampadd", timestampadd);
+    register_object("addtime", addtime);
+    register_object("subtime", subtime);
+    register_object("str_to_date", str_to_date);
+    register_object("time_format", time_format);
+    register_object("timediff", timediff);
+    register_object("timestampdiff", timestampdiff);
+    register_object("convert_tz", convert_tz);
+    register_object("curdate", curdate);
+    register_object("current_date", current_date);
+    register_object("curtime", curtime);
+    register_object("current_time", current_time);
+    register_object("current_timestamp", current_timestamp);
+    register_object("timestamp", timestamp);
+    register_object("date", date);
+    register_object("hour", hour);
+    register_object("day", day);
+    register_object("dayname", dayname);
+    register_object("dayofweek", dayofweek);
+    register_object("dayofmonth", dayofmonth);
+    register_object("dayofyear", dayofyear);
+    register_object("yearweek", yearweek);
+    register_object("week", week);
+    register_object("weekofyear", weekofyear);
+    register_object("month", month);
+    register_object("monthname", monthname);
+    register_object("year", year);
+    register_object("time_to_sec", time_to_sec);
+    register_object("sec_to_time", sec_to_time);
+    register_object("weekday", weekday);
+    register_object("datediff", datediff);
+    register_object("date_add", date_add);
+    register_object("date_sub", date_sub);
+    register_object("adddate", date_add);
+    register_object("subdate", date_sub);
+    register_object("extract", extract);
+    register_object("to_days", to_days);
+    register_object("to_seconds", to_seconds);
+    // condition
+    register_object("case_when", case_when);
+    register_object("case_expr_when", case_expr_when);
+    register_object("if", if_);
+    register_object("ifnull", ifnull);
+    register_object("nullif", nullif);
+    register_object("isnull", isnull);
+    // Encryption and Compression Functions
+    register_object("md5", md5);
+    register_object("sha", sha);
+    register_object("sha1", sha1);
+    register_object("from_base64", from_base64);
+    register_object("to_base64", to_base64);
+    // other
+    register_object("version", version);
+    // register_object("last_insert_id", last_insert_id);
+    register_object("find_in_set", find_in_set);
+    // cast函数
+    register_object("cast_to_date", cast_to_date);
+    register_object("cast_to_time", cast_to_time);
+    register_object("cast_to_datetime", cast_to_datetime);
+    register_object("cast_to_string", cast_to_string);
+    register_object("cast_to_signed", cast_to_signed);
+    register_object("cast_to_unsigned", cast_to_unsigned);
+    register_object("cast_to_double", cast_to_double);
+    // 特殊表达式
+    register_object("match_against", match_against);
+}
+
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

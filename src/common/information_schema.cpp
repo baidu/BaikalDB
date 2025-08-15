@@ -542,6 +542,7 @@ void InformationSchema::init_learner_region_status() {
         {"external_full_path", pb::STRING},
         {"path_diff", pb::INT64},
         {"region_size", pb::INT64},
+        {"column_info", pb::STRING}, // 列存文件信息
     };
     int64_t table_id = construct_table("REGION_INFO", fields);
     // 定义操作
@@ -696,6 +697,7 @@ void InformationSchema::init_learner_region_status() {
                         record->set_string(record->get_field_by_name("external_full_path"), files);
                         record->set_int64(record->get_field_by_name("path_diff"), info.path_diff());
                         record->set_int64(record->get_field_by_name("region_size"), info.region_size());
+                        record->set_string(record->get_field_by_name("column_info"), info.column_info());
                         records.emplace_back(record);
                     }
 
@@ -917,6 +919,11 @@ void InformationSchema::init_olap_tables() {
         {"month2day", pb::STRING},
         {"month_all_cold", pb::STRING}, // 当month2day为TRUE时，该字段有效
         {"has_additional", pb::STRING},
+        {"pre_split_cnt", pb::INT64},
+        {"use_column_storage", pb::INT64},
+        {"enable_column_engine", pb::INT64},
+        {"cold_use_column_only", pb::INT64},
+        {"force_column_storage", pb::INT64},
     };
     int64_t table_id = construct_table("OLAP_TABLES", fields);
     // 定义操作
@@ -991,6 +998,33 @@ void InformationSchema::init_olap_tables() {
                         record->set_string(record->get_field_by_name("gen_range_partition_types"), types);
                     } else {
                         record->set_string(record->get_field_by_name("gen_range_partition_types"), "NULL");
+                    }
+
+                    if (table_info->schema_conf.has_olap_pre_split_cnt() && table_info->schema_conf.olap_pre_split_cnt() > 0) {
+                        record->set_int64(record->get_field_by_name("pre_split_cnt"), table_info->schema_conf.olap_pre_split_cnt());
+                    } else {
+                        record->set_int64(record->get_field_by_name("pre_split_cnt"), 0);
+                    }
+                    if (table_info->schema_conf.has_use_column_storage() && table_info->schema_conf.use_column_storage()) {
+                        record->set_int64(record->get_field_by_name("use_column_storage"), 1);
+                    } else {
+                        record->set_int64(record->get_field_by_name("use_column_storage"), 0);
+                    }
+
+                    if (table_info->schema_conf.has_enable_column_engine() && table_info->schema_conf.enable_column_engine()) {
+                        record->set_int64(record->get_field_by_name("enable_column_engine"), 1);
+                    } else {
+                        record->set_int64(record->get_field_by_name("enable_column_engine"), 0);
+                    }
+                    if (table_info->schema_conf.has_cold_use_column_only() && table_info->schema_conf.cold_use_column_only()) {
+                        record->set_int64(record->get_field_by_name("cold_use_column_only"), 1);
+                    } else {
+                        record->set_int64(record->get_field_by_name("cold_use_column_only"), 0);
+                    }
+                    if (table_info->schema_conf.has_force_column_storage() && table_info->schema_conf.force_column_storage()) {
+                        record->set_int64(record->get_field_by_name("force_column_storage"), 1);
+                    } else {
+                        record->set_int64(record->get_field_by_name("force_column_storage"), 0);
                     }
 
                     // 计算rollup/watt的hot range

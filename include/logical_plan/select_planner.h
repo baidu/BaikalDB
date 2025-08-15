@@ -41,9 +41,9 @@ private:
 
     int create_limit_node();
 
-    int create_having_node();
-
     int create_agg_node();
+
+    int create_window_and_sort_nodes();
 
     int parse_select_star(parser::SelectField* field);
     int parse_select_field(parser::SelectField* field);
@@ -114,6 +114,11 @@ private:
                                     int& multi_distinct_cnt, 
                                     bool& multi_col_single_child,
                                     std::set<std::string>& name_set);
+
+    // 将窗口相同的开窗函数合并到同一个WindowNode中
+    int merge_window_node();
+    int create_window_tuple_desc();
+
 private:
     parser::SelectStmt*                 _select;
 
@@ -126,6 +131,9 @@ private:
     pb::Expr                _limit_offset;
     pb::Expr                _limit_count;
     std::string             _table_name;
+
+    // 非相关子查询重写后，使用WindowNode进行min/max操作
+    std::vector<pb::WindowNode> _subquery_rewrite_window_nodes;
 };
 } //namespace baikal
 

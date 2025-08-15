@@ -110,13 +110,20 @@ public:
         }
         return _use_index_join;
     }
-    void adjudge_join_type();
-    void construct_in_condition_placeholder(ExecNode* child, 
-                    std::vector<ExprNode*>& equal_slot, 
-                    std::unordered_map<ExecNode*, std::vector<ExprNode*>>& condition_filter);
-    void get_join_on_condition_filter(std::unordered_map<ExecNode*, std::vector<ExprNode*>>& condition_filter);
-    int do_plan_router(RuntimeState* state, std::vector<ExecNode*>& scan_nodes, bool& index_has_null);
-    int runtime_filter(RuntimeState* state, ExecNode* node, std::vector<ExprNode*>* in_exprs_back);
+
+    void set_use_index_join(bool use) {
+        _use_index_join = use;
+    }
+    void get_join_on_condition_filter(RuntimeState* state, ExprNode** condition_filter);
+    static int do_plan_router(RuntimeState* state, const std::vector<ExecNode*>& scan_nodes, bool& index_has_null, bool is_explain);
+    int vectorize_index_collector(RuntimeState* state, std::shared_ptr<arrow::RecordBatch> batch);
+    void clear_in_conditions() {
+        _outer_join_values.clear();
+    }
+    int runtime_filter(RuntimeState* state) {
+        return runtime_filter(state, _inner_node, nullptr, true);
+    }
+    int runtime_filter(RuntimeState* state, ExecNode* node, std::vector<ExprNode*>* in_exprs_back, bool is_in_acero = false);
     
     pb::JoinType join_type() {
         return _join_type;
@@ -125,13 +132,14 @@ public:
         _join_type = join_type;
         _pb_node.mutable_derive_node()->mutable_join_node()->set_join_type(join_type);
     }
-    virtual void show_explain(std::vector<std::map<std::string, std::string>>& output);
+    virtual int show_explain(QueryContext* ctx, std::vector<std::map<std::string, std::string>>& output, int& next_id, int display_id);
 
     bool is_satisfy_filter(MemRow* row);
     int strip_out_equal_slots();
     bool expr_is_equal_condition_and_build_slot(ExprNode* expr);
     bool is_slot_ref_equal_condition(ExprNode* left, ExprNode* right);
-    int construct_in_condition(std::vector<ExprNode*>& slot_refs,
+    int construct_in_condition(RuntimeState* state, 
+                                  std::vector<ExprNode*>& slot_refs,
                                   const ExprValueSet& in_values,
                                   std::vector<ExprNode*>& in_exprs);
     int fetcher_full_table_data(RuntimeState* state, ExecNode* child_node,
@@ -146,10 +154,6 @@ public:
                           MutTableKey& key);
     void construct_equal_values(const std::vector<MemRow*>& tuple_data,
                           const std::vector<ExprNode*>& slot_ref_exprs);
-    void construct_equal_values_for_vectorized(std::shared_ptr<arrow::Table> outer_table,
-                          const std::vector<ExprNode*>& slot_refs);
-    void construct_equal_values_for_vectorized(const std::vector<RegionReturnData>& outer_data,
-                          const std::vector<ExprNode*>& slot_refs);
     int construct_result_batch(RowBatch* batch, 
                                MemRow* outer_mem_row, 
                                MemRow* inner_mem_row,
@@ -161,10 +165,11 @@ public:
     std::unordered_set<int32_t>* right_tuple_ids() {
         return &_right_tuple_ids;
     }
-
+    std::shared_ptr<IndexCollectorCond> get_index_collecter_cond() {
+        return _index_collector_cond;
+    }
 protected:
     pb::JoinType _join_type;
-    pb::CompareType _compare_type = pb::CMP_NULL;
     std::vector<ExprNode*> _conditions;
     std::vector<ExprNode*> _have_removed;
     std::unordered_set<int32_t> _left_tuple_ids;
@@ -205,8 +210,12 @@ protected:
     
     // vectorized
     bool    _use_index_join = true;
-    std::shared_ptr<arrow::Table> _outer_intermediate_join_result_table;
-    std::shared_ptr<arrow::Table> _inner_intermediate_join_result_table;
+    std::shared_ptr<IndexCollectorCond> _index_collector_cond;
+    std::vector<std::shared_ptr<BthreadArrowExecutor>> _arrow_io_executors;  // 应该只有一个
+    bool _need_add_index_collector_node = false;
+
+    // mpp
+    std::unordered_map<std::string, std::string> _on_condition_column_map;
 };
 }
 

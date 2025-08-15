@@ -45,6 +45,7 @@ enum NodeType {
     NT_BY_ITEM,
     NT_GROUP_BY,
     NT_ORDER_BY,
+    NT_PARTITION_BY,
     NT_LIMIT,
     NT_WILDCARD,
     NT_SELECT_FEILD,
@@ -60,6 +61,12 @@ enum NodeType {
     NT_EXPLAIN,
     /*EXPR*/
     NT_EXPR,
+
+    /*WINDOW FUNCTION*/
+    NT_WINDOW_FRAME_BOUND,
+    NT_WINDOW_FRAME_EXTENT,
+    NT_WINDOW_FRAME,
+    NT_WINDOW_SPEC,
 
     /*DDL*/
     NT_COLUMN_OPT, // ColumnOption in ddl.h

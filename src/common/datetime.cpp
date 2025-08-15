@@ -67,8 +67,8 @@ uint64_t str_to_datetime(const char* str_time, bool* is_full_datetime) {
     return str_to_datetime_internal(str_time, strlen(str_time), is_full_datetime);
 }
 
-uint64_t str_to_datetime(const char* str_time, size_t length) {
-    return str_to_datetime_internal(str_time, length, nullptr);
+uint64_t str_to_datetime(const char* str_time, size_t length, bool* is_full_datetime) {
+    return str_to_datetime_internal(str_time, length, is_full_datetime);
 }
 
 uint64_t str_to_datetime_internal(const char* str_time, size_t length, bool* is_full_datetime) {
@@ -401,16 +401,22 @@ int32_t time_to_seconds(int32_t time) {
 }
 
 int32_t str_to_time(const char* str_time) {
+    return str_to_time(str_time, strlen(str_time));
+}
+
+int32_t str_to_time(const char* str_time, size_t length) {
     while (*str_time == ' ') {
         str_time++;
+        length--;
     }
     bool minus = false;
     if (str_time[0] == '-') {
         minus = true;
         str_time++;
+        length--;
     }
     const static size_t max_time_size = 20;
-    size_t len = std::min(strlen(str_time), (size_t)max_time_size);
+    size_t len = std::min(length, (size_t)max_time_size);
     int day = 0;
     int hour = 0;
     int minute = 0;
@@ -436,7 +442,7 @@ int32_t str_to_time(const char* str_time) {
     // 先判断是否是完整的datetime类型字符串, 12为YYMMDDHHMMSS
     if (idx >= 12) {
         bool is_full_datetime = false;
-        uint64_t datetime = str_to_datetime(str_time, &is_full_datetime);
+        uint64_t datetime = str_to_datetime(str_time, length, &is_full_datetime);
         if (is_full_datetime) {
             return datetime_to_time(datetime);
         }
@@ -452,21 +458,21 @@ int32_t str_to_time(const char* str_time) {
         if (idx >= 4) {
             idx -= 2;
             std::string sec_str(str_time + idx, 2);
-            second = strtod(sec_str.c_str(), NULL);
+            second = strtoll(sec_str.c_str(), NULL, 10);
             idx -= 2;
             std::string min_str(str_time + idx, 2);
-            minute = strtod(min_str.c_str(), NULL);
+            minute = strtoll(min_str.c_str(), NULL, 10);
             std::string hour_str(str_time, idx);
-            hour = strtod(hour_str.c_str(), NULL);
+            hour = strtoll(hour_str.c_str(), NULL, 10);
         } else if (idx >= 2) {
             idx -= 2;
             std::string sec_str(str_time + idx, 2);
-            second = strtod(sec_str.c_str(), NULL);
+            second = strtoll(sec_str.c_str(), NULL, 10);
             std::string min_str(str_time, idx);
-            minute = strtod(min_str.c_str(), NULL);
+            minute = strtoll(min_str.c_str(), NULL, 10);
         } else {
             std::string sec_str(str_time, idx);
-            second = strtod(sec_str.c_str(), NULL);
+            second = strtoll(sec_str.c_str(), NULL, 10);
         }
     }
     if (day < 0 || hour < 0 || minute < 0 || minute > 59 || second < 0 || second > 59) {

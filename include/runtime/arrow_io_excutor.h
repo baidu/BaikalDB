@@ -17,7 +17,7 @@
 #include "arrow/util/functional.h"
 #include "arrow/util/cancel.h"
 #include "common.h"
-#include "runtime_state.h"
+#include "fragment.h"
 #ifdef BAIDU_INTERNAL
 #include <bthread.h>
 #else
@@ -34,6 +34,11 @@
 /// fine but if one task needs to wait for another task it must be expressed as an
 /// asynchronous continuation.
 namespace baikaldb {
+struct IndexCollectorCond {
+    int64_t index_cnt = 0;
+    BthreadCond cond{0};
+};
+
 // 并行执行下, BthreadArrowExecutor有问题, 如acero join执行使用了pthread local
 class BthreadArrowExecutor : public arrow::internal::Executor {
 public:
@@ -91,5 +96,6 @@ class GlobalArrowExecutor {
 public:
     static int init();
     static void execute(RuntimeState* state, arrow::Result<std::shared_ptr<arrow::Table>>* result);
+    static void execute_fragment(RuntimeState* state, FragmentInfo* fragment);
 };
 };

@@ -22,21 +22,10 @@
 #include <arrow/compute/cast.h>
 #include <arrow/compute/kernels/codegen_internal.h>
 #include "slot_ref.h"
+#include "row_expr.h"
 
 namespace baikaldb {
-
 DEFINE_bool(enable_arrow_complex_func, false, "enable_arrow_complex_func");
-
-// [TODO] Arrow CastNumberImpl 同类型直接调用 ZeroCopyCastExec
-// args需要cast成fn对应的类型, 
-// 如case when的value类型需要cast成col_type
-// 保持和行一致
-// plan cache模式下的col type可能不对
-
-#define BUILD_ARROW_EXPR_RET(c) \
-    if (0 != c->transfer_to_arrow_expression()) {  \
-        return -1;   \
-    }
 
 const std::unordered_map<pb::PrimitiveType, std::shared_ptr<arrow::DataType>> cast_types = {
     {pb::BOOL, arrow::boolean()},
@@ -84,6 +73,19 @@ const std::set<pb::PrimitiveType> arrow_int_types = {
     pb::DATETIME
 };
 
+bool check_row_expr_is_support(pb::Function& fn, ExprNode* node) {
+    if (fn.fn_op() == parser::FT_EQ
+        || fn.fn_op() == parser::FT_NE
+        || fn.fn_op() == parser::FT_GE
+        || fn.fn_op() == parser::FT_GT
+        || fn.fn_op() == parser::FT_LE
+        || fn.fn_op() == parser::FT_LT
+        || fn.fn_op() == parser::FT_IN) {
+        return static_cast<RowExpr*>(node)->can_use_arrow_vector_for_compare_sclar_exrpr();
+    }
+    return false;
+}
+
 bool is_same_type(const pb::PrimitiveType& type1, const pb::PrimitiveType& type2, bool force_same) {
     if (type1 == type2) {
         return true;
@@ -104,6 +106,10 @@ bool is_same_type(const pb::PrimitiveType& type1, const pb::PrimitiveType& type2
 }
 /*
  * Transfer to arrow inline compute Function
+ * args需要cast成fn对应的类型, 
+ * 如case when的value类型需要cast成col_type
+ * 保持和行一致
+ * plan cache模式下的col type可能不对
  */ 
 int build_arrow_expr_with_cast(ExprNode* node, pb::Function* fn, int pos) {
     if (fn == nullptr || pos >= fn->arg_types_size()) {
@@ -123,30 +129,16 @@ int build_arrow_expr_with_cast(ExprNode* node, const pb::PrimitiveType& col_type
     //     BUILD_ARROW_EXPR_RET(node);
     //     return 0;
     // }
+    if (node->node_type() == pb::HEX_LITERAL) {
+        node->set_col_type(col_type);
+        BUILD_ARROW_EXPR_RET(node);
+        return 0;
+    }
     BUILD_ARROW_EXPR_RET(node);
     if (node->col_type() != col_type 
             && (is_datetime_specic(node->col_type()) || node->col_type() == pb::STRING) 
             && (is_datetime_specic(col_type) || col_type == pb::STRING)) {
-        std::string cast_func_name;
-        switch (col_type) {
-            case pb::DATE:
-                cast_func_name = "expr_value_to_date";
-                break;
-            case pb::DATETIME:
-                cast_func_name = "expr_value_to_datetime";
-                break;
-            case pb::TIME:
-                cast_func_name = "expr_value_to_time";
-                break;
-            case pb::TIMESTAMP:
-                cast_func_name = "expr_value_to_timestamp";
-                break;
-            default:
-                cast_func_name = "expr_value_to_string";
-                break;
-        }
-        ExprValueCastFunctionOptions option(node->col_type());
-        arrow::Expression cast_expr = arrow::compute::call(cast_func_name, {node->arrow_expr()}, std::move(option));
+        arrow::Expression cast_expr = arrow_cast(node->arrow_expr(), node->col_type(), col_type);
         node->set_arrow_expr(cast_expr);
         return 0;
     }
@@ -169,6 +161,41 @@ int build_arrow_expr_with_cast(ExprNode* node, const pb::PrimitiveType& col_type
     arrow::Expression cast_expr = arrow::compute::call("cast", {node->arrow_expr()}, arrow::compute::CastOptions::Unsafe(arrow_type));
     node->set_arrow_expr(cast_expr);
     return 0;
+}
+
+arrow::compute::Expression arrow_cast(const arrow::compute::Expression& expr, const pb::PrimitiveType& type, const pb::PrimitiveType& cast_type) {
+    arrow::compute::Expression cast_expr = expr;
+    if ((is_datetime_specic(type) || type == pb::STRING) && 
+            (is_datetime_specic(cast_type) || cast_type == pb::STRING)) {
+        std::string cast_func_name;
+        switch (cast_type) {
+            case pb::DATE:
+                cast_func_name = "expr_value_to_date";
+                break;
+            case pb::DATETIME:
+                cast_func_name = "expr_value_to_datetime";
+                break;
+            case pb::TIME:
+                cast_func_name = "expr_value_to_time";
+                break;
+            case pb::TIMESTAMP:
+                cast_func_name = "expr_value_to_timestamp";
+                break;
+            default:
+                cast_func_name = "expr_value_to_string";
+                break;
+        }
+        ExprValueCastFunctionOptions option(type);
+        cast_expr = arrow::compute::call(cast_func_name, {expr}, std::move(option));
+    } else {
+        auto iter = cast_types.find(cast_type);
+        if (iter == cast_types.end()) {
+            return cast_expr;
+        }
+        std::shared_ptr<arrow::DataType> arrow_type = iter->second;
+        cast_expr = arrow::compute::call("cast", {expr}, arrow::compute::CastOptions::Unsafe(arrow_type));
+    }
+    return cast_expr;
 }
 
 int get_all_arrow_argments(std::vector<ExprNode*>& children, std::vector<arrow::compute::Expression>& arguments, pb::Function* fn) {
@@ -199,11 +226,11 @@ int get_all_arrow_argments_for_add_minus_multiple(std::vector<ExprNode*>& childr
     for (auto& c : children) {
         BUILD_ARROW_EXPR_RET(c);
         if (has_double(args_types)) {
-            arguments.emplace_back(arrow::compute::call("cast", {c->arrow_expr()}, arrow::compute::CastOptions::Safe(arrow::float64())));
+            arguments.emplace_back(arrow::compute::call("cast", {c->arrow_expr()}, arrow::compute::CastOptions::Unsafe(arrow::float64())));
         } else if (has_uint(args_types)) {
-            arguments.emplace_back(arrow::compute::call("cast", {c->arrow_expr()}, arrow::compute::CastOptions::Safe(arrow::uint64())));
+            arguments.emplace_back(arrow::compute::call("cast", {c->arrow_expr()}, arrow::compute::CastOptions::Unsafe(arrow::uint64())));
         } else {
-            arguments.emplace_back(arrow::compute::call("cast", {c->arrow_expr()}, arrow::compute::CastOptions::Safe(arrow::int64())));
+            arguments.emplace_back(arrow::compute::call("cast", {c->arrow_expr()}, arrow::compute::CastOptions::Unsafe(arrow::int64())));
         }
     }
     return 0;
@@ -249,13 +276,46 @@ int arrow_divides(std::vector<ExprNode*>& children, pb::Function* fn, const pb::
     // 需要特殊处理除数是0, 返回NULL
     arrow::Datum null_datum = std::make_shared<arrow::DoubleScalar>();
     out = arrow::compute::call("divide_checked", {
-        arrow::compute::call("cast", {children[0]->arrow_expr()}, arrow::compute::CastOptions::Safe(arrow::float64())),
+        arrow::compute::call("cast", {children[0]->arrow_expr()}, arrow::compute::CastOptions::Unsafe(arrow::float64())),
         arrow::compute::call("if_else", {
                 arrow::compute::call("equal", {children[1]->arrow_expr(), arrow::compute::literal(0)}), 
                 arrow::compute::literal(null_datum), 
-                arrow::compute::call("cast", {children[1]->arrow_expr()}, arrow::compute::CastOptions::Safe(arrow::float64()))
+                arrow::compute::call("cast", {children[1]->arrow_expr()}, arrow::compute::CastOptions::Unsafe(arrow::float64()))
         })
     });
+    return 0;
+}
+
+int arrow_ceil(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
+    RETURN_NULL_IF_COLUMN_SATISFY_COND(children.empty());
+    if (0 != build_arrow_expr_with_cast(children[0], pb::DOUBLE)) {
+        return -1;
+    }
+    out = arrow::compute::call("ceil", {children[0]->arrow_expr()});
+    return 0;
+}
+
+int arrow_floor(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
+    RETURN_NULL_IF_COLUMN_SATISFY_COND(children.empty());
+    if (0 != build_arrow_expr_with_cast(children[0], pb::DOUBLE)) {
+        return -1;
+    }
+    out = arrow::compute::call("floor", {children[0]->arrow_expr()});
+    return 0;
+}
+
+int arrow_round(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
+    RETURN_NULL_IF_COLUMN_SATISFY_COND(children.empty());
+    if (0 != build_arrow_expr_with_cast(children[0], pb::DOUBLE)) {
+        return -1;
+    }
+    int bits = 0;
+    if (children.size() > 1) {
+        bits = children[1]->get_value(nullptr).get_numberic<int>();
+    }
+    // arrow内置round精度不太好处理
+    arrow::compute::RoundOptions options(bits, arrow::compute::RoundMode::HALF_TOWARDS_INFINITY);
+    out = arrow::compute::call("arrow_round", {children[0]->arrow_expr(), arrow::compute::literal(bits)}, options);
     return 0;
 }
 
@@ -416,6 +476,104 @@ int arrow_lt(std::vector<ExprNode*>& children, pb::Function* fn, const pb::Primi
     return 0;
 }
 
+int arrow_least(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
+    std::vector<arrow::compute::Expression> arguments;
+    if (0 != get_all_arrow_argments(children, arguments, fn)) {
+        return -1;
+    }
+    for (auto i = 0; i < arguments.size(); ++i) {
+        if (is_string(children[i]->col_type())) {
+            arguments[i] = arrow::compute::call("cast", {arguments[i]}, arrow::compute::CastOptions::Unsafe(arrow::float64()));
+        }
+    }
+    arrow::compute::ElementWiseAggregateOptions options(/*skip_nulls*/false);
+    out = arrow::compute::call("min_element_wise", arguments, std::move(options));
+    return 0;
+}
+
+int arrow_greatest(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
+    std::vector<arrow::compute::Expression> arguments;
+    if (0 != get_all_arrow_argments(children, arguments, fn)) {
+        return -1;
+    }
+    for (auto i = 0; i < arguments.size(); ++i) {
+        if (is_string(children[i]->col_type())) {
+            arguments[i] = arrow::compute::call("cast", {arguments[i]}, arrow::compute::CastOptions::Unsafe(arrow::float64()));
+        }
+    }
+    arrow::compute::ElementWiseAggregateOptions options(/*skip_nulls*/false);
+    out = arrow::compute::call("max_element_wise", arguments, std::move(options));
+    return 0;
+}
+
+int arrow_bitwise_and(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
+    std::vector<arrow::compute::Expression> arguments;
+    if (0 != get_all_arrow_argments(children, arguments, fn)) {
+        return -1;
+    }
+    out = arrow::compute::call("bit_wise_and", arguments);
+    return 0;
+}
+
+int arrow_bitwise_or(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
+    std::vector<arrow::compute::Expression> arguments;
+    if (0 != get_all_arrow_argments(children, arguments, fn)) {
+        return -1;
+    }
+    out = arrow::compute::call("bit_wise_or", arguments);
+    return 0;
+}
+
+int arrow_bitwise_xor(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
+    std::vector<arrow::compute::Expression> arguments;
+    if (0 != get_all_arrow_argments(children, arguments, fn)) {
+        return -1;
+    }
+    out = arrow::compute::call("bit_wise_xor", arguments);
+    return 0;
+}
+
+int arrow_bitwise_not(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
+    std::vector<arrow::compute::Expression> arguments;
+    if (0 != get_all_arrow_argments(children, arguments, fn)) {
+        return -1;
+    }
+    out = arrow::compute::call("bit_wise_not", arguments);
+    return 0;
+}
+
+int arrow_left_shift(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
+    std::vector<arrow::compute::Expression> arguments;
+    if (0 != get_all_arrow_argments(children, arguments, fn)) {
+        return -1;
+    }
+    out = arrow::compute::call("shift_left", arguments);
+    return 0;
+}
+
+int arrow_right_shift(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
+    std::vector<arrow::compute::Expression> arguments;
+    if (0 != get_all_arrow_argments(children, arguments, fn)) {
+        return -1;
+    }
+    out = arrow::compute::call("shift_right", arguments);
+    return 0;
+}
+
+int arrow_if_null(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
+    RETURN_NULL_IF_COLUMN_SATISFY_COND(children.size() != 2);
+    // values, cast to return type
+    for (int i = 0; i < children.size(); ++i) {
+        if (0 != build_arrow_expr_with_cast(children[i], return_type)) {
+            return -1;
+        }
+    }
+    out = arrow::compute::call("if_else", {arrow::compute::call("is_null", {children[0]->arrow_expr()}),
+        children[1]->arrow_expr(),
+        children[0]->arrow_expr()});
+    return 0;
+}
+
 // parser::FT_COMMON  case_when
 int arrow_case_when(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
     std::vector<arrow::compute::Expression> predicates;
@@ -488,9 +646,7 @@ int arrow_case_expr_when(std::vector<ExprNode*>& children, pb::Function* fn, con
 }
 
 int arrow_if(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
-    if (children.size() != 3) {
-        return -1;
-    }
+    RETURN_NULL_IF_COLUMN_SATISFY_COND(children.size() != 3);
     // predicate
     if (0 != build_arrow_expr_with_cast(children[0], fn, 0)) {
         return -1;
@@ -507,32 +663,6 @@ int arrow_if(std::vector<ExprNode*>& children, pb::Function* fn, const pb::Primi
     return 0;
 }
 
-int arrow_concat(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
-    std::vector<arrow::compute::Expression> args;
-    for (auto& c : children) { 
-        BUILD_ARROW_EXPR_RET(c);
-        if (is_datetime_specic(c->col_type()) 
-                || is_double(c->col_type())) {
-            ExprValueCastFunctionOptions option(c->col_type());
-            args.emplace_back(arrow::compute::call("expr_value_to_string", {c->arrow_expr()}, std::move(option)));
-        } else {
-            args.emplace_back(arrow::compute::call("cast", {c->arrow_expr()}, arrow::compute::CastOptions::Unsafe(arrow::large_binary())));
-        }
-    }
-    // 连接符放在最后
-    args.emplace_back(arrow::compute::literal(std::make_shared<arrow::LargeBinaryScalar>("")));
-    /// A null in any input results in a null in the output. binary_join_element_wise要求args类型都一样, large_binary
-    std::shared_ptr<arrow::compute::JoinOptions> option = std::make_shared<arrow::compute::JoinOptions>();
-    out = arrow::compute::call("binary_join_element_wise", args, option);
-    return 0;
-}
-
-int arrow_length(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
-    BUILD_ARROW_EXPR_RET(children[0]);
-    out = arrow::compute::call("binary_length", {arrow::compute::call("cast", {children[0]->arrow_expr()}, arrow::compute::CastOptions::Unsafe(arrow::large_binary()))});
-    return 0;
-}
-
 int arrow_cast_to_string(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
     BUILD_ARROW_EXPR_RET(children[0]);
     if (is_datetime_specic(children[0]->col_type()) 
@@ -544,6 +674,33 @@ int arrow_cast_to_string(std::vector<ExprNode*>& children, pb::Function* fn, con
     } else {
         out = arrow::compute::call("cast", {children[0]->arrow_expr()}, arrow::compute::CastOptions::Unsafe(arrow::large_binary()));
     }
+    return 0;
+}
+
+int arrow_cast_to_double(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
+    RETURN_NULL_IF_COLUMN_SATISFY_COND(children.size() != 1);
+    if (0 != build_arrow_expr_with_cast(children[0], pb::DOUBLE, true)) {
+        return -1;
+    }
+    out = children[0]->arrow_expr();
+    return 0;
+}
+
+int arrow_cast_to_signed(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
+    RETURN_NULL_IF_COLUMN_SATISFY_COND(children.size() != 1);
+    if (0 != build_arrow_expr_with_cast(children[0], pb::INT64, true)) {
+        return -1;
+    }
+    out = children[0]->arrow_expr();
+    return 0;
+}
+
+int arrow_cast_to_unsigned(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
+    RETURN_NULL_IF_COLUMN_SATISFY_COND(children.size() != 1);
+    if (0 != build_arrow_expr_with_cast(children[0], pb::UINT64, true)) {
+        return -1;
+    }
+    out = children[0]->arrow_expr();
     return 0;
 }
 
@@ -586,6 +743,16 @@ int arrow_cast_to_time(std::vector<ExprNode*>& children, pb::Function* fn, const
     } else {
         out = children[0]->arrow_expr();
     }
+    return 0;
+}
+
+int arrow_murmur_hash(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
+    if (children.empty()) {
+        arrow::NullScalar null_scalar;
+        out = arrow::compute::literal(null_scalar);
+    }
+    BUILD_ARROW_EXPR_RET(children[0]);
+    out = arrow::compute::call("murmur_hash", {children[0]->arrow_expr()});
     return 0;
 }
 
@@ -721,7 +888,7 @@ static arrow::Status ExecStringInput(arrow::compute::KernelContext* ctx, const a
     arrow::compute::internal::VisitArrayValuesInline<arrow::LargeBinaryType>(
         input,
         [&](std::string_view v) {
-            *out_values++ = datetime_to_time(str_to_datetime(v.data(), v.length()));
+            *out_values++ = str_to_time(v.data(), v.length());
         },
         [&]() {
             // null
@@ -850,7 +1017,8 @@ static arrow::Status ExecStringInput(arrow::compute::KernelContext* ctx, const a
 };
 
 template <typename O, typename I>
-arrow::Status ExecExprValueToString(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) {    
+struct ExecExprValueToString {
+static arrow::Status Exec(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) {    
     using InputValueCType = typename arrow::TypeTraits<I>::CType;
     using BuilderType = typename arrow::TypeTraits<O>::BuilderType;
 
@@ -928,6 +1096,95 @@ arrow::Status ExecExprValueToString(arrow::compute::KernelContext* ctx, const ar
     out->value = std::move(output_array->data());
     return arrow::Status::OK();
 }
+};
+
+arrow::Status ExecMurmurHash(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) {    
+    const arrow::ArraySpan& input = batch[0].array;
+    arrow::ArraySpan* out_data = out->array_span_mutable();
+    uint64_t* out_values = out_data->GetValues<uint64_t>(1);
+
+    if (input.type == nullptr || !is_base_binary_like(input.type->id())) {
+        for (auto i = 0; i < input.length; ++i) {
+            *out_values++ = make_sign(std::string(""));
+        }
+        return arrow::Status::OK();
+    }
+    
+    arrow::compute::internal::VisitArrayValuesInline<arrow::LargeBinaryType>(
+        input,
+        [&](std::string_view v) {
+            *out_values++ = make_sign(v);
+        },
+        [&]() {
+            // null
+            *out_values++ = make_sign(std::string(""));
+        });
+    return arrow::Status::OK();
+}
+
+template <typename O, typename I1, typename I2>
+struct ExecRound {
+    using Input1ValueCType = typename arrow::TypeTraits<I1>::CType;
+    using Input2ValueCType = typename arrow::TypeTraits<I2>::CType;
+    using OutputValueCType = typename arrow::TypeTraits<O>::CType;
+    static OutputValueCType cal_result(const Input1ValueCType& input1, const Input2ValueCType& bits) {
+        OutputValueCType base = std::pow(10, bits);
+        if (base > 0) {
+            if (input1 < 0) {
+                return  -::round(-input1 * base) / base;
+            } else {
+                return   ::round(input1 * base) / base;
+            }
+        }
+        return OutputValueCType();
+    };
+    static arrow::Status Exec(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) { 
+        Input2ValueCType bits = 0;
+        if (batch[1].is_scalar()) {
+            bits = arrow::compute::internal::UnboxScalar<I2>::Unbox(*batch[1].scalar);
+        } else {
+            const arrow::ArraySpan& input = batch[1].array;
+            bits = *input.GetValues<Input2ValueCType>(1);
+        }
+        arrow::ArraySpan* out_data = out->array_span_mutable();
+        OutputValueCType* out_values = out_data->GetValues<OutputValueCType>(1);
+        if (batch[0].is_scalar()) {
+            const Input1ValueCType value = arrow::compute::internal::UnboxScalar<I1>::Unbox(*batch[0].scalar);
+            *out_values++ = cal_result(value, bits);
+        } else {
+            const arrow::ArraySpan& input = batch[0].array;
+            const Input1ValueCType* in_values = input.GetValues<Input1ValueCType>(1);
+            for (auto i = 0; i < input.length; ++i) {
+                *out_values++ = cal_result(*in_values++, bits);
+            }
+        }
+        return arrow::Status::OK();
+    }
+};
+/*
+ * 类型转换通用config
+ */
+class ExprValueCastOptionsType : public arrow::compute::FunctionOptionsType {
+public:
+    static const arrow::compute::FunctionOptionsType* GetInstance() {
+        static std::unique_ptr<arrow::compute::FunctionOptionsType> instance(new ExprValueCastOptionsType());
+        return instance.get();
+    }
+    const char* type_name() const override { return "ExprValueCast"; }
+    std::string Stringify(const  arrow::compute::FunctionOptions& options) const override {
+        return type_name();
+    }
+    bool Compare(const arrow::compute::FunctionOptions& options,
+                 const arrow::compute::FunctionOptions& other) const override {
+        const auto& lop = static_cast<const ExprValueCastFunctionOptions&>(options);
+        const auto& rop = static_cast<const ExprValueCastFunctionOptions&>(other);
+        return lop.type == rop.type;
+    }
+    std::unique_ptr<arrow::compute::FunctionOptions> Copy(const arrow::compute::FunctionOptions& options) const override {
+        const auto& opts = static_cast<const ExprValueCastFunctionOptions&>(options);
+        return std::make_unique<ExprValueCastFunctionOptions>(opts.type);
+    }
+};
 
 arrow::Result<std::unique_ptr<arrow::compute::KernelState>> InitExprValueCast(arrow::compute::KernelContext*,
                                             const  arrow::compute::KernelInitArgs& args) {
@@ -938,11 +1195,6 @@ arrow::Result<std::unique_ptr<arrow::compute::KernelState>> InitExprValueCast(ar
 ExprValueCastFunctionOptions::ExprValueCastFunctionOptions(pb::PrimitiveType value)
     : arrow::compute::FunctionOptions(ExprValueCastOptionsType::GetInstance()), type(value) {}
 
-
-/*
- * Register to arrow: Function XXX (TODO)
- */
-
 arrow::Status ArrowFunctionManager::RegisterAllDefinedFunction() {
     auto registry = arrow::compute::GetFunctionRegistry();
     /*
@@ -951,25 +1203,18 @@ arrow::Status ArrowFunctionManager::RegisterAllDefinedFunction() {
     {
         auto expr_value_to_string_func = std::make_shared<arrow::compute::ScalarFunction>("expr_value_to_string", arrow::compute::Arity::Unary(),
                                                     /*doc=*/arrow::compute::FunctionDoc::Empty());
-        // Time -> string
-        arrow::compute::ScalarKernel k_time_to_string({arrow::int32()}, arrow::large_binary(), 
-                                                ExecExprValueToString<arrow::LargeBinaryType, arrow::Int32Type>, InitExprValueCast); 
-        // TIMESTAMP/DATE -> string
-        arrow::compute::ScalarKernel k_timestamp_date_to_string({arrow::uint32()}, arrow::large_binary(), 
-                                                ExecExprValueToString<arrow::LargeBinaryType, arrow::UInt32Type>, InitExprValueCast);
-        // DATETIME -> string 
-        arrow::compute::ScalarKernel k_datetime_to_string({arrow::uint64()}, arrow::large_binary(), 
-                                                ExecExprValueToString<arrow::LargeBinaryType, arrow::UInt64Type>, InitExprValueCast);
+        for (const std::shared_ptr<arrow::DataType>& in_ty : arrow::IntTypes()) {
+            ARROW_RETURN_NOT_OK(expr_value_to_string_func->AddKernel({in_ty},  // 输入类型
+                    arrow::large_binary(),  // 输出类型
+                    arrow::compute::internal::GenerateNumeric<ExecExprValueToString, arrow::LargeBinaryType>(*in_ty),
+                    InitExprValueCast));
+        }
         // float -> string, 精度统一
         arrow::compute::ScalarKernel k_float_to_string({arrow::float32()}, arrow::large_binary(), 
-                                                ExecExprValueToString<arrow::LargeBinaryType, arrow::FloatType>, InitExprValueCast);
+                                                ExecExprValueToString<arrow::LargeBinaryType, arrow::FloatType>::Exec, InitExprValueCast);
         // double -> string, 精度统一
         arrow::compute::ScalarKernel k_double_to_string({arrow::float64()}, arrow::large_binary(), 
-                                                ExecExprValueToString<arrow::LargeBinaryType, arrow::DoubleType>, InitExprValueCast);
-
-        ARROW_RETURN_NOT_OK(expr_value_to_string_func->AddKernel(k_time_to_string));
-        ARROW_RETURN_NOT_OK(expr_value_to_string_func->AddKernel(k_timestamp_date_to_string));
-        ARROW_RETURN_NOT_OK(expr_value_to_string_func->AddKernel(k_datetime_to_string));
+                                                ExecExprValueToString<arrow::LargeBinaryType, arrow::DoubleType>::Exec, InitExprValueCast);
         ARROW_RETURN_NOT_OK(expr_value_to_string_func->AddKernel(k_float_to_string));
         ARROW_RETURN_NOT_OK(expr_value_to_string_func->AddKernel(k_double_to_string));
         ARROW_RETURN_NOT_OK(registry->AddFunction(expr_value_to_string_func));
@@ -981,19 +1226,15 @@ arrow::Status ArrowFunctionManager::RegisterAllDefinedFunction() {
     {
         auto expr_value_to_date_func = std::make_shared<arrow::compute::ScalarFunction>("expr_value_to_date", arrow::compute::Arity::Unary(),
                                                     /*doc=*/arrow::compute::FunctionDoc::Empty());
+        for (const std::shared_ptr<arrow::DataType>& in_ty : arrow::IntTypes()) {
+            ARROW_RETURN_NOT_OK(expr_value_to_date_func->AddKernel({in_ty},  // 输入类型
+                    arrow::uint32(),  // 输出类型
+                    arrow::compute::internal::GenerateNumeric<ExecExprValueToDate, arrow::UInt32Type>(*in_ty),
+                    InitExprValueCast));
+        } 
         arrow::compute::ScalarKernel k_string_to_date({arrow::large_binary()}, arrow::uint32(), 
                                                 ExecExprValueToDate<arrow::UInt32Type, arrow::LargeBinaryType>::ExecStringInput, InitExprValueCast);
-        arrow::compute::ScalarKernel k_timestamp_to_date({arrow::uint32()}, arrow::uint32(), 
-                                                ExecExprValueToDate<arrow::UInt32Type, arrow::UInt32Type>::Exec, InitExprValueCast);
-        arrow::compute::ScalarKernel k_time_to_date({arrow::int32()}, arrow::uint32(), 
-                                                ExecExprValueToDate<arrow::UInt32Type, arrow::Int32Type>::Exec, InitExprValueCast);
-        arrow::compute::ScalarKernel k_datetime_to_date({arrow::uint64()}, arrow::uint32(), 
-                                                ExecExprValueToDate<arrow::UInt32Type, arrow::UInt64Type>::Exec, InitExprValueCast);
-
         ARROW_RETURN_NOT_OK(expr_value_to_date_func->AddKernel(k_string_to_date));
-        ARROW_RETURN_NOT_OK(expr_value_to_date_func->AddKernel(k_timestamp_to_date));
-        ARROW_RETURN_NOT_OK(expr_value_to_date_func->AddKernel(k_time_to_date));
-        ARROW_RETURN_NOT_OK(expr_value_to_date_func->AddKernel(k_datetime_to_date));
         ARROW_RETURN_NOT_OK(registry->AddFunction(expr_value_to_date_func));
     }
 
@@ -1003,16 +1244,15 @@ arrow::Status ArrowFunctionManager::RegisterAllDefinedFunction() {
     {
         auto expr_value_to_datetime_func = std::make_shared<arrow::compute::ScalarFunction>("expr_value_to_datetime", arrow::compute::Arity::Unary(),
                                                     /*doc=*/arrow::compute::FunctionDoc::Empty());
+        for (const std::shared_ptr<arrow::DataType>& in_ty : arrow::IntTypes()) {
+            ARROW_RETURN_NOT_OK(expr_value_to_datetime_func->AddKernel({in_ty},  // 输入类型
+                    arrow::uint64(),  // 输出类型
+                    arrow::compute::internal::GenerateNumeric<ExecExprValueToDateTime, arrow::UInt64Type>(*in_ty),
+                    InitExprValueCast));
+        } 
         arrow::compute::ScalarKernel k_string_to_datetime({arrow::large_binary()}, arrow::uint64(), 
                                                 ExecExprValueToDateTime<arrow::UInt64Type, arrow::LargeBinaryType>::ExecStringInput, InitExprValueCast);
-        arrow::compute::ScalarKernel k_timestamp_date_to_datetime({arrow::uint32()}, arrow::uint64(), 
-                                                ExecExprValueToDateTime<arrow::UInt64Type, arrow::UInt32Type>::Exec, InitExprValueCast);
-        arrow::compute::ScalarKernel k_time_to_datetime({arrow::int32()}, arrow::uint64(), 
-                                                ExecExprValueToDateTime<arrow::UInt64Type, arrow::Int32Type>::Exec, InitExprValueCast);
-
         ARROW_RETURN_NOT_OK(expr_value_to_datetime_func->AddKernel(k_string_to_datetime));
-        ARROW_RETURN_NOT_OK(expr_value_to_datetime_func->AddKernel(k_timestamp_date_to_datetime));
-        ARROW_RETURN_NOT_OK(expr_value_to_datetime_func->AddKernel(k_time_to_datetime));
         ARROW_RETURN_NOT_OK(registry->AddFunction(expr_value_to_datetime_func));
     }
 
@@ -1022,16 +1262,15 @@ arrow::Status ArrowFunctionManager::RegisterAllDefinedFunction() {
     {
         auto expr_value_to_time_func = std::make_shared<arrow::compute::ScalarFunction>("expr_value_to_time", arrow::compute::Arity::Unary(),
                                                     /*doc=*/arrow::compute::FunctionDoc::Empty());
+        for (const std::shared_ptr<arrow::DataType>& in_ty : arrow::IntTypes()) {
+            ARROW_RETURN_NOT_OK(expr_value_to_time_func->AddKernel({in_ty},  // 输入类型
+                    arrow::int32(),  // 输出类型
+                    arrow::compute::internal::GenerateNumeric<ExecExprValueToTime, arrow::Int32Type>(*in_ty),
+                    InitExprValueCast));
+        } 
         arrow::compute::ScalarKernel k_string_to_time({arrow::large_binary()}, arrow::int32(), 
                                                 ExecExprValueToTime<arrow::Int32Type, arrow::LargeBinaryType>::ExecStringInput, InitExprValueCast);
-        arrow::compute::ScalarKernel k_timestamp_date_to_time({arrow::uint32()}, arrow::int32(), 
-                                                ExecExprValueToTime<arrow::Int32Type, arrow::UInt32Type>::Exec, InitExprValueCast);
-        arrow::compute::ScalarKernel k_datetime_to_time({arrow::uint64()}, arrow::int32(), 
-                                                ExecExprValueToTime<arrow::Int32Type, arrow::UInt64Type>::Exec, InitExprValueCast);
-                                                
         ARROW_RETURN_NOT_OK(expr_value_to_time_func->AddKernel(k_string_to_time));
-        ARROW_RETURN_NOT_OK(expr_value_to_time_func->AddKernel(k_timestamp_date_to_time));
-        ARROW_RETURN_NOT_OK(expr_value_to_time_func->AddKernel(k_datetime_to_time));
         ARROW_RETURN_NOT_OK(registry->AddFunction(expr_value_to_time_func));
     }
 
@@ -1041,31 +1280,57 @@ arrow::Status ArrowFunctionManager::RegisterAllDefinedFunction() {
     {
         auto expr_value_to_timestamp_func = std::make_shared<arrow::compute::ScalarFunction>("expr_value_to_timestamp", arrow::compute::Arity::Unary(),
                                                     /*doc=*/arrow::compute::FunctionDoc::Empty());
+         for (const std::shared_ptr<arrow::DataType>& in_ty : arrow::IntTypes()) {
+            ARROW_RETURN_NOT_OK(expr_value_to_timestamp_func->AddKernel({in_ty},  // 输入类型
+                    arrow::uint32(),  // 输出类型
+                    arrow::compute::internal::GenerateNumeric<ExecExprValueToTimeStamp, arrow::UInt32Type>(*in_ty),
+                    InitExprValueCast));
+        } 
         arrow::compute::ScalarKernel k_string_to_timestamp({arrow::large_binary()}, arrow::uint32(), 
                                                 ExecExprValueToTimeStamp<arrow::UInt32Type, arrow::LargeBinaryType>::ExecStringInput, InitExprValueCast);
-        arrow::compute::ScalarKernel k_date_to_timestamp({arrow::uint32()}, arrow::uint32(), 
-                                                ExecExprValueToTimeStamp<arrow::UInt32Type, arrow::UInt32Type>::Exec, InitExprValueCast);
-        arrow::compute::ScalarKernel k_datetime_to_timestamp({arrow::uint64()}, arrow::uint32(), 
-                                                ExecExprValueToTimeStamp<arrow::UInt32Type, arrow::UInt64Type>::Exec, InitExprValueCast);
-        arrow::compute::ScalarKernel k_time_to_timestamp({arrow::int32()}, arrow::uint32(), 
-                                                ExecExprValueToTimeStamp<arrow::UInt32Type, arrow::Int32Type>::Exec, InitExprValueCast);
         ARROW_RETURN_NOT_OK(expr_value_to_timestamp_func->AddKernel(k_string_to_timestamp));
-        ARROW_RETURN_NOT_OK(expr_value_to_timestamp_func->AddKernel(k_date_to_timestamp));
-        ARROW_RETURN_NOT_OK(expr_value_to_timestamp_func->AddKernel(k_datetime_to_timestamp));
-        ARROW_RETURN_NOT_OK(expr_value_to_timestamp_func->AddKernel(k_time_to_timestamp));
         ARROW_RETURN_NOT_OK(registry->AddFunction(expr_value_to_timestamp_func));
+    }
+    /*
+     * murmur_hash
+     */
+    {
+        auto arrow_murmur_hash = std::make_shared<arrow::compute::ScalarFunction>("murmur_hash", arrow::compute::Arity::Unary(),
+                                                    /*doc=*/arrow::compute::FunctionDoc::Empty());
+        for (const std::shared_ptr<arrow::DataType>& in_ty : arrow::NumericTypes()) {
+            ARROW_RETURN_NOT_OK(arrow_murmur_hash->AddKernel({in_ty}, arrow::uint64(), ExecMurmurHash));
+        } 
+        for (const std::shared_ptr<arrow::DataType>& in_ty : arrow::BaseBinaryTypes()) {
+            ARROW_RETURN_NOT_OK(arrow_murmur_hash->AddKernel({in_ty}, arrow::uint64(), ExecMurmurHash));
+        }
+        ARROW_RETURN_NOT_OK(registry->AddFunction(arrow_murmur_hash));
+    }
+     /*
+     * round, 两元函数, 第二列是int scalar(精度)
+     */
+    {
+        auto arrow_round = std::make_shared<arrow::compute::ScalarFunction>("arrow_round", arrow::compute::Arity::Binary(),
+                                                    /*doc=*/arrow::compute::FunctionDoc::Empty());
+        ARROW_RETURN_NOT_OK(arrow_round->AddKernel({arrow::float32(), arrow::int32()}, arrow::float64(), 
+                    ExecRound<arrow::DoubleType, arrow::FloatType, arrow::Int32Type>::Exec));
+        ARROW_RETURN_NOT_OK(arrow_round->AddKernel({arrow::float64(), arrow::int32()}, arrow::float64(), 
+                    ExecRound<arrow::DoubleType, arrow::DoubleType, arrow::Int32Type>::Exec));
+        ARROW_RETURN_NOT_OK(registry->AddFunction(arrow_round));
     }
     return arrow::Status::OK();
 }
 
 arrow::Status ArrowFunctionManager::RegisterAllInteralFunction() {
-    auto registry = arrow::compute::GetFunctionRegistry();
     // 算术
     register_object("uminus", arrow_uminus);
     register_object("add", arrow_add);
     register_object("minus", arrow_minus);
     register_object("multiplies", arrow_multiplies);
     register_object("divides", arrow_divides);
+    register_object("ceil", arrow_ceil);
+    register_object("ceiling", arrow_ceil);
+    register_object("floor", arrow_floor);
+    register_object("round", arrow_round);
 
     // 比较
     register_object("eq", arrow_eq);
@@ -1080,35 +1345,97 @@ arrow::Status ArrowFunctionManager::RegisterAllInteralFunction() {
     register_object("row_expr_lt", arrow_row_expr_lt);
     register_object("le", arrow_le);
     register_object("row_expr_le", arrow_row_expr_le);
+    register_object("least", arrow_least);
+    register_object("greatest", arrow_greatest);
+    
+    // 位运算
+    register_object("bit_and", arrow_bitwise_and);
+    register_object("bit_or", arrow_bitwise_or);
+    register_object("bit_xor", arrow_bitwise_xor);
+    register_object("bit_not", arrow_bitwise_not);
+    register_object("left_shift", arrow_left_shift);
+    register_object("right_shift", arrow_right_shift);
 
     // 选择
     if (FLAGS_enable_arrow_complex_func) {
         register_object("case_when", arrow_case_when);
         register_object("case_expr_when", arrow_case_expr_when);
         register_object("if", arrow_if);
+        register_object("ifnull", arrow_if_null);
     }
     // string
     register_object("concat", arrow_concat);
+    register_object("concat_ws", arrow_concat_ws);
     register_object("length", arrow_length);
+    register_object("bit_length", arrow_bit_length);
+    register_object("substr", arrow_substr);
+    register_object("substring", arrow_substr);
+    register_object("upper", arrow_upper);
+    register_object("lower", arrow_lower);
+    register_object("reverse", arrow_reverse);
+    register_object("repeat", arrow_repeat);
+    // 类型转换
     register_object("cast_to_string", arrow_cast_to_string);
+    register_object("cast_to_date", arrow_cast_to_date);
+    register_object("cast_to_time", arrow_cast_to_time);
+    register_object("cast_to_datetime", arrow_cast_to_datetime);
+    register_object("cast_to_double", arrow_cast_to_double);
+    register_object("cast_to_signed", arrow_cast_to_signed);
+    register_object("cast_to_unsigned", arrow_cast_to_unsigned);
 
     // 时间
-    register_object("str_to_date", arrow_cast_to_datetime);
-    register_object("cast_to_date", arrow_cast_to_date);  
-    register_object("cast_to_time", arrow_cast_to_time);  
-    register_object("cast_to_datetime", arrow_cast_to_datetime);
+    register_object("str_to_date", arrow_str_to_date);
+    register_object("date_format", arrow_date_format);
+    register_object("time_format", arrow_time_format);
+    register_object("current_timestamp", arrow_now);
+    register_object("now", arrow_now);
+    register_object("date", arrow_date);
+    register_object("hour", arrow_hour);
+    register_object("date_sub", arrow_date_sub);
+    register_object("subdate", arrow_date_sub);
+    register_object("date_add", arrow_date_add);
+    register_object("adddate", arrow_date_add);
+    register_object("curdate", arrow_current_date);
+    register_object("current_date", arrow_current_date);
+    register_object("curtime", arrow_current_time);
+    register_object("current_time", arrow_current_time);
+    register_object("timestamp", arrow_timestamp);
+    register_object("time_to_sec", arrow_time_to_sec);
+    register_object("from_unixtime", arrow_from_unixtime);
+    register_object("unix_timestamp", arrow_unix_timestamp);
+    register_object("week", arrow_week);
+    register_object("yearweek", arrow_yearweek);
+    register_object("timestampdiff", arrow_timestampdiff);
+
+    // 其他
+    register_object("murmur_hash", arrow_murmur_hash);
     return arrow::Status::OK();
 }
 
 int ArrowFunctionManager::RegisterAllArrowFunction() {
     auto s = RegisterAllInteralFunction();
     if (!s.ok()) {
-        DB_FATAL("register arrow function fail");
+        DB_FATAL("register arrow function fail: %s", s.ToString().c_str());
         return -1;
     }
     s = RegisterAllDefinedFunction();
     if (!s.ok()) {
-        DB_FATAL("register arrow function fail");
+        DB_FATAL("register arrow function fail: %s", s.ToString().c_str());
+        return -1;
+    }
+    s = RegisterAllTimeFunction();
+    if (!s.ok()) {
+        DB_FATAL("register arrow time function fail: %s", s.ToString().c_str());
+        return -1;
+    }
+    s = RegisterAllStringFunction();
+    if (!s.ok()) {
+        DB_FATAL("register arrow string function fail: %s", s.ToString().c_str());
+        return -1;
+    }
+    s = RegisterAllHashAggFunction();
+    if (!s.ok()) {
+        DB_FATAL("register arrow string function fail: %s", s.ToString().c_str());
         return -1;
     }
     return 0;
@@ -1139,6 +1466,18 @@ ArrowExprBuildFun ArrowFunctionManager::get_func(int32_t func_op, const std::str
             return get_object("multiplies");
         case parser::FT_DIVIDES: 
             return get_object("divides");
+        case parser::FT_BIT_AND:
+            return get_object("bit_and");
+        case parser::FT_BIT_OR: 
+            return get_object("bit_or");
+        case parser::FT_BIT_XOR: 
+            return get_object("bit_xor");
+        case parser::FT_BIT_NOT: 
+            return get_object("bit_not");
+        case parser::FT_LS: 
+            return get_object("left_shift");
+        case parser::FT_RS: 
+            return get_object("right_shift");
         case parser::FT_COMMON:
             return get_object(func_name);
         default:

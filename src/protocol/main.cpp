@@ -30,6 +30,9 @@
 #include "memory_profile.h"
 #include "arrow_function.h"
 #include "arrow_io_excutor.h"
+#include "arrow_exec_node.h"
+#include "db_service.h"
+#include "tso_proxy.h"
 
 namespace baikaldb {
 
@@ -73,12 +76,17 @@ int main(int argc, char **argv) {
 
     // init singleton
     baikaldb::FunctionManager::instance()->init();
+    baikaldb::ToSqlFunctionManager::instance()->init();
     if (baikaldb::SchemaFactory::get_instance()->init(true, false) != 0) {
         DB_FATAL("SchemaFactory init failed");
         return -1;
     }
     if (baikaldb::ArrowFunctionManager::instance()->RegisterAllArrowFunction() != 0) {
         DB_FATAL("RegisterAllArrowFunction failed");
+        return -1;
+    }
+    if (baikaldb::ArrowExecNodeManager::RegisterAllArrowExecNode() != 0) {
+        DB_FATAL("RegisterAllArrowExecNode failed");
         return -1;
     }
     if (baikaldb::GlobalArrowExecutor::init() != 0) {
@@ -99,6 +107,10 @@ int main(int argc, char **argv) {
     }
     if (baikaldb::MetaServerInteract::get_tso_instance()->init() != 0) {
         DB_FATAL("meta server interact init failed");
+        return -1;
+    }
+    if (baikaldb::TsoProxy::get_instance()->init() != 0) {
+        DB_FATAL("tso proxy init failed");
         return -1;
     }
     if (baikaldb::TsoFetcher::get_instance()->init() != 0) {
@@ -125,6 +137,28 @@ int main(int argc, char **argv) {
     baikaldb::ShowHelper::get_instance()->init();
     baikaldb::MemoryGCHandler::get_instance()->init();
     baikaldb::MemTrackerPool::get_instance()->init();
+    brpc::Server dummy_server;
+    baikaldb::DbService* db_server = baikaldb::DbService::get_instance();
+    if (0 != dummy_server.AddService(db_server, brpc::SERVER_DOESNT_OWN_SERVICE)) {
+        DB_FATAL("Fail to Add idonlyeService");
+        return -1;
+    }
+    baikaldb::RuntimeState::localhost_address = baikaldb::SchemaFactory::get_instance()->get_address();
+    butil::EndPoint addr;
+    addr.ip = butil::IP_ANY;
+    addr.port = baikaldb::FLAGS_db_port;
+    //启动端口
+    if (dummy_server.Start(addr, NULL) != 0) {
+        DB_FATAL("Fail to start server");
+        return -1;
+    }
+    DB_NOTICE("dummy_server start");
+
+    if (0 != db_server->init_after_listen()) {
+        DB_FATAL("db dummy_server instance init_after_listen fail");
+        return -1;
+    }
+
     // Initail server.
     baikaldb::NetworkServer* server = baikaldb::NetworkServer::get_instance();
     if (!server->init()) {
@@ -141,6 +175,10 @@ int main(int argc, char **argv) {
     server->stop();
     baikaldb::MemoryGCHandler::get_instance()->close();
     baikaldb::MemTrackerPool::get_instance()->close();
+
+    dummy_server.Stop(0);
+    dummy_server.Join();
+
     DB_NOTICE("Server stopped.");
     return 0;
 }

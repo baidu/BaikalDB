@@ -61,6 +61,7 @@ enum OpType {
     OP_ROLLUP_REGION_FINISH                 = 83;
     OP_ROLLUP_REGION_FAILED                 = 84; //失败处理
     OP_ROLLUP_CLEAR_VERSION                 = 85;
+    OP_COLUMN_INFO                          = 86; //column信息更新
 
     // for meta 
     OP_ADD_LOGICAL                          = 114; //建逻辑机房

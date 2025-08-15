@@ -290,6 +290,8 @@ public:
         return 0;
     }
 
+    virtual std::string to_sql(const std::unordered_map<int32_t, std::string>& slotid_fieldname_map, 
+                               baikal::client::MysqlShortConnection* conn) override;
 
 private:
     void value_to_node_type() {

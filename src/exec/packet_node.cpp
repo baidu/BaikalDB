@@ -21,6 +21,7 @@
 #include <arrow/stl_iterator.h>
 #include "vectorize_helpper.h"
 #include "filter_node.h"
+#include "ddl_planner.h"
 
 namespace baikaldb {
 DEFINE_int32(expect_bucket_count, 100, "expect_bucket_count");
@@ -105,7 +106,13 @@ int PacketNode::handle_explain(RuntimeState* state) {
     pack_head();
     pack_fields();
     std::vector<std::map<std::string, std::string>> explains;
-    show_explain(explains);
+    int id = 1;
+    show_explain(state->ctx(), explains, id, -1);
+    std::stable_sort(explains.begin(), explains.end(), 
+            [](std::map<std::string, std::string> left, 
+                std::map<std::string, std::string> right) {
+                    return strtoll(left["id"].c_str(), NULL, 10) < strtoll(right["id"].c_str(), NULL, 10);
+            });
     for (auto& m : explains) {
         std::vector<std::string> row;
         for (auto& name : names) {
@@ -117,10 +124,21 @@ int PacketNode::handle_explain(RuntimeState* state) {
     return 0;
 }
 
+int PacketNode::show_explain(QueryContext* ctx, std::vector<std::map<std::string, std::string>>& output, int& next_id, int display_id) {
+    int return_id = next_id;
+    ExecNode::show_explain(ctx, output, next_id, display_id);
+    for (auto it: ctx->noncorrelated_subquerys) {
+        it->root->show_explain(it.get(), output, next_id, -1);
+    }
+    return return_id;
+}
+
+
 int PacketNode::handle_show_cost(RuntimeState* state) {
     _fields.clear();
     std::vector<std::map<std::string, std::string>> explains;
-    show_explain(explains);
+    int id = 1;
+    show_explain(state->ctx(), explains, id, -1);
     std::vector<std::map<std::string, std::string>> path_infos;
     std::vector<ExecNode*> scan_nodes;
     get_node(pb::SCAN_NODE, scan_nodes);
@@ -435,18 +453,136 @@ int PacketNode::handle_keypoint(RuntimeState* state) {
     return 0;
 }
 
-int PacketNode::fatch_expr_subquery_results(RuntimeState* state) {
-    auto subquery_exprs_vec = state->mutable_subquery_exprs();
-    bool eos = false;
-    do {
-        if (_children.empty()) {
+int PacketNode::sample_keypoint(RuntimeState* state) {
+    _fields.clear();
+    std::vector<std::string> names = {
+        "total_rows", "average_rows", "region_cnt", "split_keys"
+    };
+    for (auto& name : names) {
+        ResultField field;
+        field.name = name;
+        field.type = MYSQL_TYPE_STRING;
+        _fields.emplace_back(field);
+    }
+
+    // pk field types
+    int partition_key_field_id = -1;
+    int partition_key_slot_id = -1;
+    pb::TupleDescriptor* tuple = state->get_tuple_desc(0);
+    if (tuple == nullptr) {
+        DB_WARNING("get tuple fail");
+        return -1;
+    }
+    int64_t table_id = tuple->table_id();
+    auto pk_info = SchemaFactory::get_instance()->get_index_info_ptr(table_id);
+    if (pk_info == nullptr || pk_info->fields.empty()) {
+        DB_WARNING("get pk info fail");
+        return -1;
+    }
+    auto table_ptr = SchemaFactory::get_instance()->get_table_info_ptr(table_id);
+    if (table_ptr == nullptr) {
+        DB_WARNING("get table info fail");
+        return -1;
+    }
+    partition_key_field_id = pk_info->fields[0].id;
+    for (const auto& slot : tuple->slots()) {
+        if (slot.field_id() == partition_key_field_id) {
+            partition_key_slot_id = slot.slot_id();
             break;
         }
+    }
+    if (partition_key_field_id < 0 || partition_key_slot_id < 0) {
+        DB_WARNING("get partition key field_id or slot_id fail");
+        return -1;
+    }
+    if (FLAGS_key_point_collector_interval <= 0) {
+        DB_WARNING("not open key_point_collector");
+        return -1;
+    }
+
+    int pre_split_region_cnt = state->pre_split_region_cnt;
+    if (pre_split_region_cnt <= 1) {
+        DB_WARNING("not set pre split region count");
+        return -1;
+    }
+    std::map<std::string, std::vector<std::vector<ExprValue>>> partition_key_pks;
+    pack_keypoints(state, partition_key_pks, partition_key_field_id, partition_key_slot_id);
+    if (partition_key_pks.size() < pre_split_region_cnt) {
+        DB_WARNING("partition key pks size:%lu < pre split region count:%d", partition_key_pks.size(), pre_split_region_cnt);
+        return -1;
+    }
+    if (!is_int(pk_info->fields[0].type)) {
+        return -1;
+    }
+    int64_t total_rows = 0;
+    std::map<int64_t, int64_t> partition_key_rows;
+    for (auto& sub_info : partition_key_pks) {
+        std::vector<std::string> row;
+        int64_t partition_key = ExprValue(pk_info->fields[0].type, sub_info.first).get_numberic<int64_t>();
+        total_rows += sub_info.second.size() * FLAGS_key_point_collector_interval;
+        partition_key_rows[partition_key] = sub_info.second.size() * FLAGS_key_point_collector_interval;
+    }
+
+    int64_t average_rows = total_rows / pre_split_region_cnt;
+    int64_t region_rows = 0;
+    std::vector<std::string> pre_split_keys;
+    pre_split_keys.reserve(pre_split_region_cnt);
+    for (const auto& sub_info : partition_key_rows) {
+        if (region_rows + sub_info.second > average_rows) {
+            pre_split_keys.emplace_back(std::to_string(sub_info.first));
+            region_rows = sub_info.second;
+        } else {
+            region_rows += sub_info.second;
+        }
+    }
+    std::vector<std::string> row;
+    row.reserve(names.size());
+    row.emplace_back(std::to_string(total_rows));
+    row.emplace_back(std::to_string(average_rows));
+    row.emplace_back(std::to_string(pre_split_keys.size() + 1));
+    row.emplace_back(boost::join(pre_split_keys, " "));
+
+    std::vector<std::string> split_vec;
+    boost::split(split_vec, table_ptr->name, boost::is_any_of("."));
+    if (split_vec.size() != 2) {
+        DB_FATAL("get table_name[%s] fail", table_ptr->name.c_str());
+        return -1;
+    }
+    int ret = DDLPlanner::update_specify_split_keys(table_ptr->namespace_, split_vec[0], split_vec[1], boost::join(pre_split_keys, ","));
+    if (ret < 0) {
+        DB_WARNING("update split keys fail");
+        return -1;
+    }
+
+    state->inc_num_returned_rows(1);
+    pack_head();
+    pack_fields();
+    pack_vector_row(row);
+    pack_eof();
+    return 0;
+}
+
+int PacketNode::fatch_expr_subquery_results(RuntimeState* state) {
+    if (state->use_mpp) {
+        return 0;
+    }
+    auto subquery_exprs_vec = state->mutable_subquery_exprs();
+    bool eos = false;
+    int ret = 0;
+    do {
+        if (_children.empty()) {
+            state->execute_type = pb::EXEC_ROW;
+            return 0;
+        }
         RowBatch batch;
-        int ret = _children[0]->get_next(state, &batch, &eos);
+        ret = _children[0]->get_next(state, &batch, &eos);
         if (ret < 0) {
             DB_WARNING("children:get_next fail:%d", ret);
             return ret;
+        }
+        set_node_exec_type(_children[0]->node_exec_type());
+        if (_node_exec_type == pb::EXEC_ARROW_ACERO) {
+            break;
         }
         for (batch.reset(); !batch.is_traverse_over(); batch.next()) {
             MemRow* row = batch.get_row().get();
@@ -458,17 +594,25 @@ int PacketNode::fatch_expr_subquery_results(RuntimeState* state) {
             subquery_exprs_vec->emplace_back(val_row);
         }
     } while (!eos);
+    if (_node_exec_type == pb::EXEC_ARROW_ACERO) {
+        // ARROW列式执行入口
+        ret = start_vectorized_execution(state);
+        if (ret < 0) {
+            return ret;
+        }
+    }
+    state->execute_type = _node_exec_type;
     return 0;
 }
 
-bool PacketNode::can_use_arrow_vector() {
+bool PacketNode::can_use_arrow_vector(RuntimeState* state) {
     for (auto& expr : _projections) {
         if (!expr->can_use_arrow_vector()) {
             return false;
         }
     }
     for (auto& c : _children) {
-        if (!c->can_use_arrow_vector()) {
+        if (!c->can_use_arrow_vector(state)) {
             return false;
         }
     }
@@ -476,15 +620,9 @@ bool PacketNode::can_use_arrow_vector() {
 }
 
 int PacketNode::build_arrow_declaration(RuntimeState* state) {
-    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
+    START_LOCAL_TRACE_WITH_PARTITION_PROPERTY(get_trace(), state->get_trace_cost(), &_partition_property, OPEN_TRACE, nullptr);
     for (auto c : _children) {
         if (c->build_arrow_declaration(state) != 0) {
-            return -1;
-        }
-    }
-    auto sort_node = static_cast<SortNode*>(get_node(pb::SORT_NODE));
-    if (sort_node != nullptr) {
-        if (0 != sort_node->build_sort_arrow_declaration(state, get_trace())) {
             return -1;
         }
     }
@@ -505,51 +643,39 @@ int PacketNode::build_arrow_declaration(RuntimeState* state) {
 
 int PacketNode::start_vectorized_execution(RuntimeState* state) {
     START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
-    TimeCost cost;
     int ret = build_arrow_declaration(state);
     if (ret != 0) {
-        DB_FATAL_STATE(state, "build arrow declaration fail");
+        DB_FATAL_STATE(state, "arrow execute fail: build arrow declaration fail");
         return -1;
     }
     std::shared_ptr<arrow::Table> table;
-    // handle limit node
-    int64_t offset = 0;
-    int64_t limit = 0; 
-    LimitNode* limit_node = static_cast<LimitNode*>(vec_get_limit_node());
-    if (limit_node != nullptr) {
-        // 全局索引处理limit会add skip_num
-        offset = limit_node->get_offset() - limit_node->get_num_rows_skipped();
-        limit = limit_node->get_limit();
-    }
     // execute
     arrow::Result<std::shared_ptr<arrow::Table>> final_table;
     GlobalArrowExecutor::execute(state, &final_table);
     if (final_table.ok()) {
         table = *final_table;
+        if (state->is_expr_subquery()) {
+            state->subquery_result_table = table;
+            return 0;
+        }
     } else {
-        DB_FATAL("arrow acero run fail, status: %s", final_table.status().ToString().c_str());
+        DB_FATAL("arrow execute fail: arrow acero run fail, status: %s", final_table.status().ToString().c_str());
         return -1;
     }
-    if (limit != 0) {
-        if (table->num_rows() - offset <= 0) {
-            // no value
-            table.reset();
-        } else {
-            int64_t row_len = std::min(table->num_rows() - offset, limit);
-            table = table->Slice(offset, row_len);
-        }
-    }
+    return vectorized_pack_rows(state, table, false);
+}
+
+int PacketNode::vectorized_pack_rows(RuntimeState* state, std::shared_ptr<arrow::Table> table, bool need_pack_eof) {
+    int ret = 0;
     if (state->explain_type == SHOW_TRACE) {
         return 0;
     } 
-    int64_t pack_time = 0;
     if (_children.empty()) {
         return 0;
     }
-    cost.reset();
     if (table != nullptr) {
         std::vector<std::shared_ptr<arrow::ChunkedArray>> columns = table->columns();
-        for (int row_idx = 0; row_idx < table->num_rows(); ++row_idx) {
+        for (int64_t row_idx = 0; row_idx < table->num_rows(); ++row_idx) {
             if (_binary_protocol) {
                 ret = pack_binary_row(nullptr, state, &columns, row_idx);
             } else {
@@ -557,14 +683,30 @@ int PacketNode::start_vectorized_execution(RuntimeState* state) {
             }
             state->inc_num_returned_rows(1);
             if (ret < 0) {
-                pack_time += cost.get_time();
                 DB_WARNING("pack_row fail:%d", ret);
                 return ret;
             }
         }
     }
-    pack_time += cost.get_time();
+    if (need_pack_eof) {
+        pack_eof();
+    }
     return 0;
+}
+
+int PacketNode::mpp_pack_rows(RuntimeState* state, std::shared_ptr<arrow::Table> result) {
+    if (state->explain_type == SHOW_TRACE) {
+        if (state->explain_type == SHOW_TRACE) {
+            handle_trace(state);
+        } else {
+            handle_trace2(state);
+        }
+    } 
+    if (state->is_expr_subquery()) {
+        state->subquery_result_table = result;
+        return 0;
+    }
+    return vectorized_pack_rows(state, result, true);
 }
 
 int PacketNode::open(RuntimeState* state) {
@@ -580,7 +722,6 @@ int PacketNode::open(RuntimeState* state) {
         }
         return 0;
     }
-
     _client = state->client_conn();
     if (FLAGS_field_charsetnr_set_by_client) {
         for (auto& field : _fields) {
@@ -588,6 +729,10 @@ int PacketNode::open(RuntimeState* state) {
                 field.charsetnr = _client->charset_num;
             }
         }
+    }
+
+    if (state->explain_type == ANALYZE_STATISTICS) {
+        state->force_single_rpc = true;
     }
     _send_buf = state->send_buf();
 
@@ -642,6 +787,9 @@ int PacketNode::open(RuntimeState* state) {
     if (state->explain_type == SHOW_KEYPOINT) {
         return handle_keypoint(state);
     }
+    if (state->explain_type == SAMPLE_KEYPOINT) {
+        return sample_keypoint(state);
+    }
     if (_trace != nullptr) {
         return open_trace(state);
     }
@@ -652,6 +800,8 @@ int PacketNode::open(RuntimeState* state) {
         return open_histogram(state);
     } else if (state->explain_type == SHOW_CMSKETCH) {
         return open_cmsketch(state);
+    } else if (state->explain_type == SHOW_HLL) {
+        return open_hyperloglog(state);
     }
 
     pack_head();
@@ -695,6 +845,9 @@ int PacketNode::open(RuntimeState* state) {
         }
     } while (!eos);
     if (!_return_empty && _node_exec_type == pb::EXEC_ARROW_ACERO) {
+        if (state->use_mpp) {
+            return 0;
+        }
         // ARROW列式执行入口
         ret = start_vectorized_execution(state);
         if (ret < 0) {
@@ -728,6 +881,9 @@ int PacketNode::open_trace(RuntimeState* state) {
         state->inc_num_returned_rows(batch.size());
     } while (!eos);
     if (_node_exec_type == pb::EXEC_ARROW_ACERO) {
+        if (state->use_mpp) {
+            return 0;
+        }
         // ARROW列式执行入口
         start_vectorized_execution(state);
     }
@@ -794,6 +950,41 @@ int PacketNode::open_histogram(RuntimeState* state) {
     return 0;
 }
 
+int PacketNode::open_hyperloglog(RuntimeState* state) {
+    SchemaFactory* schema_factory = SchemaFactory::get_instance();
+    int64_t table_id = state->get_tuple_desc(0)->table_id();
+    SmartStatistics stat_ptr = schema_factory->get_statistics_ptr(table_id);
+    if (stat_ptr == nullptr) {
+        DB_WARNING("can`t find statistics table_id:%ld", table_id);
+        return -1;
+    }
+    std::vector<std::string> row;
+    pb::TupleDescriptor* tuple = state->get_tuple_desc(0);
+    if (tuple == nullptr) {
+        // should never happen
+        return -1;
+    }
+    for(int i = 0; i < tuple->slots_size(); ++i) {
+        int field_id = state->get_tuple_desc(0)->slots(i).field_id();
+        auto hllcolumn_ptr = stat_ptr->get_hllcolumn_ptr(field_id);
+        if (hllcolumn_ptr == nullptr) {
+            DB_WARNING("can`t find hll, table_id:%ld, field_id:%d", table_id, field_id);
+            row.emplace_back(std::to_string(-1));
+        } else {
+            row.emplace_back(std::to_string(hllcolumn_ptr->estimate()));
+        }
+    }
+
+    for (auto& field : _fields) {
+        // 类型全部更新为int64
+        field.type = MYSQL_TYPE_LONGLONG;
+    }
+    pack_head();
+    pack_fields();
+    pack_vector_row(row);
+    pack_eof();
+    return 0;
+}
 
 int PacketNode::open_cmsketch(RuntimeState* state) {
     SchemaFactory* schema_factory = SchemaFactory::get_instance();
@@ -875,22 +1066,32 @@ int PacketNode::open_analyze(RuntimeState* state) {
     pb::MetaManagerRequest request;
     pb::MetaManagerResponse response;
     request.set_op_type(pb::OP_UPDATE_STATISTICS);
-    pb::Statistics* stat = request.mutable_statistics();
+    pb::Statistics* statistics = request.mutable_statistics();
     if (state->get_tuple_desc(0)->has_table_id()) {
-        stat->set_table_id(state->get_tuple_desc(0)->table_id());
-        stat->set_version(0);
+        statistics->set_table_id(state->get_tuple_desc(0)->table_id());
+        statistics->set_version(0);
+        statistics->set_total_rows(state->num_scan_rows());
     } else {
         DB_FATAL("can`t find table_id");
         return -1;
     }
-    pb::Histogram* histogram = stat->mutable_histogram();
-    PacketSample packet_sample(batch_vector, slot_order_exprs, state->get_tuple_desc(0));
-    histogram->set_sample_rows(state->num_returned_rows());
-    histogram->set_total_rows(state->num_scan_rows());
-    packet_sample.packet_sample(histogram);
-    if (state->cmsketch != nullptr) {
-        pb::CMsketch* cmsketch = stat->mutable_cmsketch();
-        state->cmsketch->to_proto(cmsketch);
+    if (state->statistics_types->find(pb::StatisticType::ST_CLEAR) == state->statistics_types->end()) {
+        if (state->num_returned_rows() != 0) {
+            // 采样不为0才认为需要柱状图
+            pb::Histogram* histogram = statistics->mutable_histogram();
+            PacketSample packet_sample(batch_vector, slot_order_exprs, state->get_tuple_desc(0));
+            histogram->set_sample_rows(state->num_returned_rows());
+            histogram->set_total_rows(state->num_scan_rows());
+            packet_sample.packet_sample(histogram);
+        }
+        if (state->cmsketch != nullptr) {
+            pb::CMsketch* cmsketch = statistics->mutable_cmsketch();
+            state->cmsketch->to_proto(cmsketch);
+        }
+        if (state->hll != nullptr) {
+            pb::HyperLogLog* hll = statistics->mutable_hll();
+            state->hll->to_proto(hll, false);
+        }
     }
     
     if (MetaServerInteract::get_instance()->send_request("meta_manager", 
@@ -1107,7 +1308,8 @@ int PacketNode::pack_text_row(MemRow* row,  RuntimeState* state, std::vector<std
         if (row != nullptr) {
             expr_value = expr->get_value(row).cast_to(expr->col_type());
         } else {
-            expr_value = VectorizeHelpper::get_vectorized_value((*columns)[field_idx].get(), row_idx).cast_to(expr->col_type());
+            // TODO, 减少一次拷贝
+            expr_value = VectorizeHelpper::get_vectorized_value((*columns)[field_idx].get(), row_idx, expr->float_precision_len()).cast_to(expr->col_type());
         }
         if (state->need_convert_charset) {
             int ret = expr_value.convert_charset(state->table_charset, state->connection_charset);
@@ -1182,7 +1384,8 @@ int PacketNode::pack_binary_row(MemRow* row, RuntimeState* state, std::vector<st
         if (row != nullptr) {
             expr_value = expr->get_value(row).cast_to(expr->col_type());
         } else {
-            expr_value = VectorizeHelpper::get_vectorized_value((*columns)[field_idx].get(), row_idx).cast_to(expr->col_type());
+            // TODO, 减少一次拷贝
+            expr_value = VectorizeHelpper::get_vectorized_value((*columns)[field_idx].get(), row_idx, expr->float_precision_len()).cast_to(expr->col_type());
         }
         if (state->need_convert_charset) {
             int ret = expr_value.convert_charset(state->table_charset, state->connection_charset);
@@ -1252,6 +1455,98 @@ int PacketNode::predicate_pushdown(std::vector<ExprNode*>& input_exprs) {
     return 0;
 }
 
+int PacketNode::prune_columns(QueryContext* ctx, const std::unordered_set<int32_t>& invalid_column_ids) {
+    if (ctx == nullptr) {
+        DB_WARNING("ctx is nullptr");
+        return -1;
+    }
+    if (!invalid_column_ids.empty()) {
+        // 更新projection
+        pb::PlanNode new_pb_node;
+        new_pb_node.CopyFrom(_pb_node);
+        const pb::PacketNode& packet_node = _pb_node.derive_node().packet_node();
+        pb::PacketNode* new_packet_node = new_pb_node.mutable_derive_node()->mutable_packet_node();
+        new_packet_node->clear_projections();
+        new_packet_node->clear_col_names();
+        if (_projections.size() != packet_node.projections().size() || 
+                _projections.size() != packet_node.col_names().size()) {
+            DB_WARNING("projections.size(): %lu, packet_node.projections_size(): %d, "
+                       "packet_node.col_names_size(): %d",
+                       _projections.size(), packet_node.projections().size(), 
+                       packet_node.col_names().size());
+            return -1;
+        }
+        std::unordered_set<int32_t> change_tuple_ids;
+        std::vector<ExprNode*> new_projections;
+        new_projections.reserve(_projections.size());
+        for (int i = 0; i < _projections.size(); ++i) {
+            if (_projections[i] == nullptr) {
+                DB_WARNING("projection is nullptr");
+                return -1;
+            }
+            if (invalid_column_ids.find(i) == invalid_column_ids.end()) {
+                new_projections.emplace_back(_projections[i]);
+                new_packet_node->add_projections()->CopyFrom(packet_node.projections(i));
+                new_packet_node->add_col_names(packet_node.col_names(i));
+            } else {
+                if (!_projections[i]->has_agg() && !_projections[i]->has_window()) {
+                    // Agg表达式或者Window表达式不更新Tuple的引用计数，后续有需要可升级
+                    std::vector<std::pair<int32_t, int32_t>> tuple_slot_ids;
+                    _projections[i]->get_all_tuple_slot_ids(tuple_slot_ids);
+                    for (const auto& [tuple_id, slot_id] : tuple_slot_ids) {
+                        pb::TupleDescriptor* tuple = ctx->get_tuple_desc(tuple_id);
+                        if (tuple == nullptr) {
+                            DB_WARNING("tuple is nullptr");
+                            return -1;
+                        }
+                        if (slot_id - 1 < 0 || slot_id - 1 >= tuple->slot_idxes_size()) {
+                            DB_WARNING("Invalid slot_id: %d, tuple slot_idxes size: %d", slot_id, tuple->slot_idxes_size());
+                            return -1;
+                        }
+                        int slot_idx = tuple->slot_idxes(slot_id - 1);
+                        if (slot_idx < 0 || slot_idx >= tuple->slots_size()) {
+                            DB_WARNING("Invalid slot_idx: %d, tuple slots size: %d", slot_id, tuple->slots_size());
+                            return -1;
+                        }
+                        int ref_cnt = tuple->slots(slot_idx).ref_cnt();
+                        tuple->mutable_slots(slot_idx)->set_ref_cnt(ref_cnt - 1);
+                        change_tuple_ids.insert(tuple_id);
+                    }
+                }
+                _projections[i]->close();
+                ExprNode::destroy_tree(_projections[i]);
+            }
+        }
+        std::swap(_projections, new_projections);
+        std::swap(_pb_node, new_pb_node);
+        // 更新Tuple
+        for (auto tuple_id : change_tuple_ids) {
+            pb::TupleDescriptor* tuple = ctx->get_tuple_desc(tuple_id);
+            if (tuple == nullptr) {
+                DB_WARNING("tuple is nullptr");
+                return -1;
+            }
+            int32_t new_slot_idx = 0;
+            pb::TupleDescriptor new_tuple;
+            new_tuple.CopyFrom(*tuple);
+            new_tuple.mutable_slots()->Clear();
+            for (int i = 0; i < tuple->slots_size(); ++i) {
+                const auto& slot = tuple->slots(i);
+                if (slot.ref_cnt() <= 0) {
+                    continue;
+                }
+                if (slot.slot_id() - 1 < 0 || slot.slot_id() - 1 >= tuple->slot_idxes_size()) {
+                    DB_WARNING("Invalid slot id: %d, tuple slot idx size: %d", slot.slot_id(), tuple->slot_idxes_size());
+                    return -1;
+                }
+                new_tuple.add_slots()->CopyFrom(slot);
+                new_tuple.set_slot_idxes(slot.slot_id() - 1, new_slot_idx++);
+            }
+            std::swap(*tuple, new_tuple);
+        }
+    }
+    return ExecNode::prune_columns(ctx, invalid_column_ids);
 }
 
+}
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

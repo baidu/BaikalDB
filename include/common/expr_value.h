@@ -22,10 +22,13 @@
 #include <boost/lexical_cast.hpp>
 #include "proto/common.pb.h"
 #include "common.h"
+#include "utils.h"
 #include "tdigest.h"
 #include "datetime.h"
 #include "type_utils.h"
 #include "roaring.hh"
+#include "arrow/compute/expression.h"
+#include "arrow/vendored/fast_float/fast_float.h"
 
 namespace baikaldb {
 
@@ -371,7 +374,10 @@ struct ExprValue {
                 if (std::is_integral<T>::value) {
                     return strtoull(str_val.c_str(), NULL, 10);
                 } else if (std::is_floating_point<T>::value) {
-                    return strtod(str_val.c_str(), NULL);
+                    double result = 0.0;
+                    using ::arrow_vendored::fast_float::from_chars;
+                    from_chars(str_val.data(), str_val.data() + str_val.size(), result);
+                    return result;
                 } else {
                     return 0;
                 }
@@ -604,6 +610,60 @@ struct ExprValue {
         return *this;
     }
 
+    int get_vectorized_scalar_expression(arrow::compute::Expression& out) {
+        switch (type) {
+            case pb::BOOL:
+                out = arrow::compute::literal(get_numberic<bool>());
+                break;
+            case pb::UINT8:
+                out = arrow::compute::literal(get_numberic<uint8_t>());
+                break;
+            case pb::UINT16:
+                out = arrow::compute::literal(get_numberic<uint16_t>());
+                break;
+            case pb::UINT32:
+            case pb::TIMESTAMP:
+            case pb::DATE:
+                out = arrow::compute::literal(get_numberic<uint32_t>());
+                break;
+            case pb::UINT64:
+            case pb::DATETIME:
+                out = arrow::compute::literal(get_numberic<uint64_t>());
+                break;
+            case pb::INT8:
+                out = arrow::compute::literal(get_numberic<int8_t>());
+                break;
+            case pb::INT16:
+                out = arrow::compute::literal(get_numberic<int16_t>());
+                break;
+            case pb::INT32:
+            case pb::TIME:
+                out = arrow::compute::literal(get_numberic<int32_t>());
+                break;
+            case pb::INT64:
+                out = arrow::compute::literal(get_numberic<int64_t>());
+                break;
+            case pb::FLOAT:
+                out = arrow::compute::literal(get_numberic<float>());
+                break;
+            case pb::DOUBLE:
+                out = arrow::compute::literal(get_numberic<double>());
+                break;
+            case pb::STRING:
+            case pb::HLL:
+            case pb::HEX:
+            case pb::TDIGEST:
+            case pb::JSON:
+                out = arrow::compute::literal(str_val);
+                break;
+            default: {
+                DB_FATAL("Unsupported type: %d", type);
+                return -1;
+            }
+        }
+        return 0;
+    }
+
    uint64_t hash(uint32_t seed = 0x110) const {
         uint64_t out[2];
         switch (type) {
@@ -665,24 +725,14 @@ struct ExprValue {
             case pb::UINT64:
                 return std::to_string(_u.uint64_val);
             case pb::FLOAT: {
-                char tmp_buf[24] = {0};
-                if (float_precision_len == -1) {
-                    snprintf(tmp_buf, sizeof(tmp_buf), "%.6g", _u.float_val);
-                } else {
-                    std::string format= "%." + std::to_string(float_precision_len) + "f";
-                    snprintf(tmp_buf, sizeof(tmp_buf), format.c_str(), _u.float_val);
-                }
-                return tmp_buf;
+                char buf[24] = {0};
+                parser::float_to_string(_u.float_val, float_precision_len, buf, sizeof(buf));
+                return buf;
             }
             case pb::DOUBLE: {
-                char tmp_buf[24] = {0};
-                if (float_precision_len == -1) {
-                    snprintf(tmp_buf, sizeof(tmp_buf), "%.12g", _u.double_val);
-                } else {
-                    std::string format= "%." + std::to_string(float_precision_len) + "f";
-                    snprintf(tmp_buf, sizeof(tmp_buf), format.c_str(), _u.double_val);
-                }
-                return tmp_buf;
+                char buf[50] = {0};
+                parser::double_to_string(_u.double_val, float_precision_len, buf, sizeof(buf));
+                return buf;
             }
             case pb::STRING:
             case pb::HEX:
@@ -886,7 +936,7 @@ struct ExprValue {
             case pb::JSON:
                 return str_val.compare(other.str_val);
             case pb::NULL_TYPE:
-                return -1;
+                return other.type == pb::NULL_TYPE ? 0 : -1;
             default:
                 return 0;
         }

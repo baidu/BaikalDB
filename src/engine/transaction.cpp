@@ -589,7 +589,7 @@ rocksdb::Status Transaction::put_kv_without_lock(const std::string& key, const s
     value_slices[0].size_ = sizeof(uint64_t);
     value_slices[1].data_ = value.data();
     value_slices[1].size_ = value.size();
-    DB_DEBUG("use_ttl:%d ttl_timestamp_us:%ld", _use_ttl, ttl_timestamp_us);
+    DB_DEBUG("key:%s, v:%s, ,use_ttl:%d ttl_timestamp_us:%ld", str_to_hex(key).c_str(), str_to_hex(value).c_str(), _use_ttl, ttl_timestamp_us);
     if (_use_ttl && ttl_timestamp_us > 0) {
         value_slice_parts.parts = value_slices;
         value_slice_parts.num_parts = 2;
@@ -812,7 +812,8 @@ int Transaction::multiget_primary(
         RowBatch* row_batch,
         std::map<int32_t, FieldInfo*>& fields,
         std::vector<int32_t>& field_slot,
-        bool sorted_input) {
+        bool sorted_input,
+        BatchRecord* reverse_cols_records) {
     int64_t num_keys = rocksdb_keys.size();
     std::vector<rocksdb::PinnableSlice> values(num_keys);
     std::vector<rocksdb::Status> statuses(num_keys);
@@ -823,6 +824,26 @@ int Transaction::multiget_primary(
     read_opt.fill_cache = true;
     read_opt.snapshot = _snapshot;
     _txn->MultiGet(read_opt, _data_cf, rocksdb_keys, values, statuses, sorted_input);
+    std::vector<SmartRecord>* reverse_records_vec_ptr = nullptr;
+    const FieldDescriptor * weight_desc = nullptr;
+    const FieldDescriptor * querywords_desc = nullptr;
+    int32_t weight_slot_id = -1;
+    int32_t querywords_slot_id = -1;
+    int32_t weight_pd_idx = -1;
+    int32_t querywords_pb_idx = -1;
+    if (reverse_cols_records != nullptr) {
+        reverse_records_vec_ptr = reverse_cols_records->get_batch();
+        SmartRecord reverse_record = reverse_records_vec_ptr->at(0);
+        for (const auto& [field_id, schema_info]: fields) {
+            if (schema_info->short_name == "__weight") {
+                weight_pd_idx = schema_info->pb_idx;
+                weight_slot_id = field_slot[field_id];
+            } else if (schema_info->short_name == "__querywords") {
+                querywords_pb_idx = schema_info->pb_idx;
+                querywords_slot_id = field_slot[field_id];
+            }
+        }
+    }
     for (int i = 0; i < num_keys; i++) {
         if (statuses[i].ok()) {
             rocksdb::Slice value_slice(values[i]);
@@ -843,7 +864,7 @@ int Transaction::multiget_primary(
             if (!is_cstore()) {
                 TupleRecord tuple_record(value_slice);
                 // only decode the required field (field_ids stored in fields)
-                if (0 != tuple_record.decode_fields(fields, &field_slot, nullptr, tuple_id, 
+                if (0 != tuple_record.decode_fields(fields, &field_slot, nullptr, tuple_id,
                                                     use_memrow ? &mem_row : nullptr, 
                                                     row_batch->get_chunk())) {
                     DB_WARNING("decode value failed: %ld, _use_ttl:%d", pk_index.id, _use_ttl);
@@ -864,12 +885,53 @@ int Transaction::multiget_primary(
                     DB_WARNING("decode primary index failed: %ld", pk_index.id);
                     continue;
                 }
+                if (reverse_records_vec_ptr != nullptr) {
+                    SmartRecord reverse_record = reverse_records_vec_ptr->at(i);
+                    if (weight_slot_id != -1) {
+                        weight_desc = reverse_record->get_field_by_idx(weight_pd_idx);
+                        if (weight_desc == nullptr) {
+                            DB_FATAL("get_tmp_field_value __weight fail: %d, %d", tuple_id, weight_slot_id);
+                            return -1;
+                        }
+                        mem_row->set_value(tuple_id, weight_slot_id, reverse_record->get_value(weight_desc));
+                    }
+                    if (querywords_slot_id != -1) {
+                        querywords_desc = reverse_record->get_field_by_idx(querywords_pb_idx);
+                        if (querywords_desc == nullptr) {
+                            DB_FATAL("get_tmp_field_value __queryword fail: %d, %d", tuple_id, querywords_slot_id);
+                            return -1;
+                        }
+                        mem_row->set_value(tuple_id, querywords_slot_id, reverse_record->get_value(querywords_desc));
+                    }
+                }
                 row_batch->move_row(std::move(mem_row));
             } else {
                 if (0 != row_batch->get_chunk()->decode_key(tuple_id, pk_index, field_slot, key, prefix_len)) {
                     DB_FATAL("decode primary index failed in arrow mode: %ld", pk_index.id);
                     continue;
                 }
+                if (reverse_records_vec_ptr != nullptr) {
+                    SmartRecord reverse_record = reverse_records_vec_ptr->at(i);
+                    if (weight_slot_id != -1) {
+                        weight_desc = reverse_record->get_field_by_idx(weight_pd_idx);
+                        ExprValue* field = row_batch->get_chunk()->get_tmp_field_value(tuple_id, weight_slot_id);
+                        if (field == nullptr || weight_desc == nullptr) {
+                            DB_FATAL("get_tmp_field_value __weight fail: %d, %d", tuple_id, weight_slot_id);
+                            return -1;
+                        }
+                        *field = reverse_record->get_value(weight_desc);
+                    }
+                    if (querywords_slot_id != -1) {
+                        querywords_desc = reverse_record->get_field_by_idx(querywords_pb_idx);
+                        ExprValue* field = row_batch->get_chunk()->get_tmp_field_value(tuple_id, querywords_slot_id);
+                        if (field == nullptr || querywords_desc == nullptr) {
+                            DB_FATAL("get_tmp_field_value __queryword fail: %d, %d", tuple_id, querywords_slot_id);
+                            return -1;
+                        }
+                        *field = reverse_record->get_value(querywords_desc);
+                    }
+                }
+
                 if (0 != row_batch->add_chunk_row()) {
                     DB_FATAL("add arrow chunk row fail");
                     return -1;
@@ -915,13 +977,20 @@ int Transaction::multiget_primary(
     raw_read_keys.reserve(read_records.size());
     rocksdb_keys.reserve(read_records.size());
     int64_t num_keys = 0;
+    bool need_copy_weight = false;
+    for (const auto&[slot_id, field_info]: fields) {
+        if (field_info->short_name == "__weight" || field_info->short_name == "__querywords") {
+            need_copy_weight = true;
+            break;
+        }
+    }
     while (!read_records.is_traverse_over()) {
         MutTableKey  pk_key;
         auto record = read_records.get_next();
         //full key, no prefix allowed
         if (0 != pk_key.append_index(pk_index, record.get(), -1, false)) {
-            DB_WARNING("Fail to append_index, reg:%ld, tab:%ld", region, pk_index.id);
-            continue;
+            DB_FATAL("Fail to append_index, reg:%ld, tab:%ld", region, pk_index.id);
+            return -1;
         }
         MutTableKey  _key;
         _key.append_i64(region).append_i64(pk_index.id).append_index(pk_key);
@@ -929,9 +998,16 @@ int Transaction::multiget_primary(
         rocksdb_keys.emplace_back(_key.data());
         ++num_keys;
     }
-    read_records.clear();
-    return multiget_primary(region, pk_index, raw_read_keys, rocksdb_keys, tuple_id,
-        mem_row_desc, row_batch, fields, field_slot, sorted_input);
+    if (need_copy_weight) {
+        int ret = multiget_primary(region, pk_index, raw_read_keys, rocksdb_keys, tuple_id,
+                mem_row_desc, row_batch, fields, field_slot, sorted_input, &read_records);
+        read_records.clear();
+        return ret;
+    } else {
+        read_records.clear();
+        return multiget_primary(region, pk_index, raw_read_keys, rocksdb_keys, tuple_id,
+                mem_row_desc, row_batch, fields, field_slot, sorted_input);
+    }
 }
 
 int Transaction::multiget_primary(
@@ -1172,6 +1248,20 @@ int Transaction::multiget_secondary(
         }
     }
     return 0;
+}
+
+void Transaction::push_cmd_to_cache(int seq_id, pb::CachePlan plan_item) {
+    BAIDU_SCOPED_LOCK(_cache_map_mutex);
+    _seq_id = seq_id;
+    if (_cache_plan_map.count(seq_id) > 0) {
+        return;
+    }
+    if (plan_item.op_type() != pb::OP_BEGIN && !_has_dml_executed) {
+        _has_dml_executed = true;
+        _pool->increase_has_write();
+        _pool->update_latest_has_write_txn_ts();
+    }
+    _cache_plan_map.insert(std::make_pair(seq_id, plan_item));
 }
 
 int Transaction::get_update_secondary(

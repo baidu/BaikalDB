@@ -54,6 +54,8 @@ public:
 
     rocksdb::Slice value() { return _iter->value(); }
 
+    bool is_null_iter() { return _iter == nullptr; }
+
 private:
     rocksdb::Iterator* _iter = nullptr;
 };

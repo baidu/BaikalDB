@@ -88,8 +88,8 @@ int DMLNode::init_schema_info(RuntimeState* state) {
                 DB_WARNING("get index info failed index_id: %ld", index_id);
                 return -1;
             }
-            if (index_info->type == pb::I_FULLTEXT || index_info->type == pb::I_VECTOR) {
-                _reverse_or_vector_indexes.push_back(index_info);
+            if (index_info->type == pb::I_FULLTEXT) {
+                _reverse_indexes.push_back(index_info);
             }
             if (!index_info->is_global && index_info->index_hint_status != pb::IHS_VIRTUAL) {
                 _all_indexes.push_back(index_info);
@@ -169,6 +169,10 @@ int DMLNode::init_schema_info(RuntimeState* state) {
             }
             // 如果是ROLLUP索引, 一定是被更改了, 后续如果只修改维度列有可能没有被更改
             if (info.type == pb::I_ROLLUP) {
+                has_id = true;
+            }
+            // 向量索引缓存包含标量字段
+            if (info.type == pb::I_VECTOR) {
                 has_id = true;
             }
             if (has_id) {
@@ -306,7 +310,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
                     }
                     return ret;
                 } else if (_is_replace) {
-                    for (auto& info_ptr : _reverse_or_vector_indexes) {
+                    for (auto& info_ptr : _reverse_indexes) {
                         int64_t index_id = info_ptr->id;
                         std::string old_word;
                         old_record->get_reverse_word(*info_ptr, old_word);
@@ -490,6 +494,7 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             //DB_NOTICE("word:%s", str_to_hex(word).c_str());
             ret = vector_index_map[info.id]->insert_vector(_txn, word, pk_str, record);
             if (ret < 0) {
+                DB_WARNING_STATE(state, "vector_index fail insert, index_id: %ld", info.id);
                 return ret;
             }
             continue;
@@ -535,8 +540,9 @@ int DMLNode::get_lock_row(RuntimeState* state, SmartRecord record, std::string* 
         record->clear();
         record->decode_key(*_pri_info, *pk_str);
     }
+    bool check_region = !_table_info->is_binlog;
     //delete requires all fields (index and non-index fields)
-    ret = _txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_LOCK, true, ttl_ts);
+    ret = _txn->get_update_primary(_region_id, *_pri_info, record, _field_ids, GET_LOCK, check_region, ttl_ts);
     if (ret < 0) {
         return ret;
     }
@@ -630,6 +636,7 @@ int DMLNode::remove_row(RuntimeState* state, SmartRecord record,
             ret = vector_index_map[info.id]->delete_vector(_txn,
                                                            word, pk_str, record);
             if (ret < 0) {
+                DB_WARNING_STATE(state, "vector_index fail delete, index_id: %ld", info.id);
                 return ret;
             }
             continue;

@@ -960,7 +960,7 @@ TEST(test_parser, case_where) {
         parser::SqlParser parser;
         std::string sql_where = "select *, tablea.*, field_a, field_a as alias_1, {OJ field_a + 3}"
                                 " as alias_2 from table_a where expr1 > 10 and "
-                                "expr2 = 3 or expr3 = 4 order by field_a asc,"
+                                "expr2 = 3 or expr3 = 4 or expr4 = 5 order by field_a asc,"
                                 " field_b desc limit 10, 100 lock in share mode";
         parser.parse(sql_where);
         ASSERT_EQ(0, parser.error);
@@ -2614,10 +2614,7 @@ TEST(test_parser, case_table_refs) {
     }
     {
         parser::SqlParser parser;
-        const char first_half[] = "select * from db.table_a where query in ('";
-        std::string sql("select * from db.table_a where query in ('"
-            "\x00"
-            "test')", strlen(first_half) + 7);
+        std::string sql("select * from db.table_a where query in ('\\0test')");
         parser.parse(sql);
         ASSERT_EQ(0, parser.error);
         ASSERT_EQ(1, parser.result.size());
@@ -2628,10 +2625,9 @@ TEST(test_parser, case_table_refs) {
     }
     {
         parser::SqlParser parser;
-        const char first_half[] = "select * from db.table_a where query in ('";
         std::string sql("select * from db.table_a where query in ('"
-            "test\x00"
-            "test')", strlen(first_half) + 11);
+            "test\\0"
+            "test')");
         parser.parse(sql);
         ASSERT_EQ(0, parser.error);
         ASSERT_EQ(1, parser.result.size());

@@ -133,7 +133,7 @@ int InsertNode::open(RuntimeState* state) {
     for (auto& record : _records) {
         ret = insert_row(state, record);
         if (ret < 0) {
-            DB_WARNING_STATE(state, "insert_row fail");
+            DB_WARNING_STATE(state, "insert_row fail, %s", record->debug_string().c_str());
             return -1;
         }
         num_affected_rows += ret;

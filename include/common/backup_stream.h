@@ -24,14 +24,14 @@
 
 namespace baikaldb {
 //backup
-struct FileInfo {
+struct BackupFileInfo {
     std::string path {""};
     int64_t size {0};
 };
 
 struct BackupInfo {
-    FileInfo meta_info;
-    FileInfo data_info;
+    BackupFileInfo meta_info;
+    BackupFileInfo data_info;
 };
 
 class CommonStreamReceiver : public brpc::StreamInputHandler {

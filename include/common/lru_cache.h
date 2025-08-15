@@ -43,6 +43,7 @@ public:
     }
 
     int init(int64_t len_threshold);
+    size_t size();
     std::string get_info();
     int check(const ItemKey& key);
     int find(const ItemKey& key, ItemType* value);

@@ -27,6 +27,20 @@ DEFINE_bool(limit_unappropriate_sql, false, "limit concurrency as one when selec
 
 thread_local MemRowDescriptorMap RuntimeState::sql_sign_to_mem_row_descriptor;
 
+std::string RuntimeState::localhost_address = "";
+
+RuntimeState::~RuntimeState() {
+    memory_limit_release_all();
+    bthread_mutex_destroy(&_mem_lock);
+    if (_need_delete_ctx) {
+        delete _ctx;
+    }
+    // select_manager_node里面要用
+    if (_need_delete_client_conn) {
+        delete _client_conn;
+    }
+}
+
 int RuntimeState::init(const pb::StoreReq& req,
         const pb::Plan& plan, 
         const RepeatedPtrField<pb::TupleDescriptor>& tuples,
@@ -104,6 +118,56 @@ int RuntimeState::init(const pb::StoreReq& req,
     return 0;
 }
 
+int RuntimeState::init(const pb::RuntimeState& pb_rs) {
+    for (auto& tuple : pb_rs.tuples()) {
+        if (tuple.tuple_id() >= (int)_tuple_descs.size()) {
+            _tuple_descs.resize(tuple.tuple_id() + 1);
+        }
+        _tuple_descs[tuple.tuple_id()] = tuple;
+    }
+    _tuple_sign = tuple_descs_to_sign(_tuple_descs);
+
+    //取出缓存的动态编译结果(按照签名)
+    if (_tuple_descs.size() > 0 && _tuple_sign != 0) {
+        if (set_mem_row_decriptor() != 0) {
+            DB_WARNING("Fail to set_mem_row_decriptor");
+            return -1;
+        }
+    } else {
+        _mem_row_desc = std::make_shared<MemRowDescriptor>();
+        int ret = _mem_row_desc->init(_tuple_descs);
+        if (ret < 0) {
+            DB_WARNING("_mem_row_desc init fail");
+            return -1;
+        }
+    }
+    _log_id = pb_rs.log_id();
+    sign = pb_rs.sign();
+    sign_exec_type = to_sign_exec_type(pb_rs.sign_exec_type());
+    _need_delete_client_conn = true;
+    _client_conn = new (std::nothrow) NetworkSocket;
+    execute_type = pb::EXEC_ARROW_ACERO;
+    vectorlized_parallel_execution = true;
+    if (pb_rs.has_query_context()) {
+        _need_delete_ctx = true;
+        const pb::QueryContext& pb_qc = pb_rs.query_context();
+        _ctx = new QueryContext();
+        for (const auto& tuple : pb_rs.tuples()) {
+           _ctx->add_tuple(tuple);
+        }
+        _ctx->set_client_conn(_client_conn);
+        _ctx->stmt_type = parser::NT_SELECT;
+        for (const auto& iter : pb_qc.ref_slot_id_mapping()) {
+            for (const pb::FieldSlot& pb_field_slot : iter.field_slot()) {
+                _ctx->ref_slot_id_mapping[iter.tuple_id()][pb_field_slot.field_name()] = pb_field_slot.slot_id();
+            }
+        }
+    }
+
+    clear_mem_row_descriptor();//定期清理过期sql的mem_row_descriptor
+    return 0;
+}
+
 int RuntimeState::init(QueryContext* ctx, DataBuffer* send_buf) {
     _num_increase_rows = 0; 
     _num_affected_rows = 0; 
@@ -133,14 +197,6 @@ int RuntimeState::init(QueryContext* ctx, DataBuffer* send_buf) {
     is_explain = ctx->is_explain;
     explain_type = ctx->explain_type;
 
-    // vectorize 
-    execute_type = pb::EXEC_ROW;
-    vectorlized_parallel_execution = true; 
-    acero_declarations.clear();
-    sign_exec_type = SignExecType::SIGN_EXEC_NOT_SET;
-    arrow_input_schemas.clear(); 
-    is_simple_select = true;
-
     // prepare 复用runtime
     if (_is_inited) {
         return 0;
@@ -149,7 +205,7 @@ int RuntimeState::init(QueryContext* ctx, DataBuffer* send_buf) {
     _send_buf = send_buf;
     _tuple_descs = ctx->tuple_descs();
     _tuple_sign = tuple_descs_to_sign(_tuple_descs);
-
+    
     //取出缓存的动态编译结果(按照签名)
     if (_tuple_descs.size() > 0 && sign != 0 && _tuple_sign != 0) {
         if (set_mem_row_decriptor() != 0) {
@@ -171,6 +227,29 @@ int RuntimeState::init(QueryContext* ctx, DataBuffer* send_buf) {
     }
     _is_inited = true;
     return 0;
+}
+
+void RuntimeState::to_proto(pb::RuntimeState* pb_rs) {
+    for (auto& td :_tuple_descs) {
+        if (td.has_tuple_id()) {
+            pb_rs->add_tuples()->CopyFrom(td);
+        }
+    }
+    if (_ctx != nullptr) {
+        pb::QueryContext* pb_qc = pb_rs->mutable_query_context();
+        for(auto& iter : _ctx->ref_slot_id_mapping) {
+            pb::RefSlotMapping* pb_ref_slot_id_mapping =  pb_qc->add_ref_slot_id_mapping();
+            pb_ref_slot_id_mapping->set_tuple_id(iter.first);
+            for (auto& field_slot : iter.second) {
+                pb::FieldSlot* pb_fieldslot = pb_ref_slot_id_mapping->add_field_slot();
+                pb_fieldslot->set_field_name(field_slot.first);
+                pb_fieldslot->set_slot_id(field_slot.second);
+            }
+        }
+    }
+    pb_rs->set_log_id(_log_id);
+    pb_rs->set_sign(sign);
+    pb_rs->set_sign_exec_type(sign_exec_type);
 }
 
 int64_t RuntimeState::calc_single_store_concurrency(pb::OpType op_type) {
@@ -220,8 +299,7 @@ int RuntimeState::memory_limit_exceeded(int64_t rows_to_check, int64_t bytes) {
     }
     _mem_tracker->consume(bytes);
     _used_bytes.fetch_add(bytes, std::memory_order_relaxed);
-    if (_mem_tracker->has_limit_exceeded() || _mem_tracker->any_limit_exceeded()) {
-        _mem_tracker->set_limit_exceeded();
+    if (_mem_tracker->any_limit_exceeded()) {
         DB_WARNING("log_id:%lu memory limit Exceeded limit:%ld consumed:%ld used:%ld.", _log_id,
             _mem_tracker->bytes_limit(), _mem_tracker->bytes_consumed(), _used_bytes.load());
         BAIDU_SCOPED_LOCK(_mem_lock);

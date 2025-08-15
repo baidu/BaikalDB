@@ -7,6 +7,7 @@ import "optype.proto";
 import "statistics.proto";
 import "meta.interface.proto";
 import "binlog.proto";
+import "column.proto";
 option cc_generic_services = true;
 //option cc_enable_arenas = true;
 
@@ -61,11 +62,19 @@ message TransactionInfo {
     optional bool need_update_primary_timestamp = 17;
 };
 
+enum StatisticType {
+    ST_HISTOGRAM     = 0;
+    ST_CMSKETCH      = 1;
+    ST_HYPERLOGLOG   = 2;
+    ST_CLEAR         = 3;
+}
+
 message AnalyzeInfo {
-    required int32     depth   = 1;
-    required int32     width   = 2;
-    required int32     sample_rows = 3;
-    required int64     table_rows  = 4;     
+    optional int32     depth   = 1;
+    optional int32     width   = 2;
+    optional int32     sample_rows = 3;
+    optional int64     table_rows  = 4;
+    repeated StatisticType statistics_types = 5;
 };
 
 //prewrite binlog需要填写binlog_ts、txn_id、primary_region_id
@@ -115,12 +124,23 @@ message RegionIndexs {
     repeated string    external_full_path             = 8;
     optional bool      path_diff                      = 9;
     optional int64     region_size                    = 10;
-    repeated OlapRegionIndexInfo olap_index_info_list = 11; 
+    optional string    column_info                    = 11;
+    repeated OlapRegionIndexInfo olap_index_info_list = 12;
 };
 
 enum ExecuteType {
     EXEC_ROW = 0;
     EXEC_ARROW_ACERO = 1;
+    EXEC_ARROW_ACERO_PREFER_RETURN_ARROW_DATA = 2;
+};
+
+message ColumnRegionInfo {
+    optional RegionColumnFiles column_files = 1;
+};
+
+message UseridCount {
+    optional int64     userid       = 1;
+    optional int64     count        = 2;
 };
 
 message ExtraReq {
@@ -129,6 +149,7 @@ message ExtraReq {
     optional OlapRegionInfo          olap_info = 3;
     optional RegionOfflineBinlogInfo offline_binlog_info = 4;
     optional uint64 watt_stats_version = 5;
+    optional ColumnRegionInfo        column_info = 6;
 };
 
 message ExtraRes {
@@ -139,6 +160,8 @@ message ExtraRes {
     optional int64 wait_cost = 5;         // 限制并发等待时间
     repeated bytes afs_full_names = 6;    // afs full path
     optional bool  get_afs_path_succ = 7; // get afs path succ
+    optional bool  query_keypoint_succ = 8; // get keypoint succ
+    repeated UseridCount userid_count = 9;
 };
 
 // 增加新字段时，考虑是否对该字段增删meta标识，对应dblink表场景!!!
@@ -254,7 +277,20 @@ message StoreRes {
     optional BinlogQueryInfo binlog_info = 26;  //存放binlog信息
     optional ExecuteType execute_type = 27; 
     optional int64  read_disk_size =  28;
+    optional int64 orig_region_id  = 29; // 请求的region信息
+    optional HyperLogLog hll       = 30;
 };
+
+message BatchRegionStoreReq {
+    repeated StoreReq store_req                     = 1;
+    required int64 limit_single_store_concurrency   = 2;
+    repeated Plan plan                              = 3;
+}
+
+message BatchRegionStoreRes {
+    repeated StoreRes store_res = 1;  
+}
+
 message InitRegion {
     required RegionInfo region_info     = 1;
     optional SchemaInfo schema_info     = 2;
@@ -279,12 +315,13 @@ message RegionIds {
     repeated int64  region_ids      = 1; // if size = 0, it will compact the entire db
     optional bool compact_raft_log  = 2; // if true, compact raft log
     optional int64  table_id        = 3; // use for restore region
-    optional int32  compact_type    = 4; //  1:data_cf 2:meta_cf 3:raft_log_cf
+    optional int32  compact_type    = 4; // 1:data_cf 2:meta_cf 3:raft_log_cf 4:column_base 5:column_row2column 6:vector_index
     optional bool   clear_all_txns  = 5;
     optional int64  txn_timeout     = 6;
     optional bool   query_apply_index  = 7;
     repeated int64  userids            = 8;
     optional bool   query_all_afs_file = 9;
+    optional bool   query_olap_keypoint = 10;
 };
 
 message BackUpReq {};
@@ -351,6 +388,32 @@ message RegionOfflineBinlogInfo {
     repeated string external_full_path = 5;
 };
 
+enum CompactionOpType {
+    OP_READ             = 1;
+    OP_WRITE            = 2;
+    OP_DELETE_PATH      = 3;
+    OP_READ_DIR         = 4;
+    OP_PATH_EXISTS      = 5;
+    OP_CREATE_DIR       = 6;
+    OP_GET_FILE_INFO_LIST    = 7;
+};
+
+message CompactionFileRequest {
+    required CompactionOpType op_type   = 1;
+    required string           remote_compaction_id = 2;
+    optional string           file_name = 3; // 文件名
+    optional uint64           offset    = 4; // 文件的偏移量
+    optional uint32           count     = 5; // 需要读/写的字节数
+    optional bytes            data      = 6;
+    optional bool             recursive = 7;
+};
+
+message CompactionFileResponse {
+    required ErrCode errcode = 1; // 错误信息
+    optional bytes data = 2;
+    repeated CompactionFileInfo file_info = 3;
+};
+
 service StoreService {
     //1、创建table时master调用，region及raft同步创建成功后才返回给metaServer,
     //   创建表时raft node地址初始化为一个节点
@@ -370,6 +433,9 @@ service StoreService {
 
     //增删改查功能，需要走raft状态机的都通过此接口
     rpc query(StoreReq) returns (StoreRes);
+
+    // batch region 查询
+    rpc query_batch(BatchRegionStoreReq) returns (BatchRegionStoreRes);
 
     //binlog相关操作
     rpc query_binlog(StoreReq) returns (StoreRes);
@@ -405,4 +471,6 @@ service StoreService {
     rpc get_rocks_statistic(RocksStatisticReq) returns (RocksStatisticRes);
 
     rpc manual_link_external_sst(RegionIds) returns(StoreRes);
+
+    rpc query_file_system(CompactionFileRequest) returns (CompactionFileResponse);
 };

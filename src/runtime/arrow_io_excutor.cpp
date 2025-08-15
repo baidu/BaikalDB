@@ -21,9 +21,16 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "exchange_sender_node.h"
 
 namespace baikaldb {
-DEFINE_int32(arrow_multi_threads, 0, "arrow_use_multi_thread, default 0(not multi-thread)");
+static bool validate_arrow_multi_threads(const char*, int32_t val) {
+    return val >= 2;
+}
+
+DEFINE_int32(arrow_multi_threads, 10, "arrow_use_multi_thread, default 10");
+const int ALLOW_UNUSED register_FLAGS_bthread_concurrency = 
+    ::google::RegisterFlagValidator(&FLAGS_arrow_multi_threads, validate_arrow_multi_threads);
 
 struct BthreadArrowExecutorTask {
     arrow::internal::FnOnce<void()> callable;
@@ -242,9 +249,6 @@ arrow::Result<std::shared_ptr<BthreadArrowExecutor>> BthreadArrowExecutor::Make(
 
 int GlobalArrowExecutor::init() {
     int thread_num = FLAGS_arrow_multi_threads;
-    if (thread_num <= 0) {
-        return 0;
-    }
     int default_capacity = arrow::GetCpuThreadPoolCapacity();
     auto s = arrow::SetCpuThreadPoolCapacity(thread_num);
     if (!s.ok()) {
@@ -256,11 +260,12 @@ int GlobalArrowExecutor::init() {
 }
 
 void GlobalArrowExecutor::execute(RuntimeState* state, arrow::Result<std::shared_ptr<arrow::Table>>* result) {
-    if (FLAGS_arrow_multi_threads <= 0 
-            || state->vectorlized_parallel_execution == false) {
+    if (state->vectorlized_parallel_execution == false) {
+        // 不开启pipeline并行
         *result = arrow::acero::DeclarationToTable(arrow::acero::Declaration::Sequence(std::move(state->acero_declarations)), false); 
         state->vectorlized_parallel_execution = false;
     } else {
+        // 开启pipeline并行, 异步模式
         arrow::compute::ExecContext exec_context(arrow::default_memory_pool(), arrow::internal::GetCpuThreadPool());
         exec_context.set_use_threads(true);
         bthread::Mutex mu;

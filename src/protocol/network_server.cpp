@@ -25,7 +25,11 @@
 #include "log.h"
 #include <gflags/gflags.h>
 #include <time.h>
+#include "file_system.h"
+#include "internal_functions.h"
 #include "external_filesystem.h"
+#include "olap_pre_split.h"
+#include "kill_planner.h"
 
 namespace bthread {
 DECLARE_int32(bthread_concurrency); //bthread.cpp
@@ -34,7 +38,7 @@ DECLARE_int32(bthread_concurrency); //bthread.cpp
 namespace baikaldb {
 
 DEFINE_int32(backlog, 1024, "Size of waitting queue in listen()");
-DEFINE_int32(baikal_port, 28282, "Server port");
+DECLARE_int32(baikal_port);
 DEFINE_int32(epoll_timeout, 2000, "Epoll wait timeout in epoll_wait().");
 DEFINE_int32(check_interval, 10, "interval for conn idle timeout");
 DEFINE_int32(connect_idle_timeout_s, 1800, "connection idle timeout threshold (second)");
@@ -54,10 +58,15 @@ DEFINE_int32(batch_insert_sign_sql_interval_us, 10 * 60 * 1000 * 1000, "batch_in
 DEFINE_bool(enable_tcp_keep_alive, false, "enable tcp keepalive flag");
 DECLARE_int32(baikal_heartbeat_interval_us);
 DEFINE_bool(open_to_collect_slow_query_infos, false, "open to collect slow_query_infos, default: false");
-DEFINE_bool(need_ext_fs_gc, false, "need_ext_fs_gc");
 DEFINE_uint64(limit_slow_sql_size, 50, "each sign to slow query sql counts, default: 50");
 DEFINE_int32(slow_query_batch_size, 100, "slow query sql batch size, default: 100");
 DECLARE_bool(auto_update_meta_list);
+DEFINE_string(afs_gc_hostname, "", "afs_gc_hostname");
+DECLARE_string(baikal_resource_tag);
+DEFINE_bool(dump_slow_sqls, false, "whether dump slow sqls");
+DEFINE_bool(auto_kill_timeout_query, false, "auto kill timeout query");
+DEFINE_uint64(load_mpp_sign_interval_min, 0, "load mpp sign interval min, default: 0, disable load mpp sign");
+DECLARE_string(baikal_resource_tag);
 
 static const std::string instance_table_name = "INTERNAL.baikaldb.__baikaldb_instance";
 
@@ -366,7 +375,8 @@ int NetworkServer::insert_agg_sql(const std::string& values) {
     std::string sql = "REPLACE INTO BaikalStat.baikaldb_trace_info(`time`,`date`,`hour`,`min`,"
                       "`sum`,`count`,`avg`,`affected_rows`,`scan_rows`,`filter_rows`,`sign`, "
                       "`hostname`,`index_name`,`family`,`tbl`,`resource_tag`,`op_type`,`plat`, "
-                      "`op_version`,`op_desc`,`err_count`, `region_count`, `learner_read`) VALUES ";
+                      "`op_version`,`op_desc`,`err_count`, `region_count`, `learner_read`, "
+                      "`db_handle_rows`,`db_handle_bytes`) VALUES ";
     sql += values;
     int ret = 0;
     int retry = 0;
@@ -548,6 +558,7 @@ void NetworkServer::print_agg_sql() {
     TimeCost cost;
     TimeCost reset_counter_cost;
     TimeCost degrade_cost;
+    TimeCost load_mpp_signs_time;
     while (!_shutdown) {
         bool need_reset_counter = false;
         if (reset_counter_cost.get_time() > 24 * 3600 * 1000 * 1000LL) {
@@ -634,6 +645,9 @@ void NetworkServer::print_agg_sql() {
                 int learner_read = factory->sql_force_learner_read(pair2.second.table_id, out_sign);
                 std::shared_ptr<SqlStatistics> sql_info = factory->get_sql_stat(out_sign);
                 int64_t dynamic_timeout_ms = -1;
+                int64_t db_handle_rows_99 = -1;
+                int64_t db_handle_bytes_99 = -1;
+                int64_t cnt = 0;
                 if (sql_info == nullptr) {
                     sql_info = factory->create_sql_stat(out_sign);
                 }
@@ -657,10 +671,13 @@ void NetworkServer::print_agg_sql() {
                             / (pair2.second.count - pair2.second.err_count);
                     }
                     dynamic_timeout_ms = sql_info->dynamic_timeout_ms();
+                    sql_info->get_db_handle_stats(db_handle_rows_99, db_handle_bytes_99, cnt);
                     SQL_TRACE("sign:%lu qps:%f avg_scan_rows:%ld scan_rows_9999:%ld "
-                            "latency_us:%ld latency_us_9999:%ld times:%ld dynamic_timeout_ms:%ld",
+                            "latency_us:%ld latency_us_9999:%ld times:%ld dynamic_timeout_ms:%ld "
+                            "db_handle_rows_99:%ld db_handle_bytes_99:%ld",
                             out_sign, sql_info->qps, sql_info->avg_scan_rows, sql_info->scan_rows_9999, sql_info->latency_us,
-                            sql_info->latency_us_9999, sql_info->times_avg_and_9999, dynamic_timeout_ms);
+                            sql_info->latency_us_9999, sql_info->times_avg_and_9999, dynamic_timeout_ms,
+                            db_handle_rows_99, db_handle_bytes_99);
                 }
                 SQL_TRACE("date_hour_min=[%04d-%02d-%02d\t%02d\t%02d] sum_pv_avg_affected_scan_filter_rgcnt_err_size="
                         "[%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld] sign_hostname_index=[%lu\t%s\t%s] dynamic_timeout_ms:%ld sql_agg: %s "
@@ -746,7 +763,9 @@ void NetworkServer::print_agg_sql() {
                     sql_values += "'" + op_description + "',";
                     sql_values += "'" + std::to_string(pair2.second.err_count) + "',";
                     sql_values += "'" + std::to_string(pair2.second.region_count) + "',";
-                    sql_values += "'" + std::to_string(learner_read) + "'),";
+                    sql_values += "'" + std::to_string(learner_read) + "',";
+                    sql_values += "'" + std::to_string(db_handle_rows_99) + "',";
+                    sql_values += "'" + std::to_string(db_handle_bytes_99) + "'),";
 
                     if (sign_to_counts.count(out_sign) == 0) {
                         std::string sign_sql_value = "('" + std::to_string(out_sign) + "',";
@@ -799,12 +818,110 @@ void NetworkServer::print_agg_sql() {
                 DB_FATAL("meta_tso_autoinc_degrade, tso, tso_count:%ld, tso_error:%ld", tso_count, tso_error);
             }
         }
+        if (FLAGS_load_mpp_sign_interval_min > 0
+                && load_mpp_signs_time.get_time() > FLAGS_load_mpp_sign_interval_min * 60 * 1000 * 1000ULL) {
+            load_mpp_signs();
+            load_mpp_signs_time.reset();
+        }
         bthread_usleep_fast_shutdown(FLAGS_print_agg_sql_interval_s * 1000 * 1000LL, _shutdown);
     }
 }
 
+int NetworkServer::query_sql(const std::string& sql, baikal::client::ResultSet* result_set) {
+    if (result_set == nullptr || _baikaldb == nullptr) {
+        return -1;
+    }
+    TimeCost cost;
+    int ret = 0;
+    int retry = 0;
+    do {
+        ret = _baikaldb->query(0, sql, result_set);
+        if (ret == 0) {
+            break;
+        }
+        bthread_usleep(1000000);
+    } while (++retry < 20);
+    if (ret != 0) {
+        DB_FATAL("sql_len:%lu query fail : %s", sql.size(), sql.c_str());
+        return -1;
+    }
+    DB_NOTICE("affected_rows:%lu, cost:%ld, sql_len:%lu, sql:%s",
+              result_set->get_affected_rows(), cost.get_time(), sql.size(), sql.c_str());
+    return 0;
+}
+
+
+void NetworkServer::load_mpp_signs() {
+    ExprValue now_day = curdate(std::vector<ExprValue>{});
+    ExprValue a_week_ago = now_day;
+    a_week_ago._u.uint32_val -= 7;
+    // write db first
+    {
+        std::vector<uint64_t> signs;
+        std::vector<int64_t> rows99;
+        std::vector<int64_t> byte99;
+        std::vector<int64_t> cnts;
+        std::vector<int64_t> last_query_times;
+        SchemaFactory::get_instance()->get_mpp_signs_stat(signs, rows99, byte99, cnts, last_query_times);
+        if (signs.size() > 0) {
+            std::string sql = "REPLACE INTO BaikalStat.mpp_signs (sign, db_resource_tag, date, rows99, bytes99) VALUES ";
+            std::string values = "";
+            int value_cnt = 0;
+            for (size_t idx = 0; idx < signs.size(); idx++) {
+                // 近一周有访问的sign才写入
+                if (cnts[idx] > 0 && last_query_times[idx] / 1000000 > a_week_ago._u.uint32_val) {
+                    values += "('" + std::to_string(signs[idx]) + "'," 
+                            + "'" + FLAGS_baikal_resource_tag + "'," 
+                            + "'" + now_day.get_string() + "'," 
+                            + "'" + std::to_string(rows99[idx]) + "'," 
+                            + "'" + std::to_string(byte99[idx]) + "'),";
+                    value_cnt++;
+                }
+                if (value_cnt == FLAGS_batch_insert_agg_sql_size) {
+                    values.pop_back();
+                    baikal::client::ResultSet result_set;
+                    query_sql(sql + values, &result_set);
+                    value_cnt = 0;
+                    values.clear();
+                }
+            }
+            if (value_cnt > 0) {
+                values.pop_back();
+                baikal::client::ResultSet result_set;
+                query_sql(sql + values, &result_set);
+            }
+        }
+    }
+    // load from db
+    {
+        std::string sql = "SELECT sign, rows99, bytes99 FROM BaikalStat.mpp_signs "
+            " where date > '" + a_week_ago.get_string() + 
+            "' and db_resource_tag = '" + FLAGS_baikal_resource_tag + "';";
+        baikal::client::ResultSet result_set;
+        query_sql(sql, &result_set);
+        std::vector<uint64_t> signs;
+        std::vector<int64_t> rows99;
+        std::vector<int64_t> bytes99;
+        while (result_set.next()) {
+            uint64_t sign = 0;
+            int64_t row99 = 0;
+            int64_t byte99 = 0;
+            result_set.get_uint64("sign", &sign);
+            result_set.get_int64("rows99", &row99);
+            result_set.get_int64("bytes99", &byte99);
+            signs.emplace_back(sign);
+            rows99.emplace_back(row99);
+            bytes99.emplace_back(byte99);
+        }
+        if (signs.size() > 0) {
+            SchemaFactory::get_instance()->add_mpp_signs_stats(signs, rows99, bytes99);
+        }
+    }
+    return;
+}
+
 void NetworkServer::insert_subquery_signs_info(std::map<uint64_t, std::set<uint64_t>>& parent_sign_to_subquery_signs, bool is_insert_success) {
-    int64_t limit_write_rows = 5000, accumulate_counts = 0;
+    int64_t accumulate_counts = 0;
     if (parent_sign_to_subquery_signs.size() == 0) {
         return;
     }
@@ -816,7 +933,7 @@ void NetworkServer::insert_subquery_signs_info(std::map<uint64_t, std::set<uint6
         for (const auto& subquery_sign : pair.second) {
             values += "('" + std::to_string(parent_sign) + "', '" + std::to_string(subquery_sign) + "'),";
             accumulate_counts++;
-            if (accumulate_counts > limit_write_rows) {
+            if (accumulate_counts >= FLAGS_batch_insert_agg_sql_size) {
                 accumulate_counts = 0;
                 if (values.size() > 0) {
                     values.pop_back();
@@ -841,7 +958,6 @@ void NetworkServer::insert_subquery_signs_info(std::map<uint64_t, std::set<uint6
     }
     parent_sign_to_subquery_signs.clear();
 }
-
 
 int NetworkServer::insert_subquery_values(const std::string& values) {
     std::string sql = "REPLACE INTO BaikalStat.baikaldb_subquery_sign_info("
@@ -899,6 +1015,9 @@ static void on_health_check_done(pb::StoreRes* response, brpc::Controller* cntl,
         if (old_status == pb::NORMAL && new_status == pb::DEAD) {
             new_status = pb::FAULTY;
         }
+        SchemaFactory::get_instance()->update_instance(addr, new_status, false, true);
+    } else if (new_status != pb::NORMAL) {
+        // 非normal的需要不断更新normal_count，否则间歇性的normal超过10次也会设置normal
         SchemaFactory::get_instance()->update_instance(addr, new_status, false, true);
     }
 }
@@ -968,7 +1087,8 @@ void NetworkServer::construct_other_heart_beat_request(pb::BaikalOtherHeartBeatR
         }
     };
     factory->schema_info_scope_read(schema_read_recallback);
-    request.set_baikaldb_resource_tag("__baikaldb"); // baikaldb暂时没有resource_tag，使用"__baikaldb"会全平台同时更新参数
+    std::string resource_tag = "__baikaldb:" + FLAGS_baikal_resource_tag;
+    request.set_baikaldb_resource_tag(resource_tag); // baikaldb暂时没有resource_tag，使用"__baikaldb"会全平台同时更新参数
 }
 
 void NetworkServer::process_other_heart_beat_response(const pb::BaikalOtherHeartBeatResponse& response) {
@@ -976,13 +1096,77 @@ void NetworkServer::process_other_heart_beat_response(const pb::BaikalOtherHeart
     if (response.statistics().size() > 0) {
         factory->update_statistics(response.statistics());
     }
-    if (response.has_instance_param()) {
-        for (auto& item : response.instance_param().params()) {
-            if (!item.is_meta_param()) {
-                update_param(item.key(), item.value());
+    if (response.instance_param_size() > 0) {
+        std::unordered_map<std::string, std::string> param_map;
+        for (auto& param : response.instance_param()) {
+            for (auto& item : param.params()) {
+                if (!item.is_meta_param()) {
+                    param_map[item.key()] = item.value();
+                }
             }
         }
+        for (auto& iter : param_map) {
+            update_param(iter.first, iter.second);
+        }
     }
+}
+
+void NetworkServer::dump_slow_sqls() {
+    auto dump_func = [this]() {
+        if (!FLAGS_dump_slow_sqls) {
+            return;
+        }
+        if (!_load_slow_sql_files) {
+            std::vector<std::string> files;
+            PosixFileSystem().read_dir("./log/", files);
+            for (auto& file : files) {
+                // slow_sql_YYYY-MM-DD
+                if (boost::starts_with(file, "slow_sql_") && file.size() >= 19) {
+                    std::string date = file.substr(9, 10);
+                    _slow_sql_files[date] = "./log/" + file;
+                    DB_WARNING("load slow sql file: %s, date: %s", file.c_str(), date.c_str());
+                }
+            }
+            _load_slow_sql_files = true;
+        }
+        // ttl file
+        while (_slow_sql_files.size() > 7) {
+            std::string oldest_file_name = _slow_sql_files.begin()->second;
+            _slow_sql_files.erase(_slow_sql_files.begin());
+            butil::DeleteFile(butil::FilePath(oldest_file_name), false); 
+            DB_WARNING("ttl slow sqls file %s", oldest_file_name.c_str());
+        }
+        if (_slow_sqls.empty()) {
+            return;
+        }
+        std::unordered_map<uint64_t, std::unordered_map<uint64_t, std::string>> slow_sqls;
+        {
+            BAIDU_SCOPED_LOCK(_slow_sqls_mutex);
+            slow_sqls.swap(_slow_sqls);
+        }
+        std::string now = current_timestamp(std::vector<ExprValue>{}).get_string();
+        std::string date = curdate(std::vector<ExprValue>{}).get_string();
+        std::string file_name = "./log/slow_sql_" + date;
+        std::ofstream ofs(file_name, std::ofstream::app);
+        if (!ofs.is_open()) {
+            DB_WARNING("open file %s failed, lost slow sql cnt: %lu", file_name.c_str(), slow_sqls.size());
+            return;
+        }
+        for (auto& [sign, sqls] : slow_sqls) {
+            // format: time \t sign \t log_id \t sql
+            for (auto& [logid, sql] : sqls) {
+                ofs << now << "\tsign:" << sign << "\tlogid:" << logid << "\t" << sql << "\n";
+            }
+        }
+        ofs.close();
+        _slow_sql_files[date] = file_name;
+        return;
+    };
+    while (!_shutdown) {
+        dump_func();
+        bthread_usleep_fast_shutdown(FLAGS_check_interval * 1000 * 1000LL, _shutdown);
+    }
+    return;
 }
 
 void NetworkServer::connection_timeout_check() {
@@ -1071,6 +1255,11 @@ void NetworkServer::connection_timeout_check() {
                         }
                     }
                     sql.resize(slow_idx);
+                    if (FLAGS_dump_slow_sqls && !ctx->dumped_slow_sql) {
+                        BAIDU_SCOPED_LOCK(_slow_sqls_mutex);
+                        _slow_sqls[ctx->stat_info.sign][ctx->stat_info.log_id] = ctx->sql;
+                        ctx->dumped_slow_sql = true;
+                    }
                     DB_NOTICE("query is slow, [cost=%d][fd=%d][ip=%s:%d][now=%ld][active=%ld][user=%s][log_id=%lu][conn_id=%ld][sign=%lu][server_addr=%s:%d][sql=%s]",
                             query_time_diff, sock->fd, sock->ip.c_str(), sock->port,
                             time_now, sock->last_active,
@@ -1242,6 +1431,8 @@ NetworkServer::NetworkServer():
 
 NetworkServer::~NetworkServer() {
     // Free epoll info.
+    _kill_timeout_query_bth.join();
+    _dump_slow_sqls_bth.join();
     _conn_check_bth.join();
     _heartbeat_bth.join();
     _other_heartbeat_bth.join();
@@ -1481,24 +1672,88 @@ int32_t NetworkServer::set_keep_tcp_alive(int socket_fd) {
   return 0;
 }
 
+void NetworkServer::kill_timeout_query() {
+    auto check_func = [this]() {
+        if (!FLAGS_auto_kill_timeout_query) {
+            return;
+        }
+        if (_epoll_info == NULL) {
+            DB_WARNING("_epoll_info not initialized yet.");
+            return;
+        }
+        for (int32_t idx = 0; idx < CONFIG_MPL_EPOLL_MAX_SIZE; ++idx) {
+            SmartSocket sock = _epoll_info->get_fd_mapping(idx);
+            if (sock == NULL 
+                    || sock->is_free 
+                    || sock->fd == -1
+                    || sock->shutdown
+                    || !sock->client_has_timeout
+                    || !sock->executing_query) {
+                continue;
+            }
+            DB_WARNING("fd:=%d, conn_id: %lu, client has timeout, need to kill it.", sock->fd, sock->conn_id);
+            // TODO
+            // 会给store发kill命令并且db检测到status cancel停止执行
+            // 但如果向量化执行, 且store都查完了,可能无法有效停止db侧acero执行
+            parser::KillStmt kill_stmt;
+            kill_stmt.conn_id = sock->conn_id;
+            kill_stmt.is_query = false; // state=ERROR
+            std::shared_ptr<NetworkSocket> kill_sock = std::make_shared<NetworkSocket>();
+            SmartQueryContex kill_ctx = kill_sock->get_query_ctx();
+            kill_ctx->stmt = &kill_stmt;
+            kill_ctx->client_conn = kill_sock.get();
+            if (0 != KillPlanner(kill_ctx.get()).plan()) {
+                DB_FATAL("kill_timeout_query LogicalPlanner error. fd=%d, conn_id: %lu", sock->fd, sock->conn_id);
+                continue;
+            }
+            if (0 != kill_ctx->create_plan_tree()) {
+                DB_FATAL("kill_timeout_query create_plan_tree error. fd=%d, conn_id: %lu", sock->fd, sock->conn_id);
+                continue;
+            }
+            if (0 != PhysicalPlanner::analyze(kill_ctx.get())) {
+                DB_FATAL("kill_timeout_query PhysicalPlanner error. fd=%d, conn_id: %lu", sock->fd, sock->conn_id);
+                continue;
+            }
+            if (0 != PhysicalPlanner::execute(kill_ctx.get(), kill_sock->send_buf)) {
+                DB_FATAL("kill_timeout_query PhysicalPlanner execute error. fd=%d, conn_id: %lu", sock->fd, sock->conn_id);
+                continue;
+            }
+            DB_WARNING("kill timeout query succeed. fd=%d, conn_id: %lu", sock->fd, sock->conn_id);
+        }
+        return;
+    };
+    while (!_shutdown) {
+        check_func();
+        bthread_usleep_fast_shutdown(FLAGS_check_interval * 1000 * 1000LL, _shutdown);
+    }
+}
+
 int NetworkServer::make_worker_process() {
     if (MachineDriver::get_instance()->init(_driver_thread_num) != 0) {
         DB_FATAL("Failed to init machine driver.");
         exit(-1);
     }
     _conn_check_bth.run([this]() {connection_timeout_check();});
+    _dump_slow_sqls_bth.run([this]() {dump_slow_sqls();});
     _heartbeat_bth.run([this]() {report_heart_beat();});
     _other_heartbeat_bth.run([this]() {report_other_heart_beat();});
     _agg_sql_bth.run([this]() {print_agg_sql();});
+    _kill_timeout_query_bth.run([this]() {kill_timeout_query();});
     if (FLAGS_need_health_check) {
         _health_check_bth.run([this]() {store_health_check();});
     }
 
     _conn_bvars_update_bth.run([this](){client_conn_bvars_update();});
 #ifdef BAIDU_INTERNAL
-    if (FLAGS_need_ext_fs_gc) {
-        _ext_fs_gc_bth.run([this]() {ExtFileSystemGC::external_filesystem_gc(&_shutdown, FLAGS_hostname);});
-    }
+    _ext_fs_gc_bth.run([this]() {
+        while (!_shutdown) {
+            if (FLAGS_afs_gc_hostname == FLAGS_hostname) {
+                ExtFileSystemGC::external_filesystem_gc();
+                OlapPreSplit::olap_pre_split();
+            }
+            bthread_usleep_fast_shutdown(10 * 1000 * 1000LL, _shutdown);
+        }
+    });
 #endif
 
     // Create listen socket.
@@ -1581,8 +1836,7 @@ int NetworkServer::make_worker_process() {
 
                 // New connection will be handled immediately.
                 fd = client_fd;
-                //DB_NOTICE("Accept new connect [ip=%s, port=%d, client_fd=%d]",
-                DB_WARNING_CLIENT(client_socket, "Accept new connect [ip=%s, port=%d, client_fd=%d]",
+                DB_DEBUG_CLIENT(client_socket, "Accept new connect [ip=%s, port=%d, client_fd=%d]",
                         ip_address,
                         client_socket->port,
                         client_socket->fd);
@@ -1619,9 +1873,20 @@ int NetworkServer::make_worker_process() {
                                         fd, event);
                     }
                 } else {
-                    DB_WARNING_CLIENT(sock, "socket type is wrong, fd %d event=0x%x", fd, event);
+                    DB_WARNING_CLIENT(sock, "socket type is wrong, fd=%d event=0x%x", fd, event);
                 }
                 sock->shutdown = true;
+            } else if (event & EPOLLRDHUP
+                    && sock->socket_type == CLIENT_SOCKET
+                    && sock->executing_query
+                    // && sock->client_has_timeout == false
+                    ) {
+                DB_WARNING_CLIENT(sock, "CLIENT EPOLL event is EPOLLRDHUP, fd=%d event=0x%x",
+                                fd, event);
+                // EPOLLRDHUP: received FIN from client
+                sock->client_has_timeout = true;
+                // 会反复弹起EPOLLRDHUP事件. 直接mod去掉RDHUP监听,是否有问题
+                _epoll_info->poll_events_mod(sock, 0);
             }
 
             // Handle client socket event by status machine.
@@ -1631,7 +1896,7 @@ int NetworkServer::make_worker_process() {
                     continue;
                 }
                 if (sock->is_free || sock->fd == -1) {
-                    DB_WARNING_CLIENT(sock, "sock is already free.");
+                    DB_WARNING_CLIENT(sock, "sock is already free, fd=%d", fd);
                     sock->mutex.unlock();
                     continue;
                 }

@@ -66,7 +66,6 @@ int PlanRouter::analyze(QueryContext* ctx) {
         // 后续apply_node也可以做这个优化
         for (auto& node : join_nodes) {
             JoinNode* join_node = static_cast<JoinNode*>(node);
-            join_node->adjudge_join_type();
             if (join_node->is_use_index_join()) {
                 escape_get_region_infos.insert(static_cast<JoinNode*>(join_node)->get_inner_node());
             }
@@ -76,6 +75,9 @@ int PlanRouter::analyze(QueryContext* ctx) {
     if (scan_size > 0) {
         bool has_join = scan_size > 1; // has joinNode or has applyNode
         for (auto scan_node : scan_nodes) {
+            if (!static_cast<ScanNode*>(scan_node)->is_rocksdb_scan_node()) {
+                continue;
+            }
             auto ret = scan_node_analyze(static_cast<RocksdbScanNode*>(scan_node), ctx, has_join, escape_get_region_infos);
             if (ret != 0) {
                 return ret;
@@ -272,6 +274,9 @@ int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node,
             scan_index_info.router_index->mutable_ranges()->Clear();
         }
     }
+    if (scan_node->region_infos().empty()) {
+        scan_node->partition_property()->has_no_input_data = true;
+    }
     //如果该表没有全局二级索引
     //full_export+join也需要把主键放入slot
     if (!schema_factory->has_global_index(main_table_id) && !is_full_export) {
@@ -293,21 +298,29 @@ int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node,
     }
     //如果不是覆盖索引，需要把主键的field_id全部加到slot_id
     pb::TupleDescriptor* tuple_desc = get_tuple_desc(scan_node->tuple_id());
-    int32_t max_slot_id = tuple_desc->slots_size();
     auto pri_info = schema_factory->get_index_info_ptr(main_table_id);
     if (pri_info == nullptr) {
         DB_WARNING("pri index info not found main_table_id:%ld", main_table_id);
         return -1;
     }
+    int32_t max_slot_id = 0;
+    for (auto& slot : tuple_desc->slots()) {
+        max_slot_id = std::max(max_slot_id, slot.slot_id());
+    }
     for (auto& f : pri_info->fields) {
         auto slot_id = get_slot_id(scan_node->tuple_id(), f.id);
-        if (slot_id <=0) {
+        if (slot_id <= 0) {
             auto slot = tuple_desc->add_slots();
             slot->set_slot_id(++max_slot_id);
             slot->set_tuple_id(scan_node->tuple_id());
             slot->set_table_id(scan_node->table_id());
             slot->set_field_id(f.id);
             slot->set_slot_type(f.type);
+            slot->set_ref_cnt(1);
+            while (tuple_desc->slot_idxes().size() < slot->slot_id()) {
+                tuple_desc->add_slot_idxes(-1);
+            }
+            tuple_desc->set_slot_idxes(slot->slot_id() - 1, tuple_desc->slots_size() - 1);
         }
     }
     return 0;
@@ -376,7 +389,7 @@ int PlanRouter::kill_node_analyze(KillNode* kill_node, QueryContext* ctx) {
     }
     InsertNode* insert_node = static_cast<InsertNode*>(plan->get_node(pb::INSERT_NODE));
     std::vector<ExecNode*> scan_nodes;
-    plan->get_node(pb::SCAN_NODE, scan_nodes);
+    plan->get_node_pass_subquery(pb::SCAN_NODE, scan_nodes);
     if (insert_node != nullptr) {
         kill_node->region_infos() = insert_node->region_infos();
     } else {

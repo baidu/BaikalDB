@@ -1833,6 +1833,28 @@ bool HandleHelper::_handle_schema_conf(const SmartSocket& client, const std::vec
             client->state = STATE_ERROR;
             return false;
         }
+    } else if (key == "use_column_storage") {
+        schema_conf->set_use_column_storage(is_open);
+    } else if (key == "force_column_storage") {
+        schema_conf->set_force_column_storage(is_open);
+    } else if (key == "enable_column_engine") {
+        schema_conf->set_enable_column_engine(is_open);
+    } else if (key == "olap_pre_split_cnt") {
+        int32_t olap_pre_split_cnt = strtol(split_vec[4].c_str(), NULL, 10);
+        schema_conf->set_olap_pre_split_cnt(olap_pre_split_cnt);
+    } else if (key == "cold_use_column_only") {
+        auto table = factory->get_table_info_ptr(table_id);
+        if (table == nullptr) {
+            DB_FATAL("table null table name: %s, table_id: %ld", full_name.c_str(), table_id);
+            client->state = STATE_ERROR;
+            return false;
+        }
+        if (is_open && !(table->schema_conf.use_column_storage() && table->schema_conf.enable_column_engine())) {
+            DB_FATAL("table name: %s, table_id: %ld need use column storage and enable column engine", full_name.c_str(), table_id);
+            client->state = STATE_ERROR;
+            return false;
+        }
+        schema_conf->set_cold_use_column_only(is_open);
     } else {
         DB_FATAL("param invalid");
         client->state = STATE_ERROR;
@@ -1899,9 +1921,10 @@ bool HandleHelper::_handle_instance_status(const SmartSocket& client, const std:
 }
 
 bool HandleHelper::_handle_store_compact_region(const SmartSocket& client, const std::vector<std::string>& split_vec) {
-    // handle _handle_store_compact_region StoreAddress meta/data/raft_log [regionID]
+    // handle store_compact_region StoreAddress meta/data/raft_log/column_base/column_row2column/vector_index [regionID]
     std::unordered_map<std::string, int> ops = {
-            {"data", 1},  {"meta", 2},  {"raft_log", 3}
+            {"data", 1},  {"meta", 2},  {"raft_log", 3}, 
+            {"column_base", 4}, {"column_row2column", 5}, {"vector_index", 6}
     };
     SchemaFactory* factory = SchemaFactory::get_instance();
     if(!client || !factory || !client->query_ctx || split_vec.size() < 4) {
@@ -1935,7 +1958,8 @@ bool HandleHelper::_handle_store_compact_region(const SmartSocket& client, const
     pb::RegionIds req;
     if (ops.find(type) != ops.end()) {
         req.set_compact_type(ops[type]);
-        if (type == "data" && region_id != -1) {
+        if ((type == "data" || type == "column_base" || type == "column_row2column" || type == "vector_index") 
+                && region_id != -1) {
             req.add_region_ids(region_id);
         }
     } else {

@@ -54,6 +54,7 @@ void LimitCalc::_analyze_limit(QueryContext* ctx, ExecNode* node, int64_t limit)
         case pb::SORT_NODE:
         case pb::AGG_NODE:
         case pb::UNION_NODE:
+        case pb::WINDOW_NODE:
             return;
         default:
             break;

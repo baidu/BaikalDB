@@ -223,6 +223,8 @@ bool NetworkSocket::reset_when_err() {
     send_buf->byte_array_clear();
     has_error_packet = false;
     query_ctx.reset(new QueryContext);
+    client_has_timeout = false;
+    executing_query = false;
     return 0;
 }
 

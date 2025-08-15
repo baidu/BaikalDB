@@ -32,7 +32,7 @@ public:
     virtual int plan();
 
     static int parse_partition_pre_split_keys(const std::string& partition_split_keys, pb::SchemaInfo& table);
-
+    static int update_specify_split_keys(const std::string& ns, const std::string& db, const std::string& tbl, const std::string& split_keys);
 private:
     int parse_create_table(pb::SchemaInfo& table);
     int parse_create_view(pb::SchemaInfo& view);
@@ -91,7 +91,7 @@ private:
     int add_default_partition_info(pb::SchemaInfo& table);
 
     // DBLINK
-    int check_dblink_table_valid(const pb::DBLinkInfo& dblink_info);
+    int check_dblink_table_valid(const pb::SchemaInfo& table);
 
     std::map<std::string, bool> _column_can_null;
 

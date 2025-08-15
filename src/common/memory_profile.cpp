@@ -78,8 +78,7 @@ void MemoryGCHandler::memory_gc_thread() {
 MemTracker::MemTracker(uint64_t log_id, int64_t bytes_limit, MemTracker* parent) :
                 _log_id(log_id), _bytes_limit(bytes_limit),
                 _last_active_time(butil::gettimeofday_us()),
-                _bytes_consumed(0), _parent(parent),
-                _limit_exceeded(false) {
+                _bytes_consumed(0), _parent(parent) {
 }
 
 MemTracker::~MemTracker() {

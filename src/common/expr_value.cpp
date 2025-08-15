@@ -16,6 +16,8 @@
 #include "hll_common.h"
 
 namespace baikaldb {
+DEFINE_bool(use_double_conversion, true, "use_double_conversion");
+DEFINE_bool(double_use_all_precision, false, "Double precision output compatibility with MySQL, eg: 1.003*100=100.29999999999998");
 SerializeStatus ExprValue::serialize_to_mysql_text_packet(char* buf, size_t size, size_t& len) const {
     if (size < 1) {
         len = 1;
@@ -63,12 +65,7 @@ SerializeStatus ExprValue::serialize_to_mysql_text_packet(char* buf, size_t size
         case pb::FLOAT: {
             size_t body_len = 0;
             char tmp_buf[24] = {0};
-            if (float_precision_len == -1) {
-                body_len = snprintf(tmp_buf, sizeof(tmp_buf), "%.6g", _u.float_val);
-            } else {
-                std::string format= "%." + std::to_string(float_precision_len) + "f";
-                body_len = snprintf(tmp_buf, sizeof(tmp_buf), format.c_str(), _u.float_val);
-            }
+            body_len = parser::float_to_string(_u.float_val, float_precision_len, tmp_buf, sizeof(tmp_buf));
 
             len = body_len + 1;
             if (len > size) {
@@ -81,13 +78,8 @@ SerializeStatus ExprValue::serialize_to_mysql_text_packet(char* buf, size_t size
         }
         case pb::DOUBLE: {
             size_t body_len = 0;
-            char tmp_buf[24] = {0};
-            if (float_precision_len == -1) {
-                body_len = snprintf(tmp_buf, sizeof(tmp_buf), "%.12g", _u.double_val);
-            } else {
-                std::string format= "%." + std::to_string(float_precision_len) + "lf";
-                body_len = snprintf(tmp_buf, sizeof(tmp_buf), format.c_str(), _u.double_val);
-            }
+            char tmp_buf[50] = {0};
+            body_len = parser::double_to_string(_u.double_val, float_precision_len, tmp_buf, sizeof(tmp_buf));
             len = body_len + 1;
             if (len > size) {
                 return STMPS_NEED_RESIZE;

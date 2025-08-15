@@ -221,75 +221,10 @@ struct JoinNode : public Node {
     }
 };
 
-struct ByItem : public Node {
-    ExprNode* expr = nullptr;
-    bool is_desc = false;
-    ByItem() {
-        node_type = NT_BY_ITEM;
-    }
-    virtual void set_print_sample(bool print_sample_) override {
-        print_sample = print_sample_;
-        if (expr != nullptr) {
-            expr->set_print_sample(print_sample_);
-        }
-    }
-    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
-        p_cache_param = p_cache_param_;
-        if (expr != nullptr) {
-            expr->set_cache_param(p_cache_param_);
-        }
-    }
-    virtual void to_stream(std::ostream& os) const override {
-        static const char* desc_str[] = {" ASC", " DESC"};
-        os << expr << desc_str[is_desc];
-    }
-};
-
 struct GroupByClause : public Node {
     Vector<ByItem*> items;
     GroupByClause() {
         node_type = NT_GROUP_BY;
-    }
-    virtual bool is_complex_node() {
-        if (is_complex) {
-            return true;
-        }
-        for (int i = 0; i < items.size(); i++) {
-            if (items[i]->is_complex_node()) {
-                is_complex = true;
-                return true;
-            }
-        }
-        return false;
-    }
-    virtual void set_print_sample(bool print_sample_) override {
-        print_sample = print_sample_;
-        for (int i = 0; i < items.size(); i++) {
-            items[i]->set_print_sample(print_sample_);
-        }
-    }
-    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
-        p_cache_param = p_cache_param_;
-        for (int i = 0; i < items.size(); i++) {
-            if (items[i] != nullptr) {
-                items[i]->set_cache_param(p_cache_param_);
-            }
-        }
-    }
-    virtual void to_stream(std::ostream& os) const override {
-        for (int i = 0; i < items.size(); i++) {
-            os << " " << items[i];
-            if (i != items.size() -1) {
-                os << ",";
-            }
-        }
-    }
-};
-
-struct OrderByClause : public Node {
-    Vector<ByItem*> items;
-    OrderByClause() {
-        node_type = NT_ORDER_BY;
     }
     virtual bool is_complex_node() {
         if (is_complex) {

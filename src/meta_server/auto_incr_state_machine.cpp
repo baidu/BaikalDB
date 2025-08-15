@@ -90,8 +90,18 @@ void AutoIncrStateMachine::add_table_id(const pb::MetaManagerRequest& request,
     int64_t table_id = increment_info.table_id();
     uint64_t start_id = increment_info.start_id();
     if (_auto_increment_map.find(table_id) != _auto_increment_map.end()) {
-        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table id has exist");
         DB_FATAL("table_id: %ld has exist when add table id for auto increment", table_id);
+        // modify column增加自增id可能已经存在了
+        if (increment_info.force()) {
+            if (done && ((MetaServerClosure*)done)->response) { 
+                ((MetaServerClosure*)done)->response->set_errcode(pb::SUCCESS);
+                ((MetaServerClosure*)done)->response->set_op_type(request.op_type());
+                ((MetaServerClosure*)done)->response->set_start_id(start_id);
+                ((MetaServerClosure*)done)->response->set_errmsg("SUCCESS");
+            }
+            return;
+        }
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "table id has exist");
         return;
     }
     _auto_increment_map[table_id] = start_id;

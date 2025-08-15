@@ -15,6 +15,7 @@
 #include "binlog_context.h"
 #include "fetcher_store.h"
 #include "meta_server_interact.hpp"
+#include "tso_proxy.h"
 #ifdef BAIDU_INTERNAL
 #include <baidu/rpc/channel.h>
 #include <baidu/rpc/selective_channel.h>
@@ -95,8 +96,8 @@ int64_t TsoFetcher::get_tso(int64_t count) {
     tso_count << 1;
     for (;;) {
         retry_time++;
-        ret = MetaServerInteract::get_tso_instance()->send_request("tso_service", request, response);
-        if (ret < 0) {
+        ret = TsoProxy::get_instance()->get_tso(request, response);
+        if (ret != 0) {
             if (response.errcode() == pb::RETRY_LATER && retry_time < 5) {
                 bthread_usleep(tso::update_timestamp_interval_ms * 1000LL);
                 continue;  
@@ -108,7 +109,7 @@ int64_t TsoFetcher::get_tso(int64_t count) {
         }
         break;
     }
-    //DB_WARNING("response:%s", response.ShortDebugString().c_str());
+//    DB_WARNING("tso response:%s", response.ShortDebugString().c_str());
     auto&  tso = response.start_timestamp();
     int64_t timestamp = (tso.physical() << tso::logical_bits) + tso.logical();
 

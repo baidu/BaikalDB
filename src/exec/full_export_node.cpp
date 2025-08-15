@@ -27,6 +27,7 @@ int FullExportNode::init(const pb::PlanNode& node) {
         return ret;
     }
     _op_type = pb::OP_SELECT;
+    _fetcher_store.is_full_export = true;
     return 0;
 }
 

@@ -124,7 +124,7 @@ void MetaStateMachine::baikal_heartbeat(google::protobuf::RpcController* control
     DB_DEBUG("baikaldb request[%s]", request->ShortDebugString().c_str());
     TimeCost step_time_cost;
     ON_SCOPE_EXIT([]() {
-        Concurrency::get_instance()->baikal_heartbeat_concurrency.decrease_broadcast();
+        Concurrency::get_instance()->baikal_heartbeat_concurrency.decrease_signal();
     });
     int ret = Concurrency::get_instance()->baikal_heartbeat_concurrency.increase_timed_wait(10 * 1000 * 1000LL);
     if (ret != 0) {
@@ -186,7 +186,7 @@ void MetaStateMachine::baikal_other_heartbeat(google::protobuf::RpcController* c
     TimeCost step_time_cost;
     Concurrency::get_instance()->baikal_other_heartbeat_concurrency.increase_wait();
     ON_SCOPE_EXIT([]() {
-        Concurrency::get_instance()->baikal_other_heartbeat_concurrency.decrease_broadcast();
+        Concurrency::get_instance()->baikal_other_heartbeat_concurrency.decrease_signal();
     });
     int64_t wait_time = step_time_cost.get_time();
     step_time_cost.reset();
@@ -699,6 +699,18 @@ void MetaStateMachine::on_leader_start() {
 
 void MetaStateMachine::healthy_check_function() {
     DB_WARNING("start healthy check function");
+    if (applied_index() == 0) {
+        /*
+        // init_meta_server
+        // create internal table
+        pb::MetaManagerRequest request;
+        pb::MetaManagerResponse response;
+        request.set_op_type(pb::OP_CREATE_NAMESPACE);
+        auto info = request.mutable_namespace_info();
+        info->set_namespace_name("INTERNAL");
+        MetaServerInteract::get_instance()->send_request("meta_manager", request, response);
+        */
+    }
     static int64_t count = 0;
     int64_t sleep_time_count = 
         FLAGS_healthy_check_interval_times * FLAGS_store_heart_beat_interval_us / 1000; //ms为单位               
@@ -715,6 +727,8 @@ void MetaStateMachine::healthy_check_function() {
         ++count;
         //store的相关信息目前存在cluster中
         ClusterManager::get_instance()->store_healthy_check_function();
+        // baikal相关信息也存储在Cluster中
+        ClusterManager::get_instance()->baikal_healthy_check_function();
         //region多久没上报心跳了
         RegionManager::get_instance()->region_healthy_check_function();
         //gc删除很久的表

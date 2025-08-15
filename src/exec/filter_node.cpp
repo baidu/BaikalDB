@@ -564,14 +564,14 @@ int FilterNode::predicate_pushdown(std::vector<ExprNode*>& input_exprs) {
     return 0;
 }
 
-bool FilterNode::can_use_arrow_vector() {
+bool FilterNode::can_use_arrow_vector(RuntimeState* state) {
     for (auto expr : _conjuncts) {
         if (!expr->can_use_arrow_vector()) {
             return false;
         }
     }
     for (auto& c : _children) {
-        if (!c->can_use_arrow_vector()) {
+        if (!c->can_use_arrow_vector(state)) {
             return false;
         }
     }
@@ -579,7 +579,7 @@ bool FilterNode::can_use_arrow_vector() {
 }
 
 int FilterNode::build_arrow_declaration(RuntimeState* state) {
-    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
+    START_LOCAL_TRACE_WITH_PARTITION_PROPERTY(get_trace(), state->get_trace_cost(), &_partition_property, OPEN_TRACE, nullptr);
     for (auto c : _children) {
         if (c->build_arrow_declaration(state) != 0) {
             return -1;
@@ -625,6 +625,10 @@ int FilterNode::open(RuntimeState* state) {
             DB_WARNING_STATE(state, "expr open fail, ret:%d", ret);
             return ret;
         }
+        if (conjunct->children_size() > 10000) {
+            // join下推的in expr可能会很大, 需要防止内存溢出
+            check_memory = true;
+        }
         if (check_memory) {
             expr_used_size += conjunct->used_size();
         }
@@ -634,6 +638,18 @@ int FilterNode::open(RuntimeState* state) {
         return -1;
     }
     return 0;
+}
+
+bool FilterNode::need_check_memory() {
+    if (_conjuncts.size() > 10000) {
+        return true;
+    }
+    for (auto conjunct : _conjuncts) {
+        if (conjunct->children_size() > 10000) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void FilterNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
@@ -654,7 +670,7 @@ void FilterNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
             std::string filter_string;
             filter_node.SerializeToString(&filter_string);
             pb_node->mutable_derive_node()->set_filter_node(filter_string);
-        } else {
+        } else if (region_id != 0) {
 #ifdef BAIDU_INTERNAL
 #ifndef NDEBUG
             // 调试日志
@@ -675,6 +691,15 @@ void FilterNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
 #endif
 #endif
             pb_node->mutable_derive_node()->set_filter_node(_filter_node);
+        } else {
+            // mpp场景发给副db,发全量的filter expr
+            pb::FilterNode filter_node;
+            for (const auto& conjunct : _conjuncts) {
+                ExprNode::create_pb_expr(filter_node.add_conjuncts(), conjunct);
+            }
+            std::string filter_string;
+            filter_node.SerializeToString(&filter_string);
+            pb_node->mutable_derive_node()->set_filter_node(filter_string);
         }
     } else {
         auto filter_node = pb_node->mutable_derive_node()->mutable_raw_filter_node();
@@ -791,14 +816,15 @@ void FilterNode::close(RuntimeState* state) {
     _child_row_idx = 0;
     _child_eos = false;
 }
-void FilterNode::show_explain(std::vector<std::map<std::string, std::string>>& output) {
-    ExecNode::show_explain(output);
+int FilterNode::show_explain(QueryContext* ctx, std::vector<std::map<std::string, std::string>>& output, int& next_id, int display_id) {
+    int ret_id = ExecNode::show_explain(ctx, output, next_id, display_id);
     if (output.empty()) {
-        return;
+        return ret_id;
     }
     if (_raw_filter_node.conjuncts_size() != 0) {
         output.back()["Extra"] += "Using where; ";
     }
+    return ret_id;
 }
 
 int FilterNode::arrow_steal_conjuncts(std::vector<arrow::compute::Expression>& conjuncts, int64_t& limit) {
@@ -815,7 +841,7 @@ int FilterNode::arrow_steal_conjuncts(std::vector<arrow::compute::Expression>& c
             return ret;
         }
         conjuncts.emplace_back(_pruned_conjuncts[i]->arrow_expr());
-        DB_DEBUG("handle sub filter, idx: %d: %s", i, sub_exprs[i].ToString().c_str());
+        // DB_DEBUG("handle sub filter, idx: %d: %s", i, sub_exprs[i].ToString().c_str());
     }
     _pruned_conjuncts.clear();
     return 0;

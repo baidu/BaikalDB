@@ -705,7 +705,7 @@ int SchemaManager::load_snapshot() {
     for (; iter->Valid(); iter->Next()) {
         int ret = 0;
         if (iter->key().starts_with(region_prefix)) {
-            ret = RegionManager::get_instance()->load_region_snapshot(iter->value().ToString());
+            ret = RegionManager::get_instance()->load_region_snapshot(iter->key().ToString(), iter->value().ToString());
         } else if (iter->key().starts_with(table_prefix)) {
             ret = TableManager::get_instance()->load_table_snapshot(iter->value().ToString());
         } else if (iter->key().starts_with(database_prefix)) {
@@ -903,6 +903,13 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
                                "engine != rocksdb/rocksdb_cstore can not create ttl table", request->op_type(), log_id);        
             return -1;
         }
+    }
+
+    // DBLink Mysql
+    if (pre_process_for_dblink_mysql(request, response, log_id) != 0) {
+        ERROR_SET_RESPONSE(response, pb::INTERNAL_ERROR,
+                           "Fail to pre_process_for_dblink_mysql", request->op_type(), log_id);
+        return -1;
     }
 
     return 0;
@@ -1576,6 +1583,32 @@ int SchemaManager::pre_process_for_dynamic_partition(const pb::MetaManagerReques
         }
     }
 
+    return 0;
+}
+
+int SchemaManager::pre_process_for_dblink_mysql(const pb::MetaManagerRequest* request,
+                                                pb::MetaManagerResponse* response,
+                                                uint64_t log_id) {
+    if (request == nullptr || response == nullptr) {
+        DB_WARNING("request is nullptr or response is nullptr, log_id: %lu", log_id);
+        return -1;
+    }
+    const pb::DBLinkInfo& dblink_info = request->table_info().dblink_info();
+    if (dblink_info.type() != pb::LT_MYSQL) {
+        return 0;
+    }
+    std::vector<pb::FieldInfo> fields;
+    if (TableManager::get_instance()->get_fields_from_mysql(dblink_info.mysql_info(), fields) != 0) {
+        DB_WARNING("Fail to get_fields_from_mysql, log_id: %lu, request: %s", 
+                    log_id, request->ShortDebugString().c_str());
+        return -1;
+    }
+    auto* mutable_request = const_cast<pb::MetaManagerRequest*>(request);
+    auto* mutable_fields = mutable_request->mutable_table_info()->mutable_fields();
+    mutable_fields->Clear();
+    for (auto& field : fields) {
+        mutable_fields->Add()->Swap(&field);
+    }
     return 0;
 }
 

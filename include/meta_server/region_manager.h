@@ -44,6 +44,7 @@ struct RegionLearnerState {
 };
 
 struct BinlogRegionState {
+    int64_t table_id = 0;
     std::map<std::string, int64_t> peer_oldest_timestamp_to_now_interval;
 };
 
@@ -85,7 +86,7 @@ public:
             std::unordered_map<std::string, std::vector<pb::AddPeer>>& add_peer_requests);
     bool add_region_is_exist(int64_t table_id, const std::string& start_key, 
                                             const std::string& end_key, int64_t partition_id);
-    bool binlog_peer_can_delete(const std::string& instance, int64_t region_id);
+    bool binlog_peer_can_delete(const std::string& instance, int64_t region_id, int64_t table_id);
     bool check_binlog_regions_can_migrate(const std::string& instance);
 
     void add_region_info(const std::vector<int64_t>& new_add_region_ids, 
@@ -189,7 +190,7 @@ public:
                 const std::string& resource_tag,
                 std::unordered_map<int64_t, int64_t>& table_average_counts);
  
-    int load_region_snapshot(const std::string& value);
+    int load_region_snapshot(const std::string& key, const std::string& value);
     void migirate_region_for_store(const std::string& instance);
     void region_healthy_check_function();
     void reset_region_status();
@@ -540,6 +541,20 @@ public:
             const std::unordered_map<int64_t, std::unordered_set<int64_t>>& heartbeat_table_partition_map); 
 
     bool check_table_in_resource_tags(int64_t table_id, const std::set<std::string>& resource_tags);
+
+    int64_t get_all_region_max_binlog_times(int64_t table_id) {
+        int64_t max_binlog_times = 0;
+        _binlog_region_state_map.traverse_with_key_value([&table_id, &max_binlog_times](int64_t region_id, BinlogRegionState& state) {
+            if (state.table_id == table_id) {
+                for (auto& [_, peer_keep_time] : state.peer_oldest_timestamp_to_now_interval) {
+                    if (peer_keep_time > max_binlog_times) {
+                        max_binlog_times = peer_keep_time;
+                    }
+                }
+            }
+        });
+        return max_binlog_times;
+    }
     
 private:
     RegionManager(): _max_region_id(0) {

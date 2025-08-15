@@ -47,47 +47,151 @@ struct RegionReturnData {
     void set_arrow_data(std::shared_ptr<arrow::RecordBatch>& batch) {
         arrow_data = batch;
         row_data = nullptr;
-    } 
+    }
+};
+
+struct RegionInfoData {
+    pb::RegionInfo* region_info;
+    bool select_without_leader;
+    bool resource_insulate_read;
+    RegionInfoData() {}
 };
 
 class RPCCtrl;
 class FetcherStore;
 #define DB_DONE(level, _fmt_, args...) \
     do {\
-        DB_##level("old_region_id: %ld, region_id: %ld, retry_times: %d, start_seq_id: %d, current_seq_id: %d, "   \
-                   "op_type: %s, log_id: %lu, txn_id: %lu, sign: %lu, addr: %s, backup: %s; " _fmt_,               \
-            _old_region_id, _region_id, _retry_times, _start_seq_id, _current_seq_id,                              \
-            pb::OpType_Name(_op_type).c_str(), _state->log_id(), _state->txn_id, _state->sign,                     \
-            _addr.c_str(), _backup.c_str(), ##args);                                                               \
+        DB_##level("old_region_id: %ld, region_id: %ld,  region_ids: %s, retry_times: %d,"               \
+                   "start_seq_id: %d, current_seq_id: %d, "                                              \
+                   "op_type: %s, log_id: %lu, txn_id: %lu, sign: %lu, addr: %s, backup: %s; "            \
+                   _fmt_, _old_region_id, _region_id, _region_ids_str.substr(0, 100).c_str(), _retry_times, \
+                   _start_seq_id, _current_seq_id, pb::OpType_Name(_op_type).c_str(), _state->log_id(),  \
+                   _state->txn_id, _state->sign, _addr.c_str(), _backup.c_str(),##args);                 \
     } while (0);
 
-class OnRPCDone: public google::protobuf::Closure {
+class OnRPCDone : public google::protobuf::Closure {
 public:
-    OnRPCDone(FetcherStore* fetcher_store, RuntimeState* state, ExecNode* store_request, pb::RegionInfo* info_ptr, 
-        int64_t old_region_id, int64_t region_id, int start_seq_id, int current_seq_id, pb::OpType op_type);
-    virtual ~OnRPCDone();
-    virtual void Run();
-    std::string key() {
+    OnRPCDone(FetcherStore* fetcher_store, RuntimeState* state, 
+                        ExecNode* store_request, int start_seq_id, int current_seq_id, 
+                        pb::OpType op_type, bool need_check_memory);
+    virtual ~OnRPCDone(); 
+    void send_request();
+    virtual void pre_send_async() = 0;
+    std::string key() const {
         return _store_addr;
-    }
+    };
 
     void retry_times_inc() {
         _retry_times++;
     }
-    
+
     void set_rpc_ctrl(RPCCtrl* ctrl) {
         _rpc_ctrl = ctrl;
     }
-
+    
     std::shared_ptr<pb::TraceNode> get_trace() {
         return _trace_node;
     }
 
+    virtual ErrorType fill_request() = 0;
+    ErrorType fill_single_request(pb::StoreReq& single_req, pb::RegionInfo& region_info, int64_t region_id, int64_t old_region_id);
+
+    ErrorType send_async();
+
+    virtual void set_region_vectorized_response(int64_t region_id, std::shared_ptr<pb::StoreRes> single_response_ptr) = 0;
     template<typename Repeated>
-    void select_valid_peers(const std::string& resource_tag, 
+    void select_valid_peers(const pb::RegionInfo& info,
+                            const std::string& resource_tag, 
                             Repeated&& peers, 
                             std::vector<std::string>& valid_peers);
+    void select_resource_insulate_read_addr(pb::RegionInfo& info,
+                            std::string& addr,
+                            const std::string& insulate_resource_tag,
+                            bool& select_without_leader,
+                            bool& resource_insulate_read);
+    void select_addr(pb::RegionInfo& info, 
+                            std::string& addr,
+                            bool& resource_insulate_read,
+                            bool& select_without_leader);
+    ErrorType handle_version_old(const pb::RegionInfo& info, pb::StoreRes& response);
+    ErrorType handle_single_response(const std::string& remote_side,
+                                    int64_t region_id,
+                                    const std::string& addr,
+                                    pb::RegionInfo& info,
+                                    std::shared_ptr<pb::StoreRes> single_response);
+    ErrorType check_status();
 
+    void clear_request() {
+        if (_need_check_memory && _has_multi_plan && _op_type == pb::OP_SELECT) {
+            // 每个region一个plan, 没有复用
+            if (_is_batch) {
+                _batch_request.Clear();
+            } else {
+                _request.Clear();
+            }
+            _has_fill_request = false;
+            _state->memory_limit_release(std::numeric_limits<int>::max(), _request_size);
+        }
+    }
+
+    virtual void Run(const std::string& version);
+    virtual void retry_region_task(const std::string& remote_side) = 0;
+    virtual void retry_or_finish_task(const std::string& remote_side) = 0;
+
+    brpc::Controller _cntl;
+    ExecNode* _store_request;
+    FetcherStore* _fetcher_store;
+    RuntimeState* _state;
+    RPCCtrl* _rpc_ctrl = nullptr;
+    std::shared_ptr<pb::TraceNode> _trace_node = nullptr;
+    NetworkSocket* _client_conn = nullptr;
+
+    int64_t _old_region_id = 0;
+    int64_t _region_id = 0;
+    int _retry_times = 0;
+    int _start_seq_id = 0;
+    int _current_seq_id = 0;
+    bool _has_fill_request = false;
+    std::string _addr;
+    std::string _store_addr;
+    std::string _backup;
+    std::string _region_ids_str = "";
+    const pb::OpType _op_type;
+    bool _is_batch = false;
+    std::vector<int64_t> _region_ids;
+    bool _has_multi_plan = false;
+
+    // DBLINK外部映射表使用
+    int64_t _meta_id = -1;
+
+    TimeCost _total_cost;
+    TimeCost _query_time;
+
+    pb::BatchRegionStoreReq _batch_request;
+    std::shared_ptr<pb::BatchRegionStoreRes> _batch_response_ptr = std::make_shared<pb::BatchRegionStoreRes>();
+    pb::StoreReq _request;
+    std::shared_ptr<pb::StoreRes> _response_ptr = std::make_shared<pb::StoreRes>();
+    std::string _versions_str;
+
+    // _resource_insulate_read包括: 访问learner / 指定isolate_resource_tag 资源隔离读从
+    bool _resource_insulate_read = false;
+
+    // 内存限制
+    bool _need_check_memory = false;
+    int64_t _request_size = 0;
+    
+    static bvar::Adder<int64_t>  async_rpc_region_count;
+    static bvar::LatencyRecorder total_send_request;
+    static bvar::LatencyRecorder add_backup_send_request;
+    static bvar::LatencyRecorder has_backup_send_request;
+};
+
+class OnSingleRPCDone: public OnRPCDone {
+public:
+    OnSingleRPCDone(FetcherStore* fetcher_store, RuntimeState* state, ExecNode* store_request, pb::RegionInfo* info_ptr, 
+        int64_t old_region_id, int64_t region_id, int start_seq_id, int current_seq_id, pb::OpType op_type, bool need_check_memory);
+    virtual ~OnSingleRPCDone();
+    virtual void Run();
     bool rpc_need_retry(int32_t errcode) {
         switch (errcode) {
             case ENETDOWN:     // 100, Network is down
@@ -112,13 +216,11 @@ public:
         }
         return false;
     }
-    ErrorType check_status();
-    ErrorType send_async();
-    ErrorType fill_request();
+    virtual ErrorType fill_request();
+    void pre_send_async() override {
+        select_addr();
+    }
     void select_addr();
-    void select_resource_insulate_read_addr(const std::string& insulate_resource_tag);
-    void send_request();
-    ErrorType handle_version_old();
     ErrorType handle_response(const std::string& remote_side);
     void pick_addr_for_resource_tag(const std::string& resource_tag, std::string& addr) {
         std::string baikaldb_logical_room = SchemaFactory::get_instance()->get_logical_room();
@@ -133,47 +235,59 @@ public:
             }
         }
     }
-
+    void set_region_vectorized_response(int64_t region_id, std::shared_ptr<pb::StoreRes> single_response_ptr) override;
+    virtual void retry_region_task(const std::string& remote_side) override;
+    virtual void retry_or_finish_task(const std::string& remote_side) override;
 private:
-    FetcherStore* _fetcher_store;
-    RuntimeState* _state;
-    ExecNode* _store_request;
     pb::RegionInfo& _info;
-    int64_t _old_region_id = 0;
-    int64_t _region_id = 0;
-    int _retry_times = 0;
-    int _start_seq_id = 0;
-    int _current_seq_id = 0;
-    const pb::OpType _op_type;
-
-    TimeCost _total_cost;
-    TimeCost _query_time;
-    // _resource_insulate_read包括: 访问learner / 指定isolate_resource_tag 资源隔离读从
-    bool _resource_insulate_read = false; 
-    std::string _addr;
-    std::string _backup;
-    NetworkSocket* _client_conn = nullptr;
-
-    pb::StoreReq _request;
-    std::shared_ptr<pb::StoreRes> _response_ptr = std::make_shared<pb::StoreRes>();
-    bool _has_fill_request = false;
-    std::shared_ptr<pb::TraceNode> _trace_node = nullptr;
-    brpc::Controller _cntl;
-    RPCCtrl* _rpc_ctrl = nullptr;
-    std::string _store_addr;
-    static bvar::Adder<int64_t>  async_rpc_region_count;
-    static bvar::LatencyRecorder total_send_request;
-    static bvar::LatencyRecorder add_backup_send_request;
-    static bvar::LatencyRecorder has_backup_send_request;
-
-    // DBLINK外部映射表使用
-    int64_t _meta_id = -1;
 };
 
+class OnBatchRPCDone: public OnRPCDone {
+public:
+    OnBatchRPCDone(FetcherStore* fetcher_store, 
+                RuntimeState* state, 
+                ExecNode* store_request, 
+                std::vector<pb::RegionInfo*> infos,
+                int start_seq_id, 
+                int current_seq_id, 
+                pb::OpType op_type,
+                int64_t limit_single_store_concurrency_cnts,
+                bool need_check_memory);
+    OnBatchRPCDone(FetcherStore* fetcher_store, 
+                RuntimeState* state, 
+                ExecNode* store_request, 
+                std::vector<RegionInfoData> infos,
+                const std::string& store_addr,
+                int start_seq_id, 
+                int current_seq_id, 
+                pb::OpType op_type,
+                int64_t limit_single_store_concurrency_cnts,
+                bool need_check_memory);
+    virtual ~OnBatchRPCDone();
+    virtual void Run();
+    virtual ErrorType fill_request();
+    ErrorType handle_response(const std::string& remote_side, std::vector<OnSingleRPCDone*>& need_retry_tasks);
+    void pre_send_async() override {}
+    std::vector<OnBatchRPCDone*> select_addr();
+    void set_region_vectorized_response(int64_t region_id, std::shared_ptr<pb::StoreRes> single_response_ptr) override;
+    virtual void retry_region_task(const std::string& remote_side) override;
+    virtual void retry_or_finish_task(const std::string& remote_side) override;
+private:
+    std::vector<pb::RegionInfo*> _infos;
+    std::vector<RegionInfoData> _info_datas;
+    std::map<int64_t, pb::RegionInfo> _info_map;
+    int _start_seq_id = 0;
+    int _current_seq_id = 0;
+    bool _is_real_exec = false;
+    
+    int64_t _limit_single_store_concurrency_cnts;
+    static bvar::LatencyRecorder batch_rpc_region_count;
+};
 // RPCCtrl只控制rpc的异步发送和并发控制，具体rpc的成功与否结果收集由fetcher_store处理
 class RPCCtrl {
 public:
-    explicit RPCCtrl(int concurrency_per_store) : _task_concurrency_per_group(concurrency_per_store) { }
+    explicit RPCCtrl(int concurrency_per_store, bool need_check_memory)
+         : _task_concurrency_per_group(concurrency_per_store), _need_check_memory(need_check_memory) { }
     ~RPCCtrl() { }
 
     // 0：获取任务成功；1：任务完成
@@ -238,7 +352,7 @@ public:
         _done_cnt++;
         task_group->doing_cnt--;
         task_group->done_tasks.emplace_back(task);
-
+        task->clear_request();
         // 唤醒主线程
         _cv.notify_one();
     }
@@ -306,6 +420,7 @@ private:
     std::map<std::string, std::shared_ptr<TaskGroup>> _ip_task_group_map;
     bthread::ConditionVariable _cv;
     bthread::Mutex _mutex;
+    bool _need_check_memory = false;
 };
 
 // 全局二级索引降级使用，将主备请求分别发往不同集群
@@ -375,6 +490,12 @@ public:
         callids.clear();
         arrow_schema.reset();
         region_vectorized_response.clear();
+        batch_region_vectorized_response.clear();
+        shared_plan.reset();
+        db_handle_bytes = 0;
+        db_handle_rows = 0;
+        is_full_export = false;
+        received_arrow_data = false;
     }
 
     void cancel_rpc() {
@@ -407,28 +528,7 @@ public:
                            std::vector<pb::RegionInfo*> infos, 
                            int start_seq_id,
                            int current_seq_id,
-                           pb::OpType op_type) {
-        int64_t limit_single_store_concurrency_cnts = 0;
-        limit_single_store_concurrency_cnts = state->calc_single_store_concurrency(op_type);
-        std::set<std::shared_ptr<pb::TraceNode>> traces;
-
-        RPCCtrl rpc_ctrl(limit_single_store_concurrency_cnts);
-        for (auto info : infos) {
-            auto task = new OnRPCDone(this, state, store_request, info, 
-                    info->region_id(), info->region_id(), start_seq_id, current_seq_id, op_type);
-            rpc_ctrl.add_new_task(task);
-            traces.insert(task->get_trace());
-        }
-
-        rpc_ctrl.execute();
-
-        if (store_request->get_trace() != nullptr) {           
-            for (auto trace : traces) {
-                (*store_request->get_trace()->add_child_nodes()) = *trace;
-            }
-        }
-    }
-
+                           pb::OpType op_type);
     int run_not_set_state(RuntimeState* state, 
             std::map<int64_t, pb::RegionInfo>& region_infos,
             ExecNode* store_request,
@@ -461,6 +561,8 @@ public:
         state->set_num_scan_rows(state->num_scan_rows() + scan_rows.load());
         state->set_read_disk_size(state->read_disk_size() + read_disk_size.load());
         state->set_num_filter_rows(state->num_filter_rows() + filter_rows.load());
+        state->inc_db_handle_bytes(db_handle_bytes.load());
+        state->inc_db_handle_rows(db_handle_rows.load());
     }
 
     static bool rpc_need_retry(int32_t errcode) {
@@ -499,15 +601,20 @@ public:
         std::vector<std::string> candicate_peers;
         std::vector<std::string> candicate_peers2;
         std::vector<std::string> normal_peers;
+        std::vector<std::string> other_peers;
+        normal_peers.reserve(3);
+        other_peers.reserve(3);
         bool addr_in_candicate = false;
         bool addr_in_normal = false;
         for (auto& peer: peers) {
             auto status = schema_factory->get_instance_status(peer);
             DB_DEBUG("peer:%s resource_tag:%s status.resource_tag:%s, baikaldb_logical_room:%s %s, %d", peer.c_str(), resource_tag.c_str(), status.resource_tag.c_str(), baikaldb_logical_room.c_str(), status.logical_room.c_str(), status.status);
-            if (status.status != pb::NORMAL) {
+            if (status.status == pb::DEAD) {
                 continue;
             } else if (cannot_access_peers.find(peer) != cannot_access_peers.end()) {
                 continue;
+            } else if (status.status != pb::NORMAL) {
+                other_peers.emplace_back(peer);
             } else if (rolling) {
                 normal_peers.emplace_back(peer);
             } else if (!resource_tag.empty()) {
@@ -548,6 +655,8 @@ public:
                     *backup = candicate_peers[0];
                 } else if (normal_peers.size() > 0) {
                     *backup = normal_peers[0];
+                } else if (other_peers.size() > 0) {
+                    *backup = other_peers[0];
                 }
             }
             return;
@@ -559,6 +668,8 @@ public:
                     *backup = candicate_peers[1];
                 } else if (normal_peers.size() > 0) {
                     *backup = normal_peers[0];
+                } else if (other_peers.size() > 0) {
+                    *backup = other_peers[0];
                 }
             }
             return;
@@ -567,10 +678,17 @@ public:
             if (backup != nullptr) {
                 if (normal_peers.size() > 0) {
                     *backup = normal_peers[0];
+                } else if (other_peers.size() > 0) {
+                    *backup = other_peers[0];
                 }
             }
             return;
         } 
+        if (normal_peers.size() == 0) {
+            // 备选other
+            normal_peers.swap(other_peers);
+            addr_status = pb::FAULTY;
+        }
         if (normal_peers.size() > 0) {
             uint32_t i = butil::fast_rand() % normal_peers.size();
             addr = normal_peers[i];
@@ -627,6 +745,8 @@ public:
     std::atomic<int64_t> scan_rows = {0};
     std::atomic<int64_t> read_disk_size = {0};
     std::atomic<int64_t> filter_rows = {0};
+    std::atomic<int64_t> db_handle_rows = {0};
+    std::atomic<int64_t> db_handle_bytes = {0};
     bool is_cancelled = false;
     BthreadCond binlog_cond;
     NetworkSocket* client_conn = nullptr;
@@ -645,10 +765,17 @@ public:
     // vectorized
     std::shared_ptr<arrow::Schema> arrow_schema;
     std::map<int64_t, std::shared_ptr<pb::StoreRes>> region_vectorized_response;
+    std::map<int64_t, std::shared_ptr<pb::BatchRegionStoreRes> > batch_region_vectorized_response;
+    bool received_arrow_data = false;
+    // 公共plan, 减少内存
+    std::shared_ptr<pb::Plan> shared_plan;
+    bool is_full_export = false;
+    bool need_check_memory = false;
 };
 
 template<typename Repeated>
-void OnRPCDone::select_valid_peers(const std::string& resource_tag, 
+void OnRPCDone::select_valid_peers(const pb::RegionInfo& info,
+                        const std::string& resource_tag, 
                         Repeated&& peers, 
                         std::vector<std::string>& valid_peers) {
     valid_peers.clear();
@@ -660,7 +787,7 @@ void OnRPCDone::select_valid_peers(const std::string& resource_tag,
                 continue;
             }
         } 
-        if (!_fetcher_store->peer_status.can_access(_info.region_id(), peer)) {
+        if (!_fetcher_store->peer_status.can_access(info.region_id(), peer)) {
             // learner/peer异常时报警
             DB_DONE(WARNING, "has abnormal peer/learner: %s", peer.c_str());
             continue;
@@ -668,6 +795,7 @@ void OnRPCDone::select_valid_peers(const std::string& resource_tag,
         valid_peers.emplace_back(peer);
     }
 }
+
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

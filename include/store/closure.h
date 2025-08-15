@@ -52,7 +52,7 @@ struct BinlogClosure : public braft::Closure {
             }
         }
         if (cond) {
-            cond->decrease_broadcast();
+            cond->decrease_signal();
         }
         if (done) {
             done->Run();
@@ -74,6 +74,26 @@ struct OlapOPClosure : public braft::Closure {
     OlapOPClosure() : cond(nullptr) { };
     OlapOPClosure(BthreadCond* cond) : cond(cond) { };
     virtual void Run() {
+        if (!status().ok()) {
+            response->set_errcode(pb::NOT_LEADER);
+            response->set_errmsg("leader transfer");
+            DB_FATAL("leader transfer");
+        }
+
+        if (cond) {
+            cond->decrease_signal();
+        }
+        delete this;
+    }
+
+    BthreadCond* cond;
+    pb::StoreRes* response = nullptr;
+};
+
+struct ColumnOPClosure : public braft::Closure {
+    ColumnOPClosure() : cond(nullptr) { };
+    ColumnOPClosure(BthreadCond* cond) : cond(cond) { };
+    virtual void Run() override {
         if (!status().ok()) {
             response->set_errcode(pb::NOT_LEADER);
             response->set_errmsg("leader transfer");
@@ -141,6 +161,10 @@ struct SnapshotClosure : public braft::Closure {
         // 遇到部分请求报has no applied logs since last snapshot
         // 不调用on_snapshot_save导致不更新_snapshot_time_cost等信息
         if (region != nullptr) {
+            if (real_do_snapshot && status().ok()) {
+                // snapshot后，trundate掉之前的删除操作记录
+                region->vector_truncate_del();
+            }
             region->reset_snapshot_status();
         }
         cond.decrease_signal();
@@ -150,6 +174,7 @@ struct SnapshotClosure : public braft::Closure {
     BthreadCond& cond;
     Region* region = nullptr;
     int ret = 0;
+    bool real_do_snapshot = false;
     //int retry = 0;
 };
 

@@ -33,7 +33,10 @@ public:
         }
         int ret = 0;
         if (packet_node->op_type() == pb::OP_UNION) {
-            analyze_union(ctx, packet_node);
+            ret = analyze_union(ctx, packet_node);
+            if (ret < 0) {
+                return ret;
+            }
         }
         
         if (ctx->has_derived_table) {
@@ -49,7 +52,7 @@ public:
         }
         return ret;
     }
-    static void analyze_union(QueryContext* ctx, PacketNode* packet_node);
+    static int analyze_union(QueryContext* ctx, PacketNode* packet_node);
     static int analyze_derived_table(QueryContext* ctx, PacketNode* packet_node);
 };
 }

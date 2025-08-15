@@ -21,7 +21,7 @@
 
 namespace baikaldb {
 class FunctionManager : public ObjectManager<
-                        std::function<ExprValue(const std::vector<ExprValue>&)>, 
+                        ExprValue(*)(const std::vector<ExprValue>&),
                         FunctionManager> {
 public:
     int init();
@@ -35,6 +35,16 @@ private:
     static void complete_fn(pb::Function& fn, int num_args, 
             pb::PrimitiveType arg_type, pb::PrimitiveType ret_type);
 };
+
+class ToSqlFunctionManager : public ObjectManager<
+                             std::string(*)(const std::vector<std::string>&), 
+                             ToSqlFunctionManager> {
+public:
+    int init();
+private:
+    void register_operators();
+};
+
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */
