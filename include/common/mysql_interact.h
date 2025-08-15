@@ -18,6 +18,7 @@
 #ifdef BAIDU_INTERNAL
 #include "baikal_client.h"
 #else
+typedef int MYSQL;
 namespace baikal {
 namespace client {
 enum ErrorCode {
@@ -60,7 +61,6 @@ public:
         return nullptr;
     }
 };
-typedef int MYSQL;
 class MysqlShortConnection {
 public:
     int execute(const std::string& sql, ResultSet* result) {
