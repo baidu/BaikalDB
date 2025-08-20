@@ -18,6 +18,14 @@
 #include "meta_util.h"
 #include "region_manager.h"
 
+#ifdef BAIDU_INTERNAL
+namespace raft {
+#else
+namespace braft {
+#endif
+DECLARE_int32(raft_election_heartbeat_factor);
+}
+
 namespace baikaldb {
 DECLARE_string(meta_server_bns);
 DECLARE_int32(meta_replica_number);
@@ -328,5 +336,22 @@ int CommonStateMachine::send_set_peer_request(bool remove_peer, const std::strin
     return ret;
 }
 
+void CommonStateMachine::list_normal_peers(std::set<std::string>& peers) {
+        braft::NodeStatus status;
+        _node.get_status(&status);
+        for (auto iter : status.stable_followers) {
+            std::string peer_id = butil::endpoint2str(iter.first.addr).c_str();
+            if (iter.second.consecutive_error_times > braft::FLAGS_raft_election_heartbeat_factor) {
+                DB_WARNING("node:%s_%s peer:%s is faulty",
+                    _node.node_id().group_id.c_str(),
+                    _node.node_id().peer_id.to_string().c_str(),
+                    iter.first.to_string().c_str());
+                continue;
+            }
+            peers.insert(peer_id);
+        }
+        std::string leader_id = butil::endpoint2str(status.leader_id.addr).c_str();
+        peers.insert(leader_id);
+    }
 }//namespace
 /* vim: set expandtab ts=4 sw=4 sts=4 tw=100: */

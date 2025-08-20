@@ -120,7 +120,7 @@ void AddPeerClosure::Run() {
     if (done) {
         done->Run();
     }
-    cond.decrease_broadcast();
+    cond.decrease_signal();
     delete this;
 }
 

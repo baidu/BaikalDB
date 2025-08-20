@@ -49,15 +49,24 @@ public:
         return _limit;
     }
     // limit直接slice处理, 不需要单独的acero node
-    virtual bool can_use_arrow_vector() {
+    virtual bool can_use_arrow_vector(RuntimeState* state) {
         for (auto& c : _children) {
-            if (!c->can_use_arrow_vector()) {
+            if (!c->can_use_arrow_vector(state)) {
                 return false;
             }
         }
         return true;
     }
     virtual int build_arrow_declaration(RuntimeState* state);
+
+    // TODO 优化
+    virtual int set_partition_property_and_schema(QueryContext* ctx) {
+        if (0 != ExecNode::set_partition_property_and_schema(ctx)) {
+            return -1;
+        }
+        _partition_property.set_single_partition();
+        return 0;
+    }
 private:
     int64_t _offset;
     int64_t _num_rows_skipped;

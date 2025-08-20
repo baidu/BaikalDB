@@ -17,15 +17,30 @@
 #include <streambuf>
 #include <string>
 #include <vector>
+#include "arrow/buffer.h"
+#include "arrow/io/file.h"
+#include "arrow/io/interfaces.h"
+#include "arrow/memory_pool.h"
 #ifdef BAIDU_INTERNAL
 #include "baidu/inf/afs-api/client/afs_filesystem.h"
 #include "baidu/inf/afs-api/common/afs_common.h"
+#include "baidu/inf/afs-api/client/afs_impl.h"
+#include <baidu/rpc/channel.h>
+#include <baidu/rpc/server.h>
+#include <baidu/rpc/controller.h>
+#else
+#include <brpc/channel.h>
+#include <brpc/server.h>
+#include <brpc/controller.h>
 #endif
 #include "common.h"
 #include <bthread/condition_variable.h>
 #include <bthread/mutex.h>
+#include "lru_cache.h"
 
 namespace baikaldb {
+DECLARE_int64(compaction_sst_cache_max_block);
+
 int get_size_by_external_file_name(uint64_t* size, uint64_t* lines, const std::string& external_file);
 struct AfsStatis {
     explicit AfsStatis(const std::string& cluster_name) : afs_cluster(cluster_name), 
@@ -58,6 +73,10 @@ public:
 
     virtual int64_t read(char* buf, uint32_t count, uint32_t offset, bool* eof) = 0;
 
+    virtual int64_t skip(uint32_t n, bool* eof) {
+        DB_FATAL("ExtFileReader::skip not implemented");
+        return -1;
+    }
     // Close the descriptor of this file adaptor
     virtual bool close() { return true; }
 
@@ -95,18 +114,50 @@ private:
     DISALLOW_COPY_AND_ASSIGN(ExtFileWriter);
 };
 
+class CompactionSstCache {
+public:
+    static CompactionSstCache* get_instance() {
+        static CompactionSstCache _instance;
+        return &_instance;
+    }
+    virtual ~CompactionSstCache() {}
+
+    void init(int64_t len_threshold) {
+        _cache.init(len_threshold);
+    }
+
+    std::string get_info() {
+        return _cache.get_info();
+    }
+
+    void add(const std::string& key, const std::string& value) {
+        _cache.add(key, value);
+    }
+
+    int find(const std::string& key, std::string* value) {
+        return _cache.find(key, value);
+    }
+
+    size_t size() {
+        return _cache.size();
+    }
+private:
+    CompactionSstCache() {}
+    Cache<std::string, std::string> _cache;
+};
+
 #ifdef BAIDU_INTERNAL
 struct AfsRWInfo {
     std::string  uri;
     std::string  absolute_path;
     afs::Reader* reader = nullptr;
     afs::Writer* writer = nullptr;
-    std::shared_ptr<afs::AfsFileSystem> fs = nullptr;
+    std::shared_ptr<afs::AFSImpl> fs = nullptr;
     std::shared_ptr<AfsStatis> statis = nullptr;
     uint64_t file_size = 0; // 读文件使用
 };
 
-class AfsFileReader : public ExtFileReader {
+class AfsExtFileReader : public ExtFileReader {
 class ReadCtrl {
 public:
     ReadCtrl(char* buf, uint32_t count, uint32_t offset, uint64_t file_size, bool* eof, uint32_t readers_cnt) : 
@@ -136,7 +187,7 @@ private:
 };
 
 struct ReadInfo {
-    ReadInfo(uint32_t count, uint32_t offset, const std::shared_ptr<ReadCtrl>& ctrl, AfsRWInfo* rw_info, AfsFileReader* reader) : 
+    ReadInfo(uint32_t count, uint32_t offset, const std::shared_ptr<ReadCtrl>& ctrl, AfsRWInfo* rw_info, AfsExtFileReader* reader) : 
         count(count), offset(offset), ctrl(ctrl), rw_info(rw_info), reader(reader) {
         buf = new char[count];
     }
@@ -152,11 +203,11 @@ struct ReadInfo {
     uint32_t offset = 0;
     std::shared_ptr<ReadCtrl> ctrl = nullptr;
     AfsRWInfo* rw_info = nullptr;
-    AfsFileReader* reader = nullptr;
+    AfsExtFileReader* reader = nullptr;
 };
 
 public:
-    explicit AfsFileReader(const std::vector<AfsRWInfo>& infos) : _afs_rw_infos(infos) {
+    explicit AfsExtFileReader(const std::vector<AfsRWInfo>& infos) : _afs_rw_infos(infos) {
         for (auto& info : _afs_rw_infos) {
             if (info.statis == nullptr) {
                 info.statis = std::make_shared<AfsStatis>("common");
@@ -165,12 +216,12 @@ public:
         }
     }
 
-    explicit AfsFileReader(int infos_size) {
+    explicit AfsExtFileReader(int infos_size) {
         // 提前分配空间，防止通过pushback添加触发扩容导致 get_avaliable_reader_infos 返回的指针失效
         _afs_rw_infos.reserve(infos_size);
     }
 
-    virtual ~AfsFileReader() {
+    virtual ~AfsExtFileReader() {
         close();
         for (auto& info : _afs_rw_infos) {
             info.statis->reader_open_count << -1;
@@ -193,16 +244,16 @@ private:
     std::mutex _mtx;
 };
 
-class AfsFileWriter : public ExtFileWriter {
+class AfsExtFileWriter : public ExtFileWriter {
 public:
-    explicit AfsFileWriter(const std::vector<AfsRWInfo>& infos) : _afs_rw_infos(infos) {
+    explicit AfsExtFileWriter(const std::vector<AfsRWInfo>& infos) : _afs_rw_infos(infos) {
         for (auto& info : _afs_rw_infos) {
             if (info.statis == nullptr) {
                 info.statis = std::make_shared<AfsStatis>("common");
             }
         }
     }
-    virtual ~AfsFileWriter() {
+    virtual ~AfsExtFileWriter() {
         close();
     }
 
@@ -217,7 +268,83 @@ public:
 private:
     std::vector<AfsRWInfo> _afs_rw_infos;
 };
+
 #endif
+
+class CompactionExtFileReader : public ExtFileReader {
+public:
+    explicit CompactionExtFileReader(const std::string& file_name, const std::string& server_address, const std::string& remote_compaction_id)
+        : _file_name(file_name), 
+        _server_address(server_address),
+        _remote_compaction_id(remote_compaction_id) {
+        brpc::ChannelOptions channel_opt;
+        channel_opt.timeout_ms = FLAGS_remote_compaction_request_file_timeout;
+        channel_opt.connect_timeout_ms = FLAGS_remote_compaction_connect_timeout;
+
+        if (_channel.Init(server_address.c_str(), &channel_opt) != 0) {
+            DB_FATAL("Failed to initialize channel to %s", server_address.c_str());
+            _is_open = false;
+        } else {
+            _is_open = true;
+        }
+        cache = false;
+    }
+    virtual ~CompactionExtFileReader() {
+        // DB_WARNING("【COMPACTION_DEBUG】close remote_compaction_id: %s, file_name %s", 
+        //         _remote_compaction_id.c_str(), _file_name.c_str());
+        if (_is_open) {
+            close();
+        }
+    }
+    virtual int64_t read(char* buf, uint32_t count, uint32_t offset, bool* eof) override;
+    virtual int64_t skip(uint32_t n, bool* eof) override;
+    virtual bool close() override;
+    std::string file_name() { return _file_name; }
+private:
+    std::string _file_name;
+    brpc::Channel _channel;
+    bool _is_open;
+    std::string _server_address;
+    std::string _remote_compaction_id; // TODO 新建赋值
+    int64_t total_time = 0;
+    bool cache;
+};
+
+class CompactionExtFileWriter : public ExtFileWriter {
+public:
+    explicit CompactionExtFileWriter(const std::string& file_name, const std::string& server_address, const std::string& remote_compaction_id)
+        : _file_name(file_name), 
+        _server_address(server_address),
+        _remote_compaction_id(remote_compaction_id),
+        _offset(0) {
+        brpc::ChannelOptions channel_opt;
+        channel_opt.timeout_ms = FLAGS_remote_compaction_request_file_timeout;
+        channel_opt.connect_timeout_ms = FLAGS_remote_compaction_connect_timeout;
+
+        if (_channel.Init(server_address.c_str(), &channel_opt) != 0) {
+            DB_FATAL("Failed to initialize channel to %s", server_address.c_str());
+            _is_open = false;
+        } else {
+            _is_open = true;
+        }
+    }
+    virtual ~CompactionExtFileWriter() {
+        if (_is_open) {
+            close();
+        }
+    }
+    virtual int64_t append(const char* buf, uint32_t count) override;
+    virtual int64_t tell() override;
+    virtual bool sync() override;
+    virtual bool close() override;
+private:
+    std::string _file_name;
+    brpc::Channel _channel;
+    bool _is_open;
+    std::string _server_address;
+    std::string _remote_compaction_id;
+    int64_t _offset;
+};
 
 class ExtFileSystem {
 public:
@@ -263,7 +390,7 @@ private:
 };
 
 #ifdef BAIDU_INTERNAL
-class AfsFileSystem : public ExtFileSystem {
+class AfsExtFileSystem : public ExtFileSystem {
 public:
 struct AfsUgi {
     std::string uri;
@@ -271,7 +398,7 @@ struct AfsUgi {
     std::string password;
     std::string cluster_name;
     std::string root_path; // "/user/baikal"
-    std::shared_ptr<afs::AfsFileSystem> afs = nullptr;
+    std::shared_ptr<afs::AFSImpl> afs = nullptr;
 };
 #ifdef ENABLE_OPEN_AFS_ASYNC
 class AfsFileCtrl {
@@ -294,13 +421,13 @@ private:
 
 struct OpenReaderInfo {
     std::shared_ptr<AfsFileCtrl> reader_ctrl;
-    std::shared_ptr<AfsFileReader> reader;
+    std::shared_ptr<AfsExtFileReader> reader;
     std::shared_ptr<AfsRWInfo> afs_rw_info;
     uint64_t stat_cost = 0;
     uint64_t ext_file_size = 0;
     TimeCost cost;
 
-    OpenReaderInfo(std::shared_ptr<AfsFileReader> reader,
+    OpenReaderInfo(std::shared_ptr<AfsExtFileReader> reader,
             const std::shared_ptr<AfsFileCtrl>& reader_ctrl, 
             std::shared_ptr<AfsRWInfo> afs_rw_info, uint64_t ext_file_size) 
                     : reader(reader), reader_ctrl(reader_ctrl), 
@@ -310,8 +437,8 @@ struct OpenReaderInfo {
 
     static void open_reader_callback(int64_t ret, void* ptr);
 #endif
-    explicit AfsFileSystem(const std::vector<AfsUgi>& ugi_infos) : _ugi_infos(ugi_infos) {}
-    virtual ~AfsFileSystem();
+    explicit AfsExtFileSystem(const std::vector<AfsUgi>& ugi_infos) : _ugi_infos(ugi_infos) {}
+    virtual ~AfsExtFileSystem();
 
     virtual int init() override;
 
@@ -325,7 +452,7 @@ struct OpenReaderInfo {
     virtual int readdir(const std::string& full_name, std::set<std::string>& sub_files) override;
 
 private:
-    std::shared_ptr<afs::AfsFileSystem> init(const std::string& uri, const std::string& user, 
+    std::shared_ptr<afs::AFSImpl> init(const std::string& uri, const std::string& user, 
                                             const std::string& password, const std::string& conf_file);
     std::vector<AfsRWInfo> get_rw_infos_by_full_name(const std::string& full_name);
     std::vector<AfsRWInfo> get_rw_infos(const std::string& user_define_path);
@@ -335,21 +462,67 @@ private:
     std::vector<AfsUgi> _ugi_infos;
 };
 
-int get_afs_infos(std::vector<AfsFileSystem::AfsUgi>& ugi_infos);
+int get_afs_infos(std::vector<AfsExtFileSystem::AfsUgi>& ugi_infos);
 
 class ExtFileSystemGC {
 public:
-    static int external_filesystem_gc(bool* shutdown, const std::string& hostname);
+    static int external_filesystem_gc();
     static int external_filesystem_gc_do();
     static int get_all_partitions_from_store(std::map<int64_t, std::map<std::string, std::set<std::string>>>& table_id_name_partitions);
 private:
     static int table_gc(std::shared_ptr<ExtFileSystem> ext_fs, const std::map<int64_t, std::map<std::string, std::set<std::string>>>& table_id_name_partitions_map);
     static int partition_gc(std::shared_ptr<ExtFileSystem> ext_fs, const std::string& database_name, const std::string& table_name_in_store, 
             int64_t table_id, const std::set<std::string>& partitions_in_store, const std::string& start_str);
+    static int column_partition_gc(std::shared_ptr<ExtFileSystem> ext_fs, const std::string& database_name, const std::string& table_name_in_store, 
+            int64_t table_id, const std::string& start_str);
     static bool need_delete_partition(const std::string& partition, const std::string& start_str);
     static int check_partition(const std::string& partition, std::string* start_date, std::string* end_date);
 };
-
 #endif
+
+class CompactionExtFileSystem : public ExtFileSystem {
+public:
+    explicit CompactionExtFileSystem(const std::string& address, 
+                    const std::string& remote_compaction_id) 
+        : _address(address),
+        _remote_compaction_id(remote_compaction_id) {
+        brpc::ChannelOptions channel_opt;
+        channel_opt.timeout_ms = FLAGS_remote_compaction_request_file_timeout;
+        channel_opt.connect_timeout_ms = FLAGS_remote_compaction_connect_timeout;
+
+        if (_channel.Init(_address.c_str(), &channel_opt) != 0) {
+            DB_FATAL("Failed to initialize channel to %s", _address.c_str());
+            _is_open = false;
+        } else {
+            _is_open = true;
+        }
+    }
+    virtual ~CompactionExtFileSystem() {}
+
+    virtual int init() override;
+    virtual int open_reader(const std::string& full_name, std::shared_ptr<ExtFileReader>* reader) override;
+    virtual int open_writer(const std::string& full_name, std::unique_ptr<ExtFileWriter>* writer) override;
+    virtual int delete_path(const std::string& full_name, bool recursive) {
+        DB_FATAL("CompactionExtFileSystem not implement delete_path, name: %s", full_name.c_str());
+        return -1;
+    }
+    virtual int create(const std::string& full_name) override;
+    virtual int path_exists(const std::string& full_name) override;
+    virtual int readdir(const std::string& full_name, std::set<std::string>& file_list) override;
+    int get_file_info_list(std::vector<pb::CompactionFileInfo>& file_info_list);
+    int rename_file(const std::string& src_file_name, const std::string& dst_file_name);
+    std::string make_full_name(const std::string& cluster, bool force, const std::string& user_define_path);
+    int external_send_request(pb::CompactionOpType op_type, 
+                                            const std::string& full_name, 
+                                            bool recursive,
+                                            pb::CompactionFileResponse& response);
+    bool is_sst(const std::string& full_name);
+    int delete_remote_copy_file_path();
+private:
+    std::string _address;
+    brpc::Channel _channel;
+    bool _is_open;
+    std::string _remote_compaction_id;
+};
 
 }  // namespace baikaldb

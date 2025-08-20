@@ -31,6 +31,7 @@ public:
     void close() {
         _txn_map.clear();
         _txn_count = 0;
+        _has_write_txn_count = 0;
     }
 
     TransactionPool() : _num_prepared_txn(0), _txn_count(0) {}
@@ -87,6 +88,14 @@ public:
         return _txn_count.load();
     }
 
+    void increase_has_write() {
+        ++_has_write_txn_count;
+    }
+
+    void decrease_has_write() {
+        --_has_write_txn_count;
+    }
+
     bool use_ttl() const {
         return _use_ttl;
     }
@@ -98,6 +107,10 @@ public:
     void update_ttl_info(bool use_ttl, int64_t online_ttl_base_expire_time_us) {
         _use_ttl = use_ttl;
         _online_ttl_base_expire_time_us = online_ttl_base_expire_time_us;
+    }
+
+    void update_latest_has_write_txn_ts() {
+        _latest_has_write_txn_ts = butil::gettimeofday_us();
     }
 
     bool exec_1pc_out_fsm();
@@ -136,7 +149,7 @@ private:
 
 private:
     int64_t _region_id = 0;
-    int64_t _latest_active_txn_ts = 0;
+    int64_t _latest_has_write_txn_ts = 0;
     bool _use_ttl = false;
     int64_t _online_ttl_base_expire_time_us = 0;
 
@@ -147,7 +160,8 @@ private:
     TimeCost _clean_finished_txn_cost;
 
     BthreadCond  _num_prepared_txn;  // total number of prepared transactions
-    std::atomic<int32_t> _txn_count;
+    std::atomic<int32_t> _txn_count {0};
+    std::atomic<int32_t> _has_write_txn_count {0};
     MetaWriter*          _meta_writer = nullptr;
 };
 }

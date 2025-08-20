@@ -308,6 +308,10 @@ inline void glog_error_writelog(const char* fmt, ...) {
         DB_FATAL("log_id: %lu, region_id: %ld, table_id: %ld," _fmt_, \
                 state->log_id(), state->region_id(), state->table_id(), ##args); \
     } while (0);
+#define DB_COLUMN_FATAL(_fmt_, args...) \
+    do {\
+        DB_FATAL("[COLUMN_FATAL]" _fmt_, ##args); \
+    } while (0);
 #endif //BAIDU_INTERNAL
 
 inline int init_log(const char* bin_name) {

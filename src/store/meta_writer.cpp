@@ -60,6 +60,16 @@ const std::string MetaWriter::REGION_OFFLINE_BINLOG_IDENTIFY(1, 0x0F);
 const std::string MetaWriter::WATT_STATS_VERSION_IDENTIFY(1, 0x10);
 //用于rollup做基准缓存业务数据位置
 const std::string MetaWriter::ROLLUP_REGION_INIT_INDEX_INDENTIFY(1, 0x11);
+// 用于记录watt stats 跳过的raft index
+const std::string MetaWriter::SKIP_WATT_STATS_VERSION_IDENTIFY(1, 0x12);
+//key: META_IDENIFY + region_id + identify
+// 用于列存本地文件管理
+const std::string MetaWriter::COLUMN_HOT_FILE_INDENTIFY(1, 0x13);
+//key: META_IDENIFY + region_id + identify
+// 用于列存AFS文件管理
+const std::string MetaWriter::COLUMN_COLD_FILE_INDENTIFY(1, 0x14);
+// 用于加速 show binlog_info detail binlog_table 获取data_cf_oldest_datetime
+const std::string MetaWriter::BINLOG_DATA_CF_OLDEST_IDENTIFY(1, 0x15);
 
 int MetaWriter::init_meta_info(const pb::RegionInfo& region_info) {
     std::vector<std::string> keys;
@@ -343,6 +353,7 @@ int MetaWriter::clear_all_meta_info(int64_t drop_region_id) {
     batch.Delete(_meta_cf, num_table_lines_key(drop_region_id));
     batch.Delete(_meta_cf, doing_snapshot_key(drop_region_id));
     batch.Delete(_meta_cf, learner_key(drop_region_id));
+    batch.Delete(_meta_cf, column_hot_file_key(drop_region_id));
     auto status = _rocksdb->write(options, &batch);
     if (!status.ok()) {
         DB_FATAL("drop region fail, error: code=%d, msg=%s, region_id: %ld", 
@@ -880,6 +891,14 @@ std::string MetaWriter::binlog_oldest_ts_key(int64_t region_id) const {
     return key.data();
 }
 
+std::string MetaWriter::binlog_data_cf_oldest_ts_key(int64_t region_id) const {
+    MutTableKey key;
+    key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);
+    key.append_i64(region_id);
+    key.append_char(MetaWriter::BINLOG_DATA_CF_OLDEST_IDENTIFY.c_str(), 1);
+    return key.data();
+}
+
 std::string MetaWriter::learner_key(int64_t region_id) const {
     MutTableKey key;
     key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);
@@ -893,6 +912,20 @@ std::string MetaWriter::olap_key(int64_t region_id) const {
     key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);
     key.append_i64(region_id);
     key.append_char(MetaWriter::OLAP_REGION_IDENTIFY.c_str(), 1);
+    return key.data();
+}
+std::string MetaWriter::column_hot_file_key(int64_t region_id) const {
+    MutTableKey key;
+    key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);
+    key.append_i64(region_id);
+    key.append_char(MetaWriter::COLUMN_HOT_FILE_INDENTIFY.c_str(), 1);
+    return key.data();
+}
+std::string MetaWriter::column_cold_file_key(int64_t region_id) const {
+    MutTableKey key;
+    key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);
+    key.append_i64(region_id);
+    key.append_char(MetaWriter::COLUMN_COLD_FILE_INDENTIFY.c_str(), 1);
     return key.data();
 }
 
@@ -926,6 +959,48 @@ int MetaWriter::put_watt_stats_version(int64_t region_id, uint64_t watt_stats_ve
 int MetaWriter::clear_watt_stats_version(int64_t region_id) {
     std::string start_key = watt_stats_version_key(region_id, 0);
     std::string end_key = watt_stats_version_key(region_id, UINT64_MAX);
+    auto status = _rocksdb->remove_range(MetaWriter::write_options, _meta_cf,
+            start_key, end_key, false);
+    if (!status.ok()) {
+        DB_WARNING("remove_range error: code=%d, msg=%s, region_id: %ld",
+            status.code(), status.ToString().c_str(), region_id);
+        return -1;
+    }
+    return 0;
+}
+
+// 用于记录watt_stats跳过的raft_index
+std::string MetaWriter::skip_watt_stats_version_key(int64_t region_id, uint64_t raft_index) const {
+    MutTableKey key;
+    key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);
+    key.append_i64(region_id);
+    key.append_char(MetaWriter::SKIP_WATT_STATS_VERSION_IDENTIFY.c_str(), 1);
+    key.append_u64(raft_index);
+    return key.data();
+}
+
+rocksdb::Status MetaWriter::get_skip_watt_stats_version(int64_t region_id, uint64_t raft_index) const {
+    std::string value;
+    rocksdb::ReadOptions options;
+    return _rocksdb->get(options, _meta_cf, rocksdb::Slice(skip_watt_stats_version_key(region_id, raft_index)), &value);
+}
+
+int MetaWriter::put_skip_watt_stats_version(int64_t region_id, uint64_t raft_index) {
+    auto status = _rocksdb->put(MetaWriter::write_options, _meta_cf,
+                rocksdb::Slice(skip_watt_stats_version_key(region_id, raft_index)),
+                rocksdb::Slice(""));
+    if (!status.ok()) {
+        DB_FATAL("write skip watt stats version fail, err_msg: %s, region_id: %ld, raft_index: %lu",
+                    status.ToString().c_str(), region_id, raft_index);
+        return -1;
+    }
+    return 0;
+    // return txn->put_meta_info(skip_watt_stats_version_key(region_id, raft_index), "");
+}
+
+int MetaWriter::clear_skip_watt_stats_version(int64_t region_id) {
+    std::string start_key = skip_watt_stats_version_key(region_id, 0);
+    std::string end_key = skip_watt_stats_version_key(region_id, UINT64_MAX);
     auto status = _rocksdb->remove_range(MetaWriter::write_options, _meta_cf,
             start_key, end_key, false);
     if (!status.ok()) {
@@ -1007,6 +1082,57 @@ int MetaWriter::read_olap_info(int64_t region_id, pb::OlapRegionInfo& olap_info)
     }
 }
 
+int MetaWriter::write_column_file_info(int64_t region_id, const pb::RegionColumnFiles& file_info) {
+    std::string key = column_hot_file_key(region_id);
+    std::string value;
+    if (!file_info.SerializeToString(&value)) {
+        DB_FATAL("file_info: %s serialize to string fail", file_info.ShortDebugString().c_str()); 
+        value.clear();
+        return -1;
+    }
+
+    auto status = _rocksdb->put(MetaWriter::write_options, _meta_cf,
+                rocksdb::Slice(key), rocksdb::Slice(value));
+    if (!status.ok()) {
+        DB_FATAL("write olap info fail, err_msg: %s, info: %s",
+                status.ToString().c_str(), file_info.ShortDebugString().c_str());
+        return -1;
+    }
+    return 0;
+}
+
+int MetaWriter::read_column_file_info(int64_t region_id, pb::RegionColumnFiles& file_info) {
+    std::string key = column_hot_file_key(region_id);
+    std::string value;
+    rocksdb::ReadOptions options;
+    auto status = _rocksdb->get(options, _meta_cf, rocksdb::Slice(key), &value);
+    if (status.ok()) {
+        if (!file_info.ParseFromString(value)) {
+            DB_FATAL("parse from pb fail when read column file info, value:%s", value.c_str());
+            return -1;
+        }
+        return 0;
+    } else if (status.IsNotFound()) {
+        return -2;
+    } else {
+        DB_FATAL("Error while read column file info, Error %s", status.ToString().c_str());
+        return -1;
+    }
+}
+
+int MetaWriter::clear_column_file_info(int64_t region_id) {
+    rocksdb::WriteBatch batch;
+    rocksdb::WriteOptions options;
+    batch.Delete(_meta_cf, column_hot_file_key(region_id));
+    auto status = _rocksdb->write(options, &batch);
+    if (!status.ok()) {
+        DB_FATAL("drop column file info fail, error msg=%s, region_id: %ld", 
+            status.ToString().c_str(), region_id);
+        return -1;
+    }
+    return 0;
+}
+
 int MetaWriter::write_binlog_oldest_ts(int64_t region_id, int64_t ts) {
     MutTableKey value;
     value.append_i64(ts);
@@ -1033,6 +1159,31 @@ int64_t MetaWriter::read_binlog_oldest_ts(int64_t region_id) {
     return TableKey(rocksdb::Slice(value)).extract_i64(0);
 }
 
+int MetaWriter::write_binlog_data_cf_oldest_ts(int64_t region_id, int64_t ts) {
+    MutTableKey value;
+    value.append_i64(ts);
+    auto status = _rocksdb->put(MetaWriter::write_options, _meta_cf,
+                                rocksdb::Slice(binlog_data_cf_oldest_ts_key(region_id)),
+                                rocksdb::Slice(value.data()));
+    if (!status.ok()) {
+        DB_FATAL("write binlog data cf oldest ts fail, err_msg: %s, region_id: %ld, ts: %ld",
+                 status.ToString().c_str(), region_id, ts);
+        return -1;
+    }
+    return 0;
+}
+
+int64_t MetaWriter::read_binlog_data_cf_oldest_ts(int64_t region_id) {
+    std::string value;
+    rocksdb::ReadOptions options;
+    auto status = _rocksdb->get(options, _meta_cf, rocksdb::Slice(binlog_data_cf_oldest_ts_key(region_id)), &value);
+    if (!status.ok()) {
+        DB_WARNING("no binlog data cf oldest ts found, status: %s, region_id: %ld",
+                 status.ToString().c_str(), region_id);
+        return -1;
+    }
+    return TableKey(rocksdb::Slice(value)).extract_i64(0);
+}
 
 int MetaWriter::write_region_offline_binlog_info(int64_t region_id, const pb::RegionOfflineBinlogInfo& offline_binlog_info) {
     std::string string_offline_binlog_info;

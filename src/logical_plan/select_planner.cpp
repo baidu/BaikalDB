@@ -44,12 +44,18 @@ int SelectPlanner::plan() {
         if (0 != parse_select_fields()) {
             return -1;        
         }
-        if (_agg_funcs.empty() && _distinct_agg_funcs.empty() && _group_exprs.empty()) {
+        if (_agg_funcs.empty() && _distinct_agg_funcs.empty() && _group_exprs.empty() && _window_nodes.empty()) {
             create_packet_node(pb::OP_SELECT);
             create_dual_scan_node();
         } else {
             create_agg_tuple_desc();
+            if (0 != create_window_tuple_desc()) {
+               return -1;
+            }
             create_packet_node(pb::OP_SELECT);
+            if (0 != create_window_and_sort_nodes()) {
+                return -1;
+            }
             // create_agg_node
             if (0 != create_agg_node()) {
                 return -1;
@@ -117,12 +123,18 @@ int SelectPlanner::plan() {
             return -1;
         }
     }
+    if (0 != merge_window_node()) {
+        return -1;
+    }
 
     create_scan_tuple_descs();
     create_agg_tuple_desc();
     create_order_by_tuple_desc();
     //print_debug_log();
     //_create_group_tuple_desc();
+    if (0 != create_window_tuple_desc()) {
+        return -1;
+    }
 
     if (!_ctx->is_full_export && is_full_export()) {
         _ctx->is_full_export = true;
@@ -137,6 +149,10 @@ int SelectPlanner::plan() {
     }
     // create_sort_node
     if (0 != create_sort_node()) {
+        return -1;
+    }
+    // create_window_and_sort_nodes
+    if (0 != create_window_and_sort_nodes()) {
         return -1;
     }
     // create_having_filter_node
@@ -166,6 +182,10 @@ bool SelectPlanner::is_full_export() {
         // Union子语句不支持全量导出
         return false;
     }
+    // 包含DBLink Mysql的表不支持全量导出
+    if (_ctx->has_dblink_mysql) {
+        return false;
+    }
     //代价信息统计时不走full export流程
     if (_ctx->explain_type != EXPLAIN_NULL) {
         return false;
@@ -174,6 +194,9 @@ bool SelectPlanner::is_full_export() {
         return false;
     }
     if (_ctx->debug_region_id != -1) {
+        return false;
+    }
+    if (_ctx->has_window_func) {
         return false;
     }
     if (_ctx->has_derived_table || _ctx->has_information_schema) {
@@ -440,10 +463,11 @@ int SelectPlanner::subquery_rewrite() {
     if (_select_exprs.size() != 1) {
         return 0;
     }
+    
     pb::Expr expr = _select_exprs[0];
-    pb::Expr agg_expr;
+    pb::Expr rewrite_expr;
     // create agg expr node
-    pb::ExprNode* node = agg_expr.add_nodes();
+    pb::ExprNode* node = rewrite_expr.add_nodes();
     node->set_node_type(pb::AGG_EXPR);
     node->set_col_type(pb::INVALID_TYPE);
     pb::Function* func = node->mutable_fn();
@@ -451,22 +475,42 @@ int SelectPlanner::subquery_rewrite() {
     func->set_has_var_args(false);
     node->set_num_children(1);
     for (auto& old_node : expr.nodes()) {
-        agg_expr.add_nodes()->CopyFrom(old_node);
+        rewrite_expr.add_nodes()->CopyFrom(old_node);
     }
     pb::DeriveExprNode* derive_node = node->mutable_derive_node();
     std::vector<pb::SlotDescriptor> slots;
+
+    // 如果子查询不包含WindowNode或AggNode，则在子查询最上层添加MIN/MAX(slot)聚合函数；
+    // 如果子查询包含WindowNode或AggNode，则在子查询最上层添加MIN/MAX(slot) OVER ()窗口函数；
+    // TODO - 后续都统一成使用WindowNode的方式，当前不直接改成WindowNode，因为WindowNode无法下推到Store执行
+    bool use_window_node = false;
+    if (_ctx->has_window_func ||
+            (_select->select_opt != nullptr && _select->select_opt->distinct == true) ||
+            (!_agg_funcs.empty() || !_distinct_agg_funcs.empty() || !_group_exprs.empty())) {
+        use_window_node = true;
+    }
+    if (use_window_node) {
+        node->set_node_type(pb::WINDOW_EXPR);
+    }
+    bool new_slot = true;
     // > >=
     if (_ctx->expr_params.func_type == parser::FT_GE
         || _ctx->expr_params.func_type == parser::FT_GT) {
         if (_ctx->expr_params.cmp_type == parser::CMP_ALL) {
             // t1.id > all (select t2.id from t2) -> t1.id > (select max(t2.id) from t2)
-            bool new_slot = true;
-            slots = get_agg_func_slot(_select_names[0], "max", new_slot);
+            if (_ctx->has_window_func) {
+                slots = get_window_func_slot(_select_names[0]);
+            } else {
+                slots = get_agg_func_slot(_select_names[0], "max", new_slot);
+            }
             func->set_name("max");
         } else {
             // t1.id > any (select t2.id from t2) -> t1.id > (select min(t2.id) from t2)
-            bool new_slot = true;
-            slots = get_agg_func_slot(_select_names[0], "min", new_slot);
+            if (_ctx->has_window_func) {
+                slots = get_window_func_slot(_select_names[0]);
+            } else {
+                slots = get_agg_func_slot(_select_names[0], "min", new_slot);
+            }
             func->set_name("min");
         }
     // < <=
@@ -474,13 +518,19 @@ int SelectPlanner::subquery_rewrite() {
         || _ctx->expr_params.func_type == parser::FT_LT) {
         if (_ctx->expr_params.cmp_type == parser::CMP_ALL) {
             // t1.id < all (select t2.id from t2) -> t1.id < (select min(t2.id) from t2)
-            bool new_slot = true;
-            slots = get_agg_func_slot(_select_names[0], "min", new_slot);
+            if (_ctx->has_window_func) {
+                slots = get_window_func_slot(_select_names[0]);
+            } else {
+                slots = get_agg_func_slot(_select_names[0], "min", new_slot);
+            }
             func->set_name("min");
         } else {
             // t1.id < any (select t2.id from t2) -> t1.id < (select max(t2.id) from t2)
-            bool new_slot = true;
-            slots = get_agg_func_slot(_select_names[0], "max", new_slot);
+            if (_ctx->has_window_func) {
+                slots = get_window_func_slot(_select_names[0]);
+            } else {
+                slots = get_agg_func_slot(_select_names[0], "max", new_slot);
+            }
             func->set_name("max");
         }
     // =
@@ -495,8 +545,14 @@ int SelectPlanner::subquery_rewrite() {
     derive_node->set_tuple_id(slots[0].tuple_id());
     derive_node->set_slot_id(slots[0].slot_id());
     derive_node->set_intermediate_slot_id(slots[0].slot_id());
-    _select_exprs[0] = agg_expr;
-    _agg_funcs.emplace_back(agg_expr);
+    _select_exprs[0] = rewrite_expr;
+    if (use_window_node) {
+        pb::WindowNode window_node;
+        window_node.add_func_exprs()->CopyFrom(rewrite_expr);
+        _subquery_rewrite_window_nodes.emplace_back(std::move(window_node));
+    } else {
+        _agg_funcs.emplace_back(rewrite_expr);
+    }
     return 0;
 }
 
@@ -542,6 +598,11 @@ int SelectPlanner::create_agg_node() {
             //如果没有agg和group by， 将select列加入到group by中
             for (uint32_t idx = 0; idx < _select_exprs.size(); ++idx) {
                 _group_exprs.push_back(_select_exprs[idx]);
+                // 增加ref_count
+                if (inc_slot_ref_cnt(_select_exprs[idx]) != 0) {
+                    DB_WARNING("Fail to inc_slot_ref_cnt, expr: %s", _select_exprs[idx].ShortDebugString().c_str());
+                    return -1;
+                }
             }
         } else if(!_group_exprs.empty()) {
             DB_WARNING("distinct query doesnot support group by");
@@ -637,6 +698,63 @@ int SelectPlanner::create_agg_node() {
         }
         agg2->set_agg_tuple_id(_agg_tuple_id);
         agg2->set_arrow_ignore_tuple_id(_order_tuple_id);
+    }
+    return 0;
+}
+
+int SelectPlanner::create_window_and_sort_nodes() {
+    std::vector<pb::WindowNode> window_nodes;
+    window_nodes.reserve(_subquery_rewrite_window_nodes.size() + _window_nodes.size());
+    // 非相关子查询重写后，使用WindowNode进行min/max操作
+    window_nodes.insert(window_nodes.end(),
+                        _subquery_rewrite_window_nodes.begin(), _subquery_rewrite_window_nodes.end());
+    window_nodes.insert(window_nodes.end(), 
+                        _window_nodes.begin(), _window_nodes.end());
+    for (int i = 0; i < window_nodes.size(); ++i) {
+        const pb::WindowNode& window_node = window_nodes[i];
+        // 创建WindowNode
+        pb::PlanNode* plan_node = _ctx->add_plan_node();
+        plan_node->set_node_type(pb::WINDOW_NODE);
+        plan_node->set_limit(-1);
+        if (i < _subquery_rewrite_window_nodes.size()) {
+            // 非相关子查询，只取一条，相当于聚合操作
+            plan_node->set_limit(1);
+        }
+        plan_node->set_is_explain(_ctx->is_explain);
+        plan_node->set_num_children(1);
+        pb::DerivePlanNode* derive = plan_node->mutable_derive_node();
+        pb::WindowNode* window = derive->mutable_window_node();
+        window->CopyFrom(window_node);
+        // 删掉window_spec中order_exprs/is_asc中的partition_exprs部分
+        const auto& window_spec = window_node.window_spec();
+        if (window_spec.order_exprs().size() != window_spec.is_asc().size()) {
+            DB_WARNING("order expr format error");
+            return -1;
+        }
+        window->mutable_window_spec()->clear_order_exprs();
+        window->mutable_window_spec()->clear_is_asc();
+        for (int i = window_spec.partition_exprs().size(); i < window_spec.order_exprs().size(); ++i) {
+            window->mutable_window_spec()->add_order_exprs()->CopyFrom(window_spec.order_exprs(i));
+            window->mutable_window_spec()->add_is_asc(window_spec.is_asc(i));
+        }
+        // 创建SortNode
+        // TODO - 可以优化为没有order_exprs时，不创建SortNode，注意separate分离时，SortNode和WindowNode的先后顺序
+        plan_node = _ctx->add_plan_node();
+        plan_node->set_node_type(pb::SORT_NODE);
+        plan_node->set_limit(-1);
+        plan_node->set_is_explain(_ctx->is_explain);
+        plan_node->set_num_children(1);
+        derive = plan_node->mutable_derive_node();
+        pb::SortNode* sort = derive->mutable_sort_node();
+        for (int i = 0; i < window_spec.order_exprs().size(); ++i) {
+            pb::Expr* order_expr = sort->add_order_exprs();
+            pb::Expr* slot_order_expr = sort->add_slot_order_exprs();
+            order_expr->CopyFrom(window_spec.order_exprs(i));
+            slot_order_expr->CopyFrom(window_spec.order_exprs(i));
+            sort->add_is_asc(window_spec.is_asc(i));
+            sort->add_is_null_first(window_spec.is_asc(i));
+        }
+        sort->set_tuple_id(window_spec.tuple_id());
     }
     return 0;
 }
@@ -752,6 +870,16 @@ int SelectPlanner::parse_select_field(parser::SelectField* field) {
     options.can_agg = true;
     options.is_select_field = true;
     options.max_one_row = true;
+    options.can_window = true;
+
+    if (field->expr != nullptr 
+            && field->expr->node_type == parser::NT_EXPR
+            && static_cast<const parser::ExprNode*>(field->expr)->expr_type == parser::ET_ROW_EXPR) {
+        // select (a,b) from xxx
+        _ctx->stat_info.error_code = ER_OPERAND_COLUMNS;
+        _ctx->stat_info.error_msg << "Operand should contain 1 column(s)";
+        return -1;
+    }
     if (0 != create_expr_tree(field->expr, select_expr, options)) {
         DB_WARNING("create select expr failed");
         return -1;
@@ -861,6 +989,7 @@ int SelectPlanner::parse_select_fields() {
 }
 
 int SelectPlanner::parse_where() {
+    // 隐式__snapshot__条件，用于olap快照回滚，暂时没用
     add_snapshot_blacklist_to_where_filters();
     if (_select->where == nullptr) {
         return 0;
@@ -894,6 +1023,7 @@ int SelectPlanner::parse_groupby() {
     parser::Vector<parser::ByItem*> by_items = _select->group->items;
     CreateExprOptions options;
     options.use_alias = true;
+    options.can_agg = false;
     for (int idx = 0; idx < by_items.size(); ++idx) {
         if (by_items[idx]->node_type != parser::NT_BY_ITEM) {
             DB_WARNING("un-supported group-by item type: %d", by_items[idx]->node_type);
@@ -901,8 +1031,14 @@ int SelectPlanner::parse_groupby() {
         }
         // create group by expr node
         pb::Expr group_expr;
-        if (0 != create_expr_tree(by_items[idx]->expr, group_expr, options)) {
+        int ret = 0;
+        if (0 != (ret =  create_expr_tree(by_items[idx]->expr, group_expr, options))) {
             DB_WARNING("create group expr failed");
+            if (ret == -3) {
+                _ctx->stat_info.error_code = ER_WRONG_GROUP_FIELD;
+                _ctx->stat_info.error_msg.str("");
+                _ctx->stat_info.error_msg << "Can't group on '"<< by_items[idx]->expr->to_string() << "'";
+            }
             return -1;
         }
         _group_exprs.push_back(group_expr);
@@ -1080,6 +1216,10 @@ int SelectPlanner::plan_cache_get() {
         if (cache_ctx == nullptr) {
             DB_WARNING("cache_ctx is nullptr");
             return -1;
+        }
+        if (cache_ctx->root != nullptr && cache_ctx->root->has_optimized()) {
+            // 优化过的计划，认为缓存失效
+            return 0;
         }
         if (cache_ctx->use_backup) {
             if (!MetaServerInteract::get_backup_instance()->is_inited()) {
@@ -1356,6 +1496,78 @@ void SelectPlanner::check_multi_distinct_in_node(const parser::ExprNode* item,
             name_set.insert(os.str());
         }
     }
+}
+
+int SelectPlanner::merge_window_node() {
+    if (_window_nodes.empty()) {
+        return 0;
+    }
+    if (_window_nodes.size() != _window_specs.size()) {
+        DB_WARNING("window_nodes.size[%lu] != _window_specs.size[%lu]", _window_nodes.size(), _window_specs.size());
+        return -1;
+    }
+    std::vector<pb::WindowNode> window_nodes_tmp;
+    _window_nodes.swap(window_nodes_tmp);
+
+    std::unordered_map<std::string, std::vector<pb::WindowNode>> window_node_mapping;
+    for (int i = 0; i < window_nodes_tmp.size(); ++i) {
+        window_node_mapping[_window_specs[i]].emplace_back(std::move(window_nodes_tmp[i]));
+    }
+    for (auto& kv : window_node_mapping) {
+        bool has_set_window_spec = false;
+        pb::WindowNode merge_window_node;
+        for (auto& window_node : kv.second) {
+            for (auto& func_expr : *window_node.mutable_func_exprs()) {
+                merge_window_node.add_func_exprs()->Swap(&func_expr);
+            }
+            if (!has_set_window_spec) {
+                merge_window_node.mutable_window_spec()->Swap(window_node.mutable_window_spec());
+                has_set_window_spec = true;
+            }
+        }
+        _window_nodes.emplace_back(std::move(merge_window_node));
+    }
+    return 0;
+}
+
+int SelectPlanner::create_window_tuple_desc() {
+    // window tuple
+    if (_window_tuple_id == -1) {
+        return 0;
+    }
+    // slot_id => slot desc mapping
+    std::map<int32_t, pb::SlotDescriptor> id_slot_mapping;
+    pb::TupleDescriptor window_tuple;
+    window_tuple.set_tuple_id(_window_tuple_id);
+    for (const auto& [_, slots] : _window_slot_mapping) {
+        // reorder the slot descriptors by slot id
+        for (auto& slot : slots) {
+            id_slot_mapping.insert(std::make_pair(slot.slot_id(), slot));
+        }
+    }
+    for (auto& [_, slot] : id_slot_mapping) {
+        *window_tuple.add_slots() = slot;
+    }
+    _ctx->add_tuple(window_tuple);
+    // window sort tuple
+    for (const auto& window_node : _window_nodes) {
+        if (window_node.has_window_spec() && 
+                window_node.window_spec().has_tuple_id() &&
+                window_node.window_spec().tuple_id() != -1) {
+            const int32_t order_tuple_id = window_node.window_spec().tuple_id();
+            if (_window_sort_slot_mapping.find(order_tuple_id) == _window_sort_slot_mapping.end()) {
+                DB_WARNING("Fail to find order_tuple_id, %d", order_tuple_id);
+                return -1;
+            }
+            pb::TupleDescriptor order_tuple;
+            order_tuple.set_tuple_id(order_tuple_id);
+            for (const auto& slot : _window_sort_slot_mapping[order_tuple_id]) {
+                *order_tuple.add_slots() = slot;
+            }
+            _ctx->add_tuple(order_tuple);
+        }
+    }
+    return 0;
 }
 
 // pb::SlotDescriptor& SelectPlanner::_get_group_expr_slot() {

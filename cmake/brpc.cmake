@@ -29,7 +29,7 @@ ExternalProject_Add(
         DEPENDS ssl crypto zlib protobuf leveldb gflags glog
 #        GIT_REPOSITORY "https://github.com/apache/brpc"
 #        GIT_TAG "0.9.7"
-        URL "https://github.com/apache/brpc/archive/1.3.0.tar.gz"
+        URL "https://github.com/apache/brpc/archive/1.11.0.tar.gz"
         PREFIX ${BRPC_SOURCES_DIR}
         UPDATE_COMMAND ""
         CMAKE_ARGS -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
@@ -50,7 +50,7 @@ ExternalProject_Add(
         -DCMAKE_POSITION_INDEPENDENT_CODE:BOOL=ON
         -DCMAKE_BUILD_TYPE:STRING=${THIRD_PARTY_BUILD_TYPE}
         BUILD_IN_SOURCE 1
-        BUILD_COMMAND $(MAKE) -j ${NUM_OF_PROCESSOR} brpc-static
+        BUILD_COMMAND $(MAKE) -j4 brpc-static
         INSTALL_COMMAND mkdir -p ${BRPC_INSTALL_DIR}/lib/ COMMAND cp ${BRPC_SOURCES_DIR}/src/extern_brpc/output/lib/libbrpc.a ${BRPC_LIBRARIES} COMMAND cp -r ${BRPC_SOURCES_DIR}/src/extern_brpc/output/include ${BRPC_INCLUDE_DIR}/
 )
 ADD_DEPENDENCIES(extern_brpc ssl crypto zlib protobuf leveldb gflags glog)

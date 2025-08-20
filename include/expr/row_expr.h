@@ -66,7 +66,11 @@ public:
     virtual void transfer_pb(pb::ExprNode* pb_node) {
         ExprNode::transfer_pb(pb_node);
     }
+    // 默认向量化不支持row expr，特殊处理了row expr的比较
     virtual bool can_use_arrow_vector() {
+        return false;
+    }
+    virtual bool can_use_arrow_vector_for_compare_sclar_exrpr() {
         for (auto& c : _children) {
             if (!c->can_use_arrow_vector()) {
                 return false;
@@ -74,6 +78,7 @@ public:
         }
         return true;
     }
+
     virtual int transfer_to_arrow_expression() {
         for (int i = 0; i < children_size(); ++i) {
             if (children(i)->transfer_to_arrow_expression() != 0) {
@@ -82,6 +87,24 @@ public:
         }
         return 0;
     }
+
+    virtual std::string to_sql(const std::unordered_map<int32_t, std::string>& slotid_fieldname_map, 
+                               baikal::client::MysqlShortConnection* conn) override {
+        std::string res;
+        res += "(";
+        for (size_t i = 0; i < children_size(); ++i) {
+            if (_children[i] == nullptr) {
+                return "";
+            }
+            res += children(i)->to_sql(slotid_fieldname_map, conn);
+            if (i < children_size() - 1) {
+                res += ", ";
+            }
+        }
+        res += ")";
+        return res;
+    }
+
 private:
     std::map<std::pair<int32_t, int32_t>, size_t> _idx_map;
     friend ExprNode;

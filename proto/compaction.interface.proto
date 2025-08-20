@@ -1,0 +1,35 @@
+syntax="proto2";
+package baikaldb.pb;
+import "common.proto";
+option cc_generic_services = true;
+
+message RocksdbGFLAGS {
+    optional bool rocks_use_partitioned_index_filters = 1;
+    optional bool rocks_use_ribbon_filter = 2;
+    optional bool olap_table_only = 3;
+    optional bool olap_import_mode = 4;
+    optional bool rocks_use_sst_partitioner_fixed_prefix = 5;
+    optional int32 key_point_collector_interval = 6;
+    optional int64 rocks_block_cache_size_mb = 7;
+    optional double rocks_high_pri_pool_ratio = 8;
+    optional bool rocks_use_hyper_clock_cache = 9;
+    optional int32 rocks_block_size = 10;
+}
+
+message RemoteCompactionRequest {
+    optional string remote_compaction_id    = 1;
+    optional bytes compaction_input_binary  = 2;
+    optional string address                 = 3; // ip:port
+    optional string cf_name                 = 4;
+    optional RocksdbGFLAGS rocksdb_gflags   = 5;
+};
+
+message RemoteCompactionResponse {
+    optional ErrCode errcode = 1; // 错误信息
+    optional bytes compaction_result_binary = 2;
+    repeated CompactionFileInfo output_file_info = 3;
+};
+
+service CompactionService {
+    rpc do_compaction(RemoteCompactionRequest) returns (RemoteCompactionResponse);
+};

@@ -46,6 +46,7 @@
 #include "schema_factory.h"
 #include "transaction.h"
 #include "rocksdb_filesystem.h"
+#include "sst_file_writer.h"
 
 int main(int argc, char* argv[])
 {
@@ -84,6 +85,18 @@ private:
 };
 
 TEST(test_TimePeriodChecker, timechecker) {
+    baikaldb::RocksWrapper*  _rocksdb = RocksWrapper::get_instance();
+    int ret = _rocksdb->init("./rocks_db");
+    std::unique_ptr<SstFileWriter> writer(new SstFileWriter(_rocksdb->get_options(_rocksdb->get_data_handle())));
+    std::string path1 = "./test_ingest1.sst";
+    auto s = writer->open(path1);
+    if (!s.ok()) {
+        DB_FATAL("open sst file path: %s failed, err: %s", path1.c_str(), s.ToString().c_str());
+        return;
+    }
+    writer->finish();
+    std::cout << "writer:" << writer->file_size() << "\n";
+
     TimePeriodChecker tc1(0, 7);
     TimePeriodChecker tc2(8, 17);
     TimePeriodChecker tc3(18, 7);
@@ -530,6 +543,7 @@ TEST(bns_to_meta_bns_test, case_all) {
         {"1.opera-aladdin-baikaldb-000-bj.FENGCHAO.dbl",           "group.opera-aladdin-baikalMeta-000-bj.FENGCHAO.all"},
         {"group.opera-aladdin-baikaldb-000-nj.FENGCHAO.all",       "group.opera-aladdin-baikalMeta-000-bj.FENGCHAO.all"},
         {"7.opera-aladdin-baikalStore-000-mix.FENGCHAO.gzhxy",     "group.opera-aladdin-baikalMeta-000-bj.FENGCHAO.all"},
+        {"0.opera-hmkv-baikalStore-000-bd.FENGCHAO.bddwd",         "group.opera-holmes-baikalMeta-000-yq.FENGCHAO.all"},
         {"55.opera-hm-baikalStore-000-bd.FENGCHAO.bddwd",          "group.opera-holmes-baikalMeta-000-yq.FENGCHAO.all"},
         {"group.opera-hm-baikalStore-000-bd.FENGCHAO.all.serv",    "group.opera-holmes-baikalMeta-000-yq.FENGCHAO.all"},
         {"1.opera-adp-baikalBinlog-000-bj.FENGCHAO.bjhw",          "group.opera-ps-baikalMeta-000-bj.FENGCHAO.all"},
@@ -705,6 +719,20 @@ TEST(sst_ext_linker_test, sst_ext) {
     };
     ASSERT_EQ(sizeof(Data3), 128);
     DB_WARNING("data size: %ld", sizeof(Data3));
+}
+
+TEST(test_valid_ip, case_all) {
+    EXPECT_EQ(true, is_valid_ip("127.0.0.1"));
+    EXPECT_EQ(true, is_valid_ip("0.0.0.0"));
+    EXPECT_EQ(true, is_valid_ip("255.255.255.255"));
+    EXPECT_EQ(true, is_valid_ip("10.24.3.98"));
+    EXPECT_EQ(false, is_valid_ip("255.255.255.256"));
+    EXPECT_EQ(false, is_valid_ip("-1.255.255.0"));
+    EXPECT_EQ(false, is_valid_ip("127.0.0.1:8080"));
+    EXPECT_EQ(false, is_valid_ip("127.0.2323.1"));
+    EXPECT_EQ(false, is_valid_ip("127.0.1"));
+    EXPECT_EQ(false, is_valid_ip(""));
+    EXPECT_EQ(false, is_valid_ip("group.opera-e0-baikaldb-000-yz.FENGCHAO.all"));
 }
 
 }  // namespace baikal

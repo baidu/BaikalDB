@@ -17,16 +17,21 @@
 
 namespace baikaldb {
 DEFINE_bool(default_2pc, false, "default enable/disable 2pc for autocommit queries");
+
 QueryContext::~QueryContext() {
     if (need_destroy_tree) {
         ExecNode::destroy_tree(root);
         root = nullptr;
     }
+    fragments.clear();
+    if (root_fragment != nullptr) {
+        root_fragment->close();
+    }
 }
 
 int QueryContext::create_plan_tree() {
     need_destroy_tree = true;
-    return ExecNode::create_tree(plan, &root);
+    return ExecNode::create_tree(plan, &root, CreateExecOptions());
 }
 
 int QueryContext::destroy_plan_tree() {
@@ -43,6 +48,8 @@ void QueryContext::update_ctx_stat_info(RuntimeState* state, int64_t query_total
     stat_info.read_disk_size += state->read_disk_size();
     stat_info.num_filter_rows += state->num_filter_rows();
     stat_info.region_count += state->region_count;
+    stat_info.db_handle_bytes += state->db_handle_bytes();
+    stat_info.db_handle_rows += state->db_handle_rows();
     if (stat_info.error_code == 1000 && state->sign != 0) {
         auto sql_info = SchemaFactory::get_instance()->get_sql_stat(state->sign);
         if (sql_info == nullptr) {
@@ -50,6 +57,11 @@ void QueryContext::update_ctx_stat_info(RuntimeState* state, int64_t query_total
         }
         if (state->need_statistics) {
             sql_info->update(query_total_time, stat_info.num_scan_rows);
+        }
+        if (state->execute_type == pb::EXEC_ARROW_ACERO) {
+            sql_info->update_db_stat(stat_info.db_handle_rows, 
+                    stat_info.db_handle_bytes, 
+                    state->get_query_time());
         }
     }
 }

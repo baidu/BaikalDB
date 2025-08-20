@@ -102,7 +102,9 @@ private:
                     sql_error_second("sql_error_second", &sql_error),
                     exec_sql_error("exec_sql_error"),
                     exec_sql_error_second("exec_sql_error_second", &exec_sql_error), 
-                    hit_cache_ratio("hit_cache_ratio", &hit_cache, bvar::FLAGS_bvar_dump_interval) {
+                    hit_cache_ratio("hit_cache_ratio", &hit_cache, bvar::FLAGS_bvar_dump_interval),
+                    vectorize_time_cost("vectorize_time_cost"), 
+                    mpp_time_cost("mpp_time_cost") {
         _wrapper = MysqlWrapper::get_instance();
         _query_cache.init(100);
     }
@@ -141,6 +143,8 @@ private:
 
     bvar::LatencyRecorder dml_time_cost;
     bvar::LatencyRecorder select_time_cost;
+    bvar::LatencyRecorder mpp_time_cost;
+    bvar::LatencyRecorder vectorize_time_cost;
     bvar::LatencyRecorder txn_alive_time_cost;
     bvar::Adder<int> sql_error;
     bvar::PerSecond<bvar::Adder<int> > sql_error_second;

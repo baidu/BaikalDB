@@ -1,0 +1,63 @@
+syntax="proto2";
+import "common.proto";
+import "meta.interface.proto";
+import "plan.proto";
+package baikaldb.pb;
+option cc_generic_services = true;
+
+enum ExchangeState {
+    ES_DOING       = 1;
+    ES_EOF         = 2;
+    ES_EXEC_FAIL   = 3;
+    ES_VERSION_OLD = 4;
+};
+
+message QueryStat {
+    optional int64 num_affected_rows = 1;
+    optional int64 num_returned_rows = 2;
+    optional int64 num_scan_rows     = 3;
+    optional int64 num_filter_rows   = 4;
+    optional int64 region_count      = 5;
+    optional int64 db_handle_rows    = 6;
+    optional int64 db_handle_bytes   = 7;
+};
+
+message TransmitDataParam {
+   required ExchangeState exchange_state         = 1;  // 当前任务执行状态
+   required uint64 log_id                        = 2;  // 本次查询对应的log_id
+   required uint64 sender_fragment_instance_id   = 3;  // 发送端的fragment_instance_id
+   required uint64 receiver_fragment_instance_id = 4;  // 接收端的fragment_instance_id
+   required int32 receiver_node_id               = 5;  // 接收端的节点id
+   optional int64 region_id                      = 6;  // store region id
+   optional int64 region_version                 = 7;  // store region版本
+   optional bool is_merge                        = 8;  // 是否为合并操作
+   repeated RegionInfo region_infos              = 9;  // 分裂合并的region信息
+   optional int64 record_batch_seq               = 10; // 当前record_batch的序列号
+   optional QueryStat query_stat                 = 11; // 查询统计信息
+   optional bytes vectorized_schema              = 12; // 列式schema
+   required bool is_local_pass_through           = 13;
+   optional int64 record_batch_rows              = 14; // for check
+};
+
+message DbResponse {
+    required ErrCode errcode = 1;
+    optional string errmsg   = 2;
+};
+
+enum FragmentOpType {
+    OP_FRAGMENT_START             = 0; // 启动fragment
+    OP_FRAGMENT_STOP              = 1; // 停止fragment执行（执行失败）
+}; 
+
+message DAGFragmentRequest {
+    required FragmentOpType     op            = 1;
+    required int64              log_id        = 2;
+    repeated FragmentInfo       fragments     = 3; 
+    optional uint64             sql_sign      = 4;
+    required string             username      = 5;
+};
+
+service DbService {
+    rpc transmit_data(TransmitDataParam) returns (DbResponse);
+    rpc handle_mpp_dag_fragment(DAGFragmentRequest) returns (DbResponse);
+};

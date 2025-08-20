@@ -33,6 +33,7 @@ enum ExprNodeType {
     TDIGEST_LITERAL = 27;
     REGEXP_PREDICATE = 28;
     MAXVALUE_LITERAL = 29;
+    WINDOW_EXPR = 30;
 };
 
 message Function {
@@ -80,6 +81,10 @@ message Expr {
     optional string database = 3;
     optional string table = 4;
 };
+
+message Exprs {
+    repeated Expr exprs = 1;
+}
 
 message ColumnDdlInfo {
     repeated Expr     update_exprs        = 1;

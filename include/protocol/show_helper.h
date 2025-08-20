@@ -79,6 +79,10 @@ const std::string SQL_SHOW_ALL_PRIVILEGES        = "all_privileges";        // s
 const std::string SQL_SHOW_SWITCH_TABLES         = "switch_tables";         // show switch_tables username;
 const std::string SQL_SHOW_CREATE_DATABASE       = "create_database";       // show create database test;
 const std::string SQL_SHOW_ALL_META              = "all_meta";              // show all_meta;
+const std::string SQL_SHOW_MPP_SIGNS             = "mpp";                   // show mpp signs;
+const std::string SQL_SHOW_FETCHER_RESOURCE_TAG  = "fetcher_resource_tag";  // show fetcher_resource_tag;
+const std::string SQL_SHOW_INSULATE_FETCHER_RESOURCE_TAG = "insulate_fetcher_resource_tag";  // show insulate_fetcher_resource_tag;
+
 
 namespace baikaldb {
 typedef std::shared_ptr<NetworkSocket> SmartSocket;
@@ -196,6 +200,8 @@ private:
     bool _show_switch_tables(const SmartSocket& client, const std::vector<std::string>& split_vec);
 
     bool _show_all_meta(const SmartSocket& client, const std::vector<std::string>& split_vec);
+
+    bool _show_mpp_signs(const SmartSocket& client, const std::vector<std::string>& split_vec);
 
     bool _handle_client_query_template_dispatch(const SmartSocket& client, const std::vector<std::string>& split_vec);
     int _make_common_resultset_packet(const SmartSocket& sock, 

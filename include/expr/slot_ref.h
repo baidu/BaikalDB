@@ -69,13 +69,38 @@ public:
     virtual bool can_use_arrow_vector() {
         return true;
     }
-    virtual int transfer_to_arrow_expression() {
-        _arrow_expr = arrow::compute::field_ref(std::to_string(_tuple_id) + "_" + std::to_string(_slot_id));
+    virtual int transfer_to_arrow_expression() override {
+        if (_is_vector_index_use) {
+            _arrow_expr = arrow::compute::field_ref(std::to_string(_field_id));
+        } else {
+            _arrow_expr = arrow::compute::field_ref(std::to_string(_tuple_id) + "_" + std::to_string(_slot_id));
+        }
         return 0;
     }
     std::string arrow_field_name() {
         return std::to_string(_tuple_id) + "_" + std::to_string(_slot_id);
     }
+    void set_tuple_id(int32_t tuple_id) {
+        _tuple_id = tuple_id;
+    }
+    void set_slot_id(int32_t slot_id) {
+        _slot_id = slot_id;
+    }
+    bool contains_specified_fields(const std::unordered_set<int32_t>& fields) override {
+        if (fields.find(_field_id) != fields.end()) {
+            return true;
+        }
+        return false;
+    }
+
+    virtual std::string to_sql(const std::unordered_map<int32_t, std::string>& slotid_fieldname_map, 
+                               baikal::client::MysqlShortConnection* conn) override {
+        if (slotid_fieldname_map.find(_slot_id) == slotid_fieldname_map.end()) {
+            return "";
+        }
+        return slotid_fieldname_map.at(_slot_id);
+    }
+
 private:
     int32_t _field_id;
     friend ExprNode;

@@ -19,6 +19,7 @@
 #include "scalar_fn_call.h"
 #include "re2/re2.h"
 #include <boost/optional.hpp>
+#include "arrow_function.h"
 
 namespace baikaldb {
 class AndPredicate : public ScalarFnCall {
@@ -58,7 +59,23 @@ public:
             }
         }
         return true;
-    };
+    }
+    virtual std::string to_sql(const std::unordered_map<int32_t, std::string>& slotid_fieldname_map, 
+                               baikal::client::MysqlShortConnection* conn) override {
+        std::string res;
+        res += "(";
+        for (int i = 0; i < _children.size(); ++i) {
+            if (_children[i] == nullptr) {
+                return "";
+            }
+            res += _children[i]->to_sql(slotid_fieldname_map, conn);
+            if (i < _children.size() - 1) {
+                res += " AND ";
+            }
+        }
+        res += ")";
+        return res;
+    }
 };
 
 class OrPredicate : public ScalarFnCall {
@@ -99,7 +116,23 @@ public:
             }
         }
         return true;
-    };
+    }
+    virtual std::string to_sql(const std::unordered_map<int32_t, std::string>& slotid_fieldname_map, 
+                               baikal::client::MysqlShortConnection* conn) override {
+        std::string res;
+        res += "(";
+        for (int i = 0; i < _children.size(); ++i) {
+            if (_children[i] == nullptr) {
+                return "";
+            }
+            res += _children[i]->to_sql(slotid_fieldname_map, conn);
+            if (i < _children.size() - 1) {
+                res += " OR ";
+            }
+        }
+        res += ")";
+        return res;
+    }
 };
 
 class XorPredicate : public ScalarFnCall {
@@ -134,7 +167,23 @@ public:
             }
         }
         return true;
-    };
+    }
+    virtual std::string to_sql(const std::unordered_map<int32_t, std::string>& slotid_fieldname_map, 
+                               baikal::client::MysqlShortConnection* conn) override {
+        std::string res;
+        res += "(";
+        for (int i = 0; i < _children.size(); ++i) {
+            if (_children[i] == nullptr) {
+                return "";
+            }
+            res += _children[i]->to_sql(slotid_fieldname_map, conn);
+            if (i < _children.size() - 1) {
+                res += " XOR ";
+            }
+        }
+        res += ")";
+        return res;
+    }
 };
 
 class IsNullPredicate : public ScalarFnCall {
@@ -165,7 +214,22 @@ public:
             }
         }
         return true;
-    };
+    }
+    virtual std::string to_sql(const std::unordered_map<int32_t, std::string>& slotid_fieldname_map, 
+                               baikal::client::MysqlShortConnection* conn) override {
+        if (_children.size() == 0) {
+            return "";
+        }
+        if (_children[0] == nullptr) {
+            return "";
+        }
+        std::string res;
+        res += "(";
+        res += _children[0]->to_sql(slotid_fieldname_map, conn);
+        res += " IS NULL";
+        res += ")";
+        return res;
+    }
 };
 
 class IsTruePredicate : public ScalarFnCall {
@@ -191,7 +255,22 @@ public:
             }
         }
         return true;
-    };
+    }
+    virtual std::string to_sql(const std::unordered_map<int32_t, std::string>& slotid_fieldname_map, 
+                               baikal::client::MysqlShortConnection* conn) override {
+        if (_children.size() == 0) {
+            return "";
+        }
+        if (_children[0] == nullptr) {
+            return "";
+        }
+        std::string res;
+        res += "(";
+        res += _children[0]->to_sql(slotid_fieldname_map, conn);
+        res += " IS TRUE";
+        res += ")";
+        return res;
+    }
 };
 
 class InPredicate : public ScalarFnCall {
@@ -209,13 +288,42 @@ public:
             }
         }
         for (auto& c : _children) {
-            if (!c->can_use_arrow_vector()) {
+            if (c->is_row_expr()) {
+                if (!check_row_expr_is_support(_fn, c)) {
+                    return false;
+                }
+            } else if (!c->can_use_arrow_vector()) {
                 return false;
             }
         }
         return true;
     }
     virtual int transfer_to_arrow_expression();
+    virtual std::string to_sql(const std::unordered_map<int32_t, std::string>& slotid_fieldname_map, 
+                                   baikal::client::MysqlShortConnection* conn) override {
+        if (_children.size() == 0) {
+            return "";
+        }
+        if (_children[0] == nullptr) {
+            return "";
+        }
+        std::string res;
+        res += "(";
+        res += _children[0]->to_sql(slotid_fieldname_map, conn);
+        res += " IN (";
+        for (int i = 1; i < _children.size(); ++i) {
+            if (_children[i] == nullptr) {
+                return "";
+            }
+            res += _children[i]->to_sql(slotid_fieldname_map, conn);
+            if (i < _children.size() - 1) {
+                res += ",";
+            }
+        }
+        res += ")";
+        res += ")";
+        return res;
+    }
 
 private:
     int singel_open();
@@ -267,6 +375,28 @@ public:
     bool like_one(const std::string& target, const std::string& pattern, pb::Charset charset);
     virtual int transfer_to_arrow_expression();
     virtual bool can_use_arrow_vector();
+
+    virtual std::string to_sql(const std::unordered_map<int32_t, std::string>& slotid_fieldname_map,
+                               baikal::client::MysqlShortConnection* conn) override {
+        if (_children.size() < 2) {
+            return "";
+        }
+        if (_children[0] == nullptr || _children[1] == nullptr) {
+            return "";
+        }
+        if (_fn.fn_op() == parser::FT_EXACT_LIKE) {
+            // Mysql不支持exact like语法
+            return "";
+        }
+        std::string res;
+        res += "(";
+        res += _children[0]->to_sql(slotid_fieldname_map, conn);
+        res += " LIKE ";
+        res += _children[1]->to_sql(slotid_fieldname_map, conn);
+        res += ")";
+        return res;
+    }
+
 private:
     ExprValue get_value_by_re2(MemRow* row);
     ExprValue get_value_by_pattern(MemRow* row);
@@ -291,6 +421,23 @@ public:
     virtual ExprValue get_value(MemRow* row);
     virtual int transfer_to_arrow_expression();
     virtual bool can_use_arrow_vector();
+    virtual std::string to_sql(const std::unordered_map<int32_t, std::string>& slotid_fieldname_map, 
+                               baikal::client::MysqlShortConnection* conn) override {
+        if (_children.size() < 2) {
+            return "";
+        }
+        if (_children[0] == nullptr || _children[1] == nullptr) {
+            return "";
+        }
+        std::string res;
+        res += "(";
+        res += _children[0]->to_sql(slotid_fieldname_map, conn);
+        res += " REGEXP ";
+        res += _children[1]->to_sql(slotid_fieldname_map, conn);
+        res += ")";
+        return res;
+    }
+
 private:
     void reset_regex(MemRow* row);
     std::unique_ptr<re2::RE2> _regex_ptr;
@@ -319,7 +466,9 @@ public:
         if (_children[0]->transfer_to_arrow_expression() != 0) {
             return -1;
         }
-        _arrow_expr = arrow::compute::not_(_children[0]->arrow_expr());
+        _arrow_expr = arrow::compute::not_(arrow::compute::call("cast", 
+                                                {_children[0]->arrow_expr()}, 
+                                                arrow::compute::CastOptions::Unsafe(arrow::boolean())));
         return 0;
     }
     virtual bool can_use_arrow_vector() {
@@ -329,7 +478,22 @@ public:
             }
         }
         return true;
-    }; 
+    }
+    virtual std::string to_sql(const std::unordered_map<int32_t, std::string>& slotid_fieldname_map, 
+                               baikal::client::MysqlShortConnection* conn) override {
+        if (_children.size() == 0) {
+            return "";
+        }
+        if (_children[0] == nullptr) {
+            return "";
+        }
+        std::string res;
+        res += "(";
+        res += "NOT ";
+        res += _children[0]->to_sql(slotid_fieldname_map, conn);
+        res += ")";
+        return res;
+    }
 };
 
 template<class Charset>

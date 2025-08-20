@@ -37,6 +37,8 @@ DEFINE_int32(meta_replica_number, 3, "Meta replica num");
 DEFINE_int32(concurrency_num, 40, "concurrency num, default: 40");
 DEFINE_int64(region_apply_raft_interval_ms, 1000LL,
             "region apply raft interval, default(1s)");
+DEFINE_int64(distribute_leader_thread_s, 60LL,
+            "distribute leader thread interval, default(6s)");
 DECLARE_int64(flush_memtable_interval_us);
 
 const std::string MetaServer::CLUSTER_IDENTIFY(1, 0x01);
@@ -120,6 +122,7 @@ int MetaServer::init(const std::vector<braft::PeerId>& peers) {
     DBManager::get_instance()->init();
     _flush_bth.run([this]() {flush_memtable_thread();});
     _apply_region_bth.run([this]() {apply_region_thread();});
+    _distribute_leader_bth.run([this]() {distribute_leader_thread();});
     _init_success = true;
     return 0;
 }
@@ -146,6 +149,95 @@ void MetaServer::flush_memtable_thread() {
         status = rocksdb->flush(flush_options, rocksdb->get_raft_log_handle());
         if (!status.ok()) {
             DB_WARNING("flush log_cf to rocksdb fail, err_msg:%s", status.ToString().c_str());
+        }
+    }
+}
+
+int MetaServer::send_rpc_to_trans_leader(int type, std::string old_leader, std::map<std::string, int>& peer_leader_cnt) {
+    // find one min-leader-cnt peer
+    int min_leader_cnt = INT32_MAX;
+    std::string new_leader;
+    for (auto& peer : peer_leader_cnt) {
+        if (peer.second < min_leader_cnt) {
+            min_leader_cnt = peer.second;
+            new_leader = peer.first;
+        }
+    }
+    if (new_leader == old_leader) {
+        return 0;
+    }
+    peer_leader_cnt[new_leader] += 1;
+    // send transleader rpc
+    pb::RaftControlRequest request;
+    pb::RaftControlResponse response;
+    request.set_op_type(pb::TransLeader);
+    request.set_region_id(type);
+    request.set_new_leader(new_leader);
+    int ret = MetaServerInteract::get_instance()->send_request("raft_control", request, response);
+    if (ret < 0) {
+        DB_WARNING("send transleader request fail, type: %d, leader: %s -> %s", 
+            type, old_leader.c_str(), new_leader.c_str());
+        return -1;
+    }
+    DB_WARNING("send transleader request success, type: %d, leader: %s -> %s", 
+            type, old_leader.c_str(), new_leader.c_str());
+    return 0;
+}
+
+void MetaServer::distribute_leader_thread() {
+    int META_TYPE = 0;
+    int AUTO_INCR_TYPE = 1;
+    int TSO_TYPE = 2;
+    while (!_shutdown) {
+        int sleep_s = 60;
+        if (FLAGS_distribute_leader_thread_s > 0) {
+            sleep_s = FLAGS_distribute_leader_thread_s;
+        }
+        bthread_usleep_fast_shutdown(sleep_s * 1000ULL * 1000, _shutdown);
+        if (_shutdown) {
+            return;
+        }
+        if (_meta_state_machine == nullptr 
+            || _tso_state_machine == nullptr
+            || _auto_incr_state_machine == nullptr) {
+            continue;
+        }
+        if (FLAGS_distribute_leader_thread_s <= 0) {
+            continue;
+        }
+        if (!_meta_state_machine->is_leader()) {
+            continue;
+        }
+        std::set<std::string> peers;
+        _meta_state_machine->list_normal_peers(peers);
+        if (peers.size() < 3) {
+            continue;
+        }
+        // peer_addr -> leader_cnt
+        std::map<std::string, int> peer_leader_cnt;
+        for (auto& peer : peers) {
+            peer_leader_cnt[peer] = 0;
+        }
+        std::string meta_leader = butil::endpoint2str(_meta_state_machine->get_leader()).c_str();
+        std::string auto_incr_leader = butil::endpoint2str(_auto_incr_state_machine->get_leader()).c_str();
+        std::string tso_leader = butil::endpoint2str(_tso_state_machine->get_leader()).c_str();
+        if (peers.count(auto_incr_leader) == 0 || peers.count(tso_leader) == 0) {
+            // auto_incr或者tso当前没leader(0.0.0.0), 不稳定不做转移
+            continue;
+        }
+        peer_leader_cnt[meta_leader] += 1;
+        peer_leader_cnt[auto_incr_leader] += 1;
+        peer_leader_cnt[tso_leader] += 1;
+        // transfer leader
+        if (meta_leader == auto_incr_leader && meta_leader == tso_leader) {
+            send_rpc_to_trans_leader(AUTO_INCR_TYPE, auto_incr_leader, peer_leader_cnt);
+            send_rpc_to_trans_leader(TSO_TYPE, tso_leader, peer_leader_cnt);
+        } else if (meta_leader == auto_incr_leader) {
+            send_rpc_to_trans_leader(AUTO_INCR_TYPE, auto_incr_leader, peer_leader_cnt);
+        } else if (meta_leader == tso_leader) {
+            send_rpc_to_trans_leader(TSO_TYPE, tso_leader, peer_leader_cnt);
+        } else if (tso_leader == auto_incr_leader) {
+            send_rpc_to_trans_leader(TSO_TYPE, tso_leader, peer_leader_cnt);
         }
     }
 }
@@ -808,6 +900,7 @@ bool MetaServer::have_data() {
 void MetaServer::close() {
     _flush_bth.join();
     _apply_region_bth.join();
+    _distribute_leader_bth.join();
     DDLManager::get_instance()->shutdown();
     DBManager::get_instance()->shutdown();
     DDLManager::get_instance()->join();

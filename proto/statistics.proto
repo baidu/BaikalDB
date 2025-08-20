@@ -34,10 +34,19 @@ message CMsketch {
     required int32         width        = 2;
     repeated CMsketchColumn cmcolumns   = 3;
 };
+message HyperLogLogColumn {
+    optional int32          field_id        = 1;
+    optional bytes          hll             = 2;
+    optional uint64         estimate_count  = 3;
+};
+message HyperLogLog {
+    repeated HyperLogLogColumn hllcolumns = 1;
+};
 message Statistics {
     required int64         table_id     = 1;
     optional int64         version      = 2;
-    required Histogram     histogram    = 3;
-    required CMsketch      cmsketch     = 4;
+    optional Histogram     histogram    = 3;
+    optional CMsketch      cmsketch     = 4;
+    optional HyperLogLog   hll          = 5;
+    optional int64         total_rows   = 6;
 };
-

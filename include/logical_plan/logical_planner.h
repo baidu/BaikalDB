@@ -79,7 +79,7 @@ struct CreateExprOptions {
     bool partition_expr = false;
     int row_expr_size = 1;
     bool is_plan_cache = false;
-    pb::CompareType compare_type = pb::CMP_NULL;
+    bool can_window = false;
 };
 
 struct PlanTableContext {
@@ -101,14 +101,7 @@ struct PlanTableContext {
     std::unordered_map<int64_t, SmartTable> dblink_table_mapping;
 };
 
-struct UniqueIdContext {
-    int32_t              tuple_cnt = 0;
-    int32_t              sub_query_level = 0;
-    int32_t              derived_table_id = -1;
-};
-
 typedef std::shared_ptr<PlanTableContext> SmartPlanTableCtx;
-typedef std::shared_ptr<UniqueIdContext> SmartUniqueIdCtx;
 
 class LogicalPlanner {
 public:
@@ -121,6 +114,9 @@ public:
     LogicalPlanner(QueryContext* ctx, const SmartUniqueIdCtx& uniq_ctx, const SmartPlanTableCtx& plan_state) : 
         _ctx(ctx), _unique_id_ctx(uniq_ctx), _plan_table_ctx(plan_state) {
         _factory = SchemaFactory::get_instance();
+        if (_ctx != nullptr) {
+            _ctx->unique_id_ctx = _unique_id_ctx;
+        }
     }
 
     virtual ~LogicalPlanner() {
@@ -268,13 +264,25 @@ protected:
     int flatten_filter(const parser::ExprNode* item, std::vector<pb::Expr>& filters,
         const CreateExprOptions& options);
 
-    void create_order_func_slot();
+    void create_order_func_slot(
+            int32_t& order_tuple_id, int32_t& order_slot_cnt, std::vector<pb::SlotDescriptor>& order_slots);
 
     // @agg format: agg_func(col_name) / count_star()
     std::vector<pb::SlotDescriptor>& get_agg_func_slot(
             const std::string& agg, const std::string& fn_name, bool& new_slot);
 
     int create_agg_expr(const parser::FuncExpr* expr_item, pb::Expr& expr, const CreateExprOptions& options);
+
+    // window function
+    std::vector<pb::SlotDescriptor>& get_window_func_slot(const std::string& window);
+    int check_window_expr_valid(const parser::WindowFuncExpr* item);
+    int create_window_expr(
+            const parser::WindowFuncExpr* item, pb::Expr& expr, const CreateExprOptions& options);
+    int create_window_spec(
+            const std::string& fn_name, const parser::WindowSpec* item, 
+            pb::WindowSpec& window_spec, const CreateExprOptions& options);
+    int create_window_frame_bound(
+            const parser::FrameBound* bound, pb::FrameBound& frame_bound, const CreateExprOptions& options);
 
     // (col between A and B) ==> (col >= A) and (col <= B)
     int create_between_expr(const parser::FuncExpr* item, pb::Expr& expr, const CreateExprOptions& options);
@@ -288,12 +296,18 @@ protected:
     int create_expr_tree(const parser::Node* item, pb::Expr& expr, const CreateExprOptions& options);
 
     int create_orderby_exprs(parser::OrderByClause* order);
+    int create_orderby_exprs(parser::Vector<parser::ByItem*>& order_items, 
+                             int32_t& order_tuple_id, 
+                             int32_t& order_slot_cnt, 
+                             std::vector<pb::SlotDescriptor>& order_slots,
+                             std::vector<pb::Expr>& order_exprs, 
+                             std::vector<bool>& order_ascs);
 
     //TODO: error_code
     //TODO: ColumnType len
     int create_term_slot_ref_node(const parser::ColumnName* term, pb::Expr& expr, const CreateExprOptions& options);
 
-    int create_alias_node(const parser::ColumnName* term, pb::Expr& expr);
+    int create_alias_node(const parser::ColumnName* term, pb::Expr& expr, bool can_agg);
 
     //TODO: primitive len for STRING, BOOL and NULL
     int create_term_literal_node(const parser::LiteralExpr* term, pb::Expr& expr, const CreateExprOptions& options);
@@ -353,7 +367,7 @@ private:
     int create_in_predicate(const parser::FuncExpr* func_item, 
             pb::Expr& expr,
             const CreateExprOptions& options);
-    int exec_subquery_expr(QueryContext* sub_ctx, QueryContext* ctx);
+    int exec_subquery_expr(std::shared_ptr<QueryContext> smart_sub_ctx, QueryContext* ctx);
     int create_common_subquery_expr(const parser::SubqueryExpr* item, pb::Expr& expr,
             const CreateExprOptions& options, bool& is_correlate);
     int handle_in_subquery(const parser::FuncExpr* func_item,
@@ -380,6 +394,7 @@ private:
 protected:
     void construct_literal_expr(const ExprValue& value, pb::ExprNode* node);
     int get_convert_charset_info();
+    int inc_slot_ref_cnt(const pb::Expr& expr);
 
 protected:
     QueryContext*       _ctx = nullptr;
@@ -424,5 +439,15 @@ protected:
     std::vector<std::string>       _current_tables;
     std::vector<std::string>       _partition_names;
     bool                        _need_multi_distinct = false;
+
+    // window function
+    int32_t _window_tuple_id = -1;
+    int32_t _window_slot_cnt = 1;
+    // window_name => slots
+    std::unordered_map<std::string, std::vector<pb::SlotDescriptor>> _window_slot_mapping;
+    // window_sort_tuple_id => slots
+    std::unordered_map<int32_t, std::vector<pb::SlotDescriptor>> _window_sort_slot_mapping;
+    std::vector<pb::WindowNode> _window_nodes;
+    std::vector<std::string> _window_specs;
 };
 } //namespace baikal

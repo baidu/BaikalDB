@@ -19,6 +19,7 @@
 #include "agg_fn_call.h"
 #include "slot_ref.h"
 #include "row_expr.h"
+#include "window_fn_call.h"
 
 namespace baikaldb {
 bvar::Adder<int64_t> ExprNode::_s_non_boolean_sql_cnts{"non_boolean_sql_cnts"};
@@ -43,6 +44,9 @@ void ExprNode::const_pre_calc() {
     // TODO 需要对null统一处理，还包括ifnull等函数
     if (_node_type == pb::IS_NULL_PREDICATE) {
         _has_null = false;
+    }
+    if (_node_type == pb::WINDOW_EXPR) {
+        _is_constant = false;
     }
     //const表达式等着父节点来替换
     //root是const表达式则外部替换
@@ -228,7 +232,75 @@ void ExprNode::replace_slot_ref_to_literal(const std::set<int64_t>& sign_set,
 
 int ExprNode::replace_slot_ref_to_expr(const int32_t tuple_id,
                                        const std::map<int32_t, int32_t>& slot_column_mapping,
-                                       const std::vector<ExprNode*>& derived_table_projections) {
+                                       const std::vector<ExprNode*>& derived_table_projections,
+                                       ExprNode*& cur_expr_node) {
+    if (_node_type == pb::SLOT_REF && _tuple_id == tuple_id) {
+        const int32_t outer_slot_id = _slot_id;
+        if (slot_column_mapping.find(outer_slot_id) == slot_column_mapping.end()) {
+            DB_WARNING("Fail to get slot column, outer_slot_id: %d, tuple_id: %d", outer_slot_id, tuple_id);
+            return -1;
+        }
+        const int32_t inner_column_id = slot_column_mapping.at(outer_slot_id);
+        if (inner_column_id < 0 || inner_column_id >= derived_table_projections.size()) {
+            DB_WARNING("Invalid inner_column_id: %d, projections_size: %d", 
+                        inner_column_id, (int)derived_table_projections.size());
+            return -1;
+        }
+        if (derived_table_projections[inner_column_id] == nullptr) {
+            DB_WARNING("derived_table_projections[%d] is nullptr", inner_column_id);
+            return -1;
+        }
+        pb::Expr pb_expr;
+        ExprNode::create_pb_expr(&pb_expr, derived_table_projections[inner_column_id]);
+        ExprNode* expr_node = nullptr;
+        int ret = ExprNode::create_tree(pb_expr, &expr_node);
+        if (ret < 0) {
+            DB_WARNING("Fail to create_tree");
+            return -1;
+        }
+        delete cur_expr_node;
+        cur_expr_node = expr_node;
+        return 0;
+    }
+    for (size_t i = 0; i < _children.size(); i++) {
+        if (_children[i] == nullptr) {
+            DB_WARNING("_children[%d] is nullptr", (int)i);
+            return -1;
+        }
+        _children[i]->replace_slot_ref_to_expr(tuple_id, slot_column_mapping, derived_table_projections, _children[i]);
+    }
+    return 0;
+}
+
+int ExprNode::has_agg_or_window_projection(const std::map<int32_t, int32_t>& slot_column_mapping,
+                                           const std::vector<bool>& derived_table_projections_agg_or_window_vec,
+                                           bool& has_agg_or_window) {
+    has_agg_or_window = false;
+    std::unordered_set<int32_t> slot_ids;
+    get_all_slot_ids(slot_ids);
+    for (auto slot_id : slot_ids) {
+        if (slot_column_mapping.find(slot_id) == slot_column_mapping.end()) {
+            DB_WARNING("Fail to get slot column, slot_id: %d", slot_id);
+            return -1;
+        }
+        const int32_t inner_column_id = slot_column_mapping.at(slot_id);
+        if (inner_column_id < 0 || inner_column_id >= derived_table_projections_agg_or_window_vec.size()) {
+            DB_WARNING("Invalid inner_column_id: %d, projections_size: %d", 
+                        inner_column_id, (int)derived_table_projections_agg_or_window_vec.size());
+            return -1;
+        }
+        if (derived_table_projections_agg_or_window_vec[inner_column_id]) {
+            has_agg_or_window = true;
+            break;
+        }
+    }
+    return 0;
+}
+
+int ExprNode::get_all_subquery_tuple_slot_ids(const int32_t tuple_id,
+                                              const std::map<int32_t, int32_t>& slot_column_mapping,
+                                              const std::vector<ExprNode*>& derived_table_projections,
+                                              std::set<std::pair<int32_t, int32_t>>& tuple_slot_ids) {
     for (size_t i = 0; i < _children.size(); i++) {
         if (_children[i] == nullptr) {
             DB_WARNING("_children[%d] is nullptr", (int)i);
@@ -250,48 +322,33 @@ int ExprNode::replace_slot_ref_to_expr(const int32_t tuple_id,
                 DB_WARNING("derived_table_projections[%d] is nullptr", inner_column_id);
                 return -1;
             }
-            pb::Expr pb_expr;
-            ExprNode::create_pb_expr(&pb_expr, derived_table_projections[inner_column_id]);
-            ExprNode* expr_node = nullptr;
-            int ret = ExprNode::create_tree(pb_expr, &expr_node);
-            if (ret < 0) {
-                DB_WARNING("Fail to create_tree");
-                return -1;
-            }
-            delete _children[i];
-            _children[i] = expr_node;
+            derived_table_projections[inner_column_id]->get_all_tuple_slot_ids(tuple_slot_ids);
         } else {
             if (_children[i]->children_size() > 0) {
-                _children[i]->replace_slot_ref_to_expr(tuple_id, slot_column_mapping, derived_table_projections);
+                _children[i]->get_all_subquery_tuple_slot_ids(
+                        tuple_id, slot_column_mapping, derived_table_projections, tuple_slot_ids);
             }
         }
     }
     return 0;
 }
 
-int ExprNode::has_agg_projection(const std::map<int32_t, int32_t>& slot_column_mapping,
-                                 const std::vector<bool>& derived_table_projections_agg_vec,
-                                 bool& has_agg) {
-    has_agg = false;
-    std::unordered_set<int32_t> slot_ids;
-    get_all_slot_ids(slot_ids);
-    for (auto slot_id : slot_ids) {
-        if (slot_column_mapping.find(slot_id) == slot_column_mapping.end()) {
-            DB_WARNING("Fail to get slot column, slot_id: %d", slot_id);
-            return -1;
-        }
-        const int32_t inner_column_id = slot_column_mapping.at(slot_id);
-        if (inner_column_id < 0 || inner_column_id >= derived_table_projections_agg_vec.size()) {
-            DB_WARNING("Invalid inner_column_id: %d, projections_size: %d", 
-                        inner_column_id, (int)derived_table_projections_agg_vec.size());
-            return -1;
-        }
-        if (derived_table_projections_agg_vec[inner_column_id]) {
-            has_agg = true;
-            break;
-        }
+void ExprNode::get_all_tuple_slot_ids(std::set<std::pair<int32_t, int32_t>>& tuple_slot_ids) {
+    if (_node_type == pb::SLOT_REF) {
+        tuple_slot_ids.emplace(_tuple_id, _slot_id);
     }
-    return 0;
+    for (auto& child : _children) {
+        child->get_all_tuple_slot_ids(tuple_slot_ids);
+    }
+}
+
+void ExprNode::get_all_tuple_slot_ids(std::vector<std::pair<int32_t, int32_t>>& tuple_slot_ids) {
+    if (_node_type == pb::SLOT_REF) {
+        tuple_slot_ids.emplace_back(_tuple_id, _slot_id);
+    }
+    for (auto& child : _children) {
+        child->get_all_tuple_slot_ids(tuple_slot_ids);
+    }
 }
 
 void ExprNode::get_all_field_ids(std::unordered_set<int32_t>& field_ids) {
@@ -420,7 +477,8 @@ bool ExprNode::like_node_optimize(ExprNode** root, std::vector<ExprNode*>& new_e
     if (*root == nullptr) {
         return false;
     }
-    if ((*root)->node_type() != pb::LIKE_PREDICATE) {
+    if ((*root)->node_type() != pb::LIKE_PREDICATE
+            || static_cast<ScalarFnCall*>(*root)->fn().fn_op() == parser::FT_EXACT_LIKE) {
         return false;
     }
     auto expr = *root;
@@ -438,71 +496,51 @@ bool ExprNode::like_node_optimize(ExprNode** root, std::vector<ExprNode*>& new_e
     ExprValue prefix_value(pb::STRING);
     static_cast<LikePredicate*>(expr)->hit_index(&is_eq, &is_prefix, &(prefix_value.str_val));
     std::string old_val = expr->children(1)->get_value(nullptr).get_string();
-    if (!is_prefix || old_val.length() > prefix_value.str_val.length() + 1) {
+    if (!is_prefix || old_val.length() > prefix_value.str_val.length() + 1 || old_val.back() != '%') {
         return false;
     }
-    if (is_eq) {
-        ScalarFnCall * eqexpr = new ScalarFnCall();
-        SlotRef *sloteq = slot->clone();
-        Literal *eqval = new Literal(prefix_value);
-        pb::ExprNode node;
-        node.set_node_type(pb::FUNCTION_CALL);
-        node.set_col_type(pb::BOOL);
-        pb::Function* func = node.mutable_fn();
-        func->set_name("eq_string_string");
-        func->set_fn_op(parser::FT_EQ);
-        eqexpr->init(node);
-        eqexpr->set_is_constant(false);
-        eqexpr->add_child(sloteq);
-        eqexpr->add_child(eqval);
-        *root = eqexpr;
-        ExprNode::destroy_tree(expr);
-        return true;
-    } else if (is_prefix) {
-        ScalarFnCall *geexpr = new ScalarFnCall();
-        SlotRef *slotge = slot->clone();
-        Literal *geval = new Literal(prefix_value);
-        pb::ExprNode node;
-        node.set_node_type(pb::FUNCTION_CALL);
-        node.set_col_type(pb::BOOL);
-        pb::Function* func = node.mutable_fn();
-        func->set_name("ge_string_string");
-        func->set_fn_op(parser::FT_GE);
-        geexpr->init(node);
-        geexpr->set_is_constant(false);
-        geexpr->add_child(slotge);
-        geexpr->add_child(geval);
-        *root = geexpr;
+    ScalarFnCall *geexpr = new ScalarFnCall();
+    SlotRef *slotge = slot->clone();
+    Literal *geval = new Literal(prefix_value);
+    pb::ExprNode node;
+    node.set_node_type(pb::FUNCTION_CALL);
+    node.set_col_type(pb::BOOL);
+    pb::Function* func = node.mutable_fn();
+    func->set_name("ge_string_string");
+    func->set_fn_op(parser::FT_GE);
+    geexpr->init(node);
+    geexpr->set_is_constant(false);
+    geexpr->add_child(slotge);
+    geexpr->add_child(geval);
+    *root = geexpr;
 
-        ScalarFnCall *ltexpr = new ScalarFnCall();
-        SlotRef* ltslot = slot->clone();
-        ExprValue end_val = prefix_value;
-        int i = end_val.str_val.length() - 1;
-        for (; i >= 0; i --) {
-            uint8_t c = end_val.str_val[i];
-            if (c == 255) {
-                continue;
-            }
-            end_val.str_val[i] = char(c + 1);
-            break;
+    ScalarFnCall *ltexpr = new ScalarFnCall();
+    SlotRef* ltslot = slot->clone();
+    ExprValue end_val = prefix_value;
+    int i = end_val.str_val.length() - 1;
+    for (; i >= 0; i --) {
+        uint8_t c = end_val.str_val[i];
+        if (c == 255) {
+            continue;
         }
-        end_val.str_val = end_val.str_val.substr(0, i + 1);
-        Literal *ltval = new Literal(end_val);
-        pb::ExprNode ltnode;
-        ltnode.set_node_type(pb::FUNCTION_CALL);
-        ltnode.set_col_type(pb::BOOL);
-        func = ltnode.mutable_fn();
-        func->set_name("lt_string_string");
-        func->set_fn_op(parser::FT_LT);
-        ltexpr->init(ltnode);
-        ltexpr->set_is_constant(false);
-        ltexpr->add_child(ltslot);
-        ltexpr->add_child(ltval);
-        new_exprs.push_back(ltexpr);
-        ExprNode::destroy_tree(expr);
-        return true;
+        end_val.str_val[i] = char(c + 1);
+        break;
     }
-    return false;
+    end_val.str_val = end_val.str_val.substr(0, i + 1);
+    Literal *ltval = new Literal(end_val);
+    pb::ExprNode ltnode;
+    ltnode.set_node_type(pb::FUNCTION_CALL);
+    ltnode.set_col_type(pb::BOOL);
+    func = ltnode.mutable_fn();
+    func->set_name("lt_string_string");
+    func->set_fn_op(parser::FT_LT);
+    ltexpr->init(ltnode);
+    ltexpr->set_is_constant(false);
+    ltexpr->add_child(ltslot);
+    ltexpr->add_child(ltval);
+    new_exprs.push_back(ltexpr);
+    ExprNode::destroy_tree(expr);
+    return true;
 }
 
 int ExprNode::create_expr_node(const pb::ExprNode& node, ExprNode** expr_node) {
@@ -574,6 +612,10 @@ int ExprNode::create_expr_node(const pb::ExprNode& node, ExprNode** expr_node) {
             return 0;
         case pb::ROW_EXPR:
             *expr_node = new RowExpr;
+            (*expr_node)->init(node);
+            return 0;
+        case pb::WINDOW_EXPR:
+            *expr_node = new WindowFnCall;
             (*expr_node)->init(node);
             return 0;
         default:

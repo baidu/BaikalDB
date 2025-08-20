@@ -27,6 +27,8 @@
 #include "rocksdb/utilities/transaction_db.h"
 #include "key_encoder.h"
 #include "common.h"
+#include "rocksdb/advanced_cache.h"
+#include "rocksdb_compaction_service.h"
 //#include "proto/store.interface.pb.h"
 
 namespace baikaldb {
@@ -34,6 +36,16 @@ DECLARE_int32(rocks_max_background_compactions);
 DECLARE_int32(addpeer_rate_limit_level);
 DECLARE_int32(level0_max_sst_num);
 DECLARE_int32(key_point_collector_interval);
+DECLARE_bool(rocks_use_partitioned_index_filters);
+DECLARE_bool(rocks_use_ribbon_filter);
+DECLARE_bool(olap_table_only);
+DECLARE_bool(olap_import_mode);
+DECLARE_bool(rocks_use_sst_partitioner_fixed_prefix);
+DECLARE_int64(rocks_block_cache_size_mb);
+DECLARE_double(rocks_high_pri_pool_ratio);
+DECLARE_int32(rocks_block_size);
+DECLARE_bool(rocks_use_hyper_clock_cache);
+DECLARE_bool(enable_remote_compaction);
 
 enum KVMode {
     KEY_ONLY,
@@ -107,8 +119,6 @@ class KeyPointsTblPropCollectorFactory
   }
 };
 
-
-
 class RocksWrapper {
 public:
     static const std::string RAFT_LOG_CF;
@@ -129,6 +139,8 @@ public:
 
     int32_t init(const std::string& path);
     int32_t init_cold_rocksdb(const std::string& path);
+    void set_table_options(rocksdb::BlockBasedTableOptions& table_options,
+                        const pb::RocksdbGFLAGS& rocksdb_gflags);
     rocksdb::Status write(const rocksdb::WriteOptions& options, rocksdb::WriteBatch* updates) {
         return _txn_db->Write(options, updates);  
     }
@@ -185,6 +197,13 @@ public:
                                   const rocksdb::Slice* begin,
                                   const rocksdb::Slice* end) {
         return _txn_db->CompactRange(options, column_family, begin, end);
+    }
+
+    rocksdb::Status compact_files(const rocksdb::CompactionOptions& options,
+                                  rocksdb::ColumnFamilyHandle* column_family,
+                                  std::vector<std::string> input_file_names,
+                                  int32_t output_level) {
+        return _txn_db->CompactFiles(options, column_family, input_file_names, output_level);
     }
 
     rocksdb::Status flush(const rocksdb::FlushOptions& options,
@@ -385,11 +404,11 @@ public:
             return nullptr;
         }
     }
-    void relase_snapshot(const rocksdb::Snapshot* snapshot) {
+    void release_snapshot(const rocksdb::Snapshot* snapshot) {
         _txn_db->ReleaseSnapshot(snapshot);
     }
-    void relase_cold_snapshot(const rocksdb::Snapshot* snapshot) {
-        if (_cold_txn_db != nullptr) {
+    void release_cold_snapshot(const rocksdb::Snapshot* snapshot) {
+        if (_cold_txn_db != nullptr && snapshot != nullptr) {
             _cold_txn_db->ReleaseSnapshot(snapshot);
         }
     }
@@ -464,8 +483,10 @@ public:
     int64_t get_oldest_ts_in_binlog_cf() const {
         return _oldest_ts_in_binlog_cf;
     }
-    void get_key_points(const std::string& start, const std::string& end, rocksdb::TablePropertiesCollection& props);
-    void get_cold_key_points(const std::string& start, const std::string& end, rocksdb::TablePropertiesCollection& props);
+    void get_sst_properties(const std::string& start, const std::string& end, rocksdb::TablePropertiesCollection& props);
+    void get_cold_sst_properties(const std::string& start, const std::string& end, rocksdb::TablePropertiesCollection& props);
+    void decode_key_points(const std::string& region_start_key, const std::string& region_end_key, 
+        const std::string& prefix, const rocksdb::TablePropertiesCollection& props, std::vector<rocksdb::Slice>& out_keys);
 private:
 
     RocksWrapper();
@@ -500,5 +521,6 @@ private:
     std::map<std::string, std::string> _defined_options;
     int64_t _oldest_ts_in_binlog_cf = 0;
     std::unique_ptr<rocksdb::Env> _cold_env;
+    rocksdb::BlockBasedTableOptions _table_options;
 };
 }

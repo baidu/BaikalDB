@@ -41,6 +41,8 @@ public:
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state);
     virtual int predicate_pushdown(std::vector<ExprNode*>& input_exprs);
+    virtual int prune_columns(QueryContext* ctx, 
+                              const std::unordered_set<int32_t>& invalid_column_ids) override;
 
     pb::OpType op_type() {
         return _op_type;
@@ -63,20 +65,25 @@ public:
     std::vector<ResultField>& mutable_fields() {
         return _fields;
     }
-    virtual bool can_use_arrow_vector();
+    virtual bool can_use_arrow_vector(RuntimeState* state);
     int start_vectorized_execution(RuntimeState* state);
+    int vectorized_pack_rows(RuntimeState* state, std::shared_ptr<arrow::Table> result, bool need_pack_eof);
+    int mpp_pack_rows(RuntimeState* state, std::shared_ptr<arrow::Table> result);
     int build_arrow_declaration(RuntimeState* state);
+    virtual int show_explain(QueryContext* ctx, std::vector<std::map<std::string, std::string>>& output, int& next_id, int display_id);
 
 private:
     int handle_acero_plan(RuntimeState* state);
     int open_histogram(RuntimeState* state);
     int open_cmsketch(RuntimeState* state);
+    int open_hyperloglog(RuntimeState* state);
     int open_analyze(RuntimeState* state);
     int open_trace(RuntimeState* state);
     int handle_trace(RuntimeState* state);
     int handle_trace2(RuntimeState* state);
     int handle_show_cost(RuntimeState* state);
     int handle_keypoint(RuntimeState* state);
+    int sample_keypoint(RuntimeState* state);
     int pack_keypoints(RuntimeState* state, 
                        std::map<std::string, std::vector<std::vector<ExprValue>>>& partition_key_pks,
                        int partition_field_id, 

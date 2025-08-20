@@ -282,7 +282,7 @@ int Backup::upload_sst_info(brpc::Controller* cntl, BackupInfo& backup_info) {
             return -1;
     }
 
-    auto save_sst_file = [this, &request_attachment](FileInfo& fi) -> int {
+    auto save_sst_file = [this, &request_attachment](BackupFileInfo& fi) -> int {
         if (request_attachment.cutn(&fi.size, sizeof(int64_t)) != sizeof(int64_t)) {
             DB_WARNING("upload region_%ld sst not enough data.", _region_id);
             return -1;

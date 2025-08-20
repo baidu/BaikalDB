@@ -138,6 +138,79 @@ void TableTimer::run() {
     SchemaManager::get_instance()->process_schema_info(NULL, &drop_partition_ts_request, NULL, NULL);
 }
 
+void DBLinkMysqlTableTimer::run() {
+    std::vector<pb::SchemaInfo> dblink_mysql_schemas;
+    dblink_mysql_schemas.reserve(16);
+    TableManager::get_instance()->get_dblink_mysql_schemas(dblink_mysql_schemas);
+    DB_WARNING("dblink_mysql_schemas size: %lu", dblink_mysql_schemas.size());
+    for (auto& schema : dblink_mysql_schemas) {
+        std::unordered_map<std::string, pb::FieldInfo*> field_info_map;
+        for (auto& field : *schema.mutable_fields()) {
+            if (field.deleted()) {
+                continue;
+            }
+            field_info_map[field.field_name()] = &field;
+        }
+        std::vector<pb::FieldInfo> mysql_fields;
+        if (TableManager::get_instance()->get_fields_from_mysql(schema.dblink_info().mysql_info(), mysql_fields) != 0) {
+            DB_WARNING("Fail to get_fields_from_mysql, schema: %s", schema.ShortDebugString().c_str());
+            continue;
+        }
+        std::unordered_map<std::string, pb::FieldInfo*> mysql_field_info_map;
+        for (auto& field : mysql_fields) {
+            mysql_field_info_map[field.field_name()] = &field;
+        }
+        std::vector<pb::FieldInfo> add_fields;
+        std::vector<pb::FieldInfo> del_fields;
+        std::vector<pb::FieldInfo> mod_fields;
+        for (const auto& [field_name, field_info] : mysql_field_info_map) {
+            if (field_info_map.find(field_name) == field_info_map.end()) {
+                add_fields.emplace_back(*field_info);
+            } else {
+                if (field_info->mysql_type() != field_info_map[field_name]->mysql_type()) {
+                    mod_fields.emplace_back(*field_info);
+                }
+            }
+        }
+        for (const auto& [field_name, field_info] : field_info_map) {
+            if (mysql_field_info_map.find(field_name) == mysql_field_info_map.end()) {
+                del_fields.emplace_back(*field_info);
+            }
+        }
+        pb::MetaManagerRequest request;
+        request.mutable_table_info()->set_namespace_name(schema.namespace_name());
+        request.mutable_table_info()->set_database(schema.database());
+        request.mutable_table_info()->set_table_name(schema.table_name());
+        if (add_fields.size() > 0) {
+            pb::MetaManagerRequest add_request(request);
+            add_request.set_op_type(pb::OP_ADD_FIELD);
+            for (auto& field : add_fields) {
+                add_request.mutable_table_info()->add_fields()->Swap(&field);
+            }
+            SchemaManager::get_instance()->process_schema_info(NULL, &add_request, NULL, NULL);
+            DB_NOTICE("DBLink Mysql add field: %s", add_request.ShortDebugString().c_str());
+        }
+        if (del_fields.size() > 0) {
+            pb::MetaManagerRequest del_request(request);
+            del_request.set_op_type(pb::OP_DROP_FIELD);
+            for (auto& field : del_fields) {
+                del_request.mutable_table_info()->add_fields()->Swap(&field);
+            }
+            SchemaManager::get_instance()->process_schema_info(NULL, &del_request, NULL, NULL);
+            DB_NOTICE("DBLink Mysql del field: %s", del_request.ShortDebugString().c_str());
+        }
+        if (mod_fields.size() > 0) {
+            pb::MetaManagerRequest mod_request(request);
+            mod_request.set_op_type(pb::OP_MODIFY_FIELD);
+            for (auto& field : mod_fields) {
+                mod_request.mutable_table_info()->add_fields()->Swap(&field);
+            }
+            SchemaManager::get_instance()->process_schema_info(NULL, &mod_request, NULL, NULL);
+            DB_NOTICE("DBLink Mysql mod field: %s", mod_request.ShortDebugString().c_str());
+        }
+    }
+}
+
 void TableManager::update_index_status(const pb::DdlWorkInfo& ddl_work) {
     auto table_id = ddl_work.table_id();
     pb::SchemaInfo mem_pb;
@@ -651,19 +724,23 @@ int TableManager::do_create_table_sync_req(pb::SchemaInfo& schema_pb,
             ret = send_auto_increment_request(request);
         }
         if (ret == 0) {
-            if (send_init_regions_request(namespace_name, database, table_name, init_regions) != 0) {
-                send_drop_table_request(namespace_name, database, table_name);
-                DB_FATAL("send create_table request fail, table_name: %s", table_name.c_str());
-                SET_RESPONSE(response, pb::INTERNAL_ERROR, "create table fail");
-                return -1;
-            }
-
             pb::CreateTableResponse create_table_response_tmp;
             auto* schema_info = create_table_response_tmp.mutable_schema_info();
             schema_info->Swap(&schema_pb);
-            for (auto& init_region: *init_regions) {
-                auto* region_info = create_table_response_tmp.add_region_infos();
-                region_info->Swap(init_region.mutable_region_info());
+            if (namespace_name == "INTERNAL" && database == "baikaldb" && table_name == "__baikaldb_instance") {
+                // for baikaldb instance id, do nothing
+            } else {
+                if (send_init_regions_request(namespace_name, database, table_name, init_regions) != 0) {
+                    send_drop_table_request(namespace_name, database, table_name);
+                    DB_FATAL("send create_table request fail, table_name: %s", table_name.c_str());
+                    SET_RESPONSE(response, pb::INTERNAL_ERROR, "create table fail");
+                    return -1;
+                }
+
+                for (auto& init_region: *init_regions) {
+                    auto* region_info = create_table_response_tmp.add_region_infos();
+                    region_info->Swap(init_region.mutable_region_info());
+                }
             }
             auto* create_table_response = response->mutable_create_table_response();
             create_table_response->Swap(&create_table_response_tmp);
@@ -2287,12 +2364,14 @@ void TableManager::rename_field(const pb::MetaManagerRequest& request,
             if (!mem_field.deleted() && mem_field.field_name() == field.field_name()) {
                 mem_field.set_field_name(field.new_field_name());
                 field_id = mem_field.field_id();
+                break;
             }
         }
         for (auto& mem_index : *mem_schema_pb.mutable_indexs()) {
             for (auto& mem_field : *mem_index.mutable_field_names()) {
                 if (mem_field == field.field_name()) {
                     mem_field = field.new_field_name();
+                    break;
                 }
             }
         }
@@ -2345,6 +2424,7 @@ void TableManager::modify_field(const pb::MetaManagerRequest& request,
     std::unordered_map<int32_t, std::string> id_new_field_map;
     std::vector<std::string> drop_field_names;
     std::unordered_map<std::string, int32_t> add_field_id_map;
+    bool is_dblink_mysql = mem_schema_pb.has_dblink_info() && mem_schema_pb.dblink_info().type() == pb::LT_MYSQL;
     
     for (auto& field : request.table_info().fields()) {
         std::string field_name = field.field_name();
@@ -2361,10 +2441,18 @@ void TableManager::modify_field(const pb::MetaManagerRequest& request,
             IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "field name is binlog link field");
             return;
         }
+
+        if (field.has_new_field_name() && get_field_id(table_id, field.new_field_name()) != 0) {
+            DB_WARNING("new field name:%s already existed, request:%s",
+                        field.new_field_name().c_str(), request.ShortDebugString().c_str());
+            IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "new field name already exist");
+            return;
+        }
+
         for (auto& mem_field : *mem_schema_pb.mutable_fields()) {
             if (!mem_field.deleted() && mem_field.field_name() == field_name) {
                 if (field.has_mysql_type()) {
-                    if (!check_field_is_compatible_type(mem_field, field)) {
+                    if (!is_dblink_mysql && !check_field_is_compatible_type(mem_field, field)) {
                         // TODO 数据类型变更仅支持meta-only, 有损变更待支持
                         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR,
                                              "modify field data type unsupported lossy changes");
@@ -2389,9 +2477,25 @@ void TableManager::modify_field(const pb::MetaManagerRequest& request,
                     if (!field.auto_increment() && mem_field.auto_increment()) {
                         mem_field.set_auto_increment(field.auto_increment());
                     } else {
-                        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR,
-                                "modify field auto_increment unsupported");
-                        return;
+                        mem_field.set_auto_increment(field.auto_increment());
+                        //leader发送请求
+                        if (done) {
+                            Bthread bth(&BTHREAD_ATTR_SMALL);
+                            auto func = 
+                                [this, table_id]() {
+                                    pb::MetaManagerRequest request;
+                                    request.set_op_type(pb::OP_ADD_ID_FOR_AUTO_INCREMENT);
+                                    pb::AutoIncrementRequest* auto_incr = request.mutable_auto_increment();
+                                    auto_incr->set_table_id(table_id);
+                                    auto_incr->set_start_id(1);
+                                    auto_incr->set_force(true);
+                                    int ret = send_auto_increment_request(request);
+                                    if (ret != 0) {
+                                        DB_FATAL("send add auto incrment request fail, table_id: %ld", table_id );
+                                    }
+                                };
+                            bth.run(func);
+                        }
                     }
                 }
                 if (field.has_float_total_len()) {
@@ -2410,13 +2514,29 @@ void TableManager::modify_field(const pb::MetaManagerRequest& request,
                         mem_field.set_on_update_value(field.on_update_value());
                     }
                 }
-                if (field.has_can_null()) {
-                    mem_field.set_can_null(field.can_null());
-                }
                 if (field.has_default_value()) {
+                    // 向量索引表不支持改字段默认值
+                    bool has_vector_index = false;
+                    for (const auto& index_info : mem_schema_pb.indexs()) {
+                        if (index_info.has_index_type() && index_info.index_type() == pb::I_VECTOR) {
+                            has_vector_index = true;
+                            break;
+                        }
+                    }
                     if (field.default_value() == "__NULL__") {
+                        if (has_vector_index && mem_field.has_default_value()) {
+                            IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, 
+                                                 "vector index table not support change default value");
+                            return;
+                        }
                         mem_field.clear_default_value();
                     } else {
+                        if (has_vector_index && (mem_field.default_value() != field.default_value() || 
+                                                 mem_field.default_literal() != field.default_literal())) {
+                            IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, 
+                                                 "vector index table not support change default value");
+                            return;
+                        }
                         //修改default value需谨慎，会导致存储null数据的值变成新默认值
                         mem_field.set_default_value(field.default_value());
                         if (field.has_default_literal()) {
@@ -2550,7 +2670,14 @@ void TableManager::check_update_statistics(const pb::BaikalOtherHeartBeatRequest
         pb::Statistics stat_pb; 
         int ret = get_statistics(iter.first, stat_pb);
         if (ret < 0) {
-            continue;
+            if (ret == -2) {
+                int64_t version = table_version_map[iter.first];
+                stat_pb.set_table_id(iter.first);
+                stat_pb.set_version(version);
+                DB_WARNING("statistics not found, treated as deleted, table_id:%ld, version:%ld", iter.first, version);
+            } else {
+                continue;
+            }
         }
         if (response->ByteSizeLong() + stat_pb.ByteSizeLong() > FLAGS_statistics_heart_beat_bytesize) {
             DB_WARNING("response size: %lu, statistics size: %lu, big than %ld; count: %d", 
@@ -2568,8 +2695,8 @@ int TableManager::get_statistics(const int64_t table_id, pb::Statistics& stat_pb
     std::string stat_value;
     int ret = MetaRocksdb::get_instance()->get_meta_info(construct_statistics_key(table_id), &stat_value);    
     if (ret < 0) {
-        DB_WARNING("get statistics info from rocksdb fail, table_id: %ld", table_id);
-        return -1;
+        DB_WARNING("get statistics info from rocksdb fail, table_id: %ld, maybe deleted", table_id);
+        return -2;
     } 
 
     if (!stat_pb.ParseFromString(stat_value)) {
@@ -2855,6 +2982,10 @@ int TableManager::write_schema_for_not_level(TableMem& table_mem,
     get_main_logical_room(table_mem.schema_pb, main_logical_room);
     std::string resource_tag = table_mem.schema_pb.resource_tag();
     boost::trim(resource_tag);
+    std::string namespace_name = table_mem.schema_pb.namespace_name();
+    std::string database = table_mem.schema_pb.database();
+    std::string table_name = table_mem.schema_pb.table_name();
+
     if (table_mem.schema_pb.has_partition_info() && table_mem.schema_pb.partition_info().type() == pb::PT_RANGE) {
         if (table_mem.schema_pb.partition_num() != table_mem.schema_pb.partition_info().range_partition_infos_size()) {
             DB_WARNING("Invalid partition_num %ld or range_partition_infos_size: %d",
@@ -2939,11 +3070,15 @@ int TableManager::write_schema_for_not_level(TableMem& table_mem,
         }
         for (auto& index : global_index) {
             std::string instance;
-            int ret = ClusterManager::get_instance()->select_instance_rolling(
-                                {partition_resource_tag, partition_main_logical_room, ""}, {}, instance);
-            if (ret < 0) {
-                DB_WARNING("select instance fail");
-                return -1;
+            if (namespace_name == "INTERNAL" && database == "baikaldb" && table_name == "__baikaldb_instance") {
+                // for baikaldb instance id, do nothing
+            } else {
+                int ret = ClusterManager::get_instance()->select_instance_rolling(
+                        {partition_resource_tag, partition_main_logical_room, ""}, {}, instance);
+                if (ret < 0) {
+                    DB_WARNING("select instance fail");
+                    return -1;
+                }
             }
             pb::InitRegion init_region_request;
             pb::RegionInfo* region_info = init_region_request.mutable_region_info();
@@ -3007,9 +3142,6 @@ int TableManager::write_schema_for_not_level(TableMem& table_mem,
         
         //leader发送请求
         if (done && is_create_table_support_engine(table_mem.schema_pb.engine())) {
-            std::string namespace_name = table_mem.schema_pb.namespace_name();
-            std::string database = table_mem.schema_pb.database();
-            std::string table_name = table_mem.schema_pb.table_name();
             Bthread bth(&BTHREAD_ATTR_SMALL);
             auto create_table_fun = 
                 [this, namespace_name, database, table_name, init_regions, 
@@ -3142,7 +3274,18 @@ int TableManager::update_schema_for_rocksdb(int64_t table_id,
 int TableManager::update_statistics_for_rocksdb(int64_t table_id,
                                                const pb::Statistics& stat_info,
                                                braft::Closure* done) {
-    
+    if (!stat_info.has_cmsketch() && !stat_info.has_histogram() && !stat_info.has_hll()) {
+        // 全没有视为清除
+        int ret = MetaRocksdb::get_instance()->delete_meta_info({construct_statistics_key(table_id)});
+        if (ret < 0) {
+            DB_WARNING("delete statistics info from rocksdb fail, request：%s",
+                       stat_info.ShortDebugString().c_str());
+            IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
+            return -1;
+        }
+        return 0;
+    }
+
     std::string stat_value;
     if (!stat_info.SerializeToString(&stat_value)) {
         DB_WARNING("request serializeToArray fail when update upper table, request:%s", 
@@ -4776,9 +4919,6 @@ void TableManager::update_index_status(const pb::MetaManagerRequest& request,
                         //删除索引
                         DB_NOTICE("DDL_LOG udpate_index_status delete index [%s].", request_index_info.ShortDebugString().c_str());
                         update_op_version(mem_schema_pb.mutable_schema_conf(), "drop index " + index_iter->index_name());
-                        if (index_iter->is_global()) {
-                            erase_global_index_info(index_iter->index_id());
-                        }
                         mem_schema_pb.mutable_indexs()->erase(index_iter);
                     } else {
                         //改变索引状态
@@ -5050,6 +5190,7 @@ void TableManager::unlink_binlog(const pb::MetaManagerRequest& request, const in
 
 void TableManager::on_leader_start() {
     _table_timer.start();
+    _dblink_mysql_table_timer.start();
     auto call_func = [](TableSchedulingInfo& infos) -> int {
         infos.table_pk_prefix_timestamp = butil::gettimeofday_us();
         return 1;
@@ -5058,6 +5199,7 @@ void TableManager::on_leader_start() {
 }
 void TableManager::on_leader_stop() {
     _table_timer.stop();
+    _dblink_mysql_table_timer.stop();
 }
 
 void TableManager::set_index_hint_status(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done) {
@@ -5246,6 +5388,7 @@ void TableManager::remove_global_index_data(const pb::MetaManagerRequest& reques
             };
         bth_remove_region.run(remove_function);
     }
+    erase_global_index_info(drop_index_id);
     IF_DONE_SET_RESPONSE(done, pb::SUCCESS, "success");
 }
 
@@ -5961,6 +6104,82 @@ bool TableManager::check_vector_index(const pb::SchemaInfo& mem_schema_pb, const
         }
     }
     return true;
+}
+
+void TableManager::get_dblink_mysql_schemas(std::vector<pb::SchemaInfo>& schemas) {
+    DoubleBufferedTableMemMapping::ScopedPtr info;
+    if (_table_mem_infos.Read(&info) != 0) {
+        DB_WARNING("read double_buffer_table error.");
+        return;
+    }
+    for (const auto& [_, table_mem] : info->table_info_map) {
+        const pb::SchemaInfo& schema_info = table_mem.schema_pb;
+        if (schema_info.has_dblink_info() && schema_info.dblink_info().type() == pb::LT_MYSQL) {
+            schemas.emplace_back(schema_info);
+        }
+    }
+}
+
+int TableManager::get_fields_from_mysql(const pb::MysqlInfo& mysql_info, std::vector<pb::FieldInfo>& fields) {
+    fields.clear();
+    
+    std::string desc_sql;
+    desc_sql += "DESC `";
+    desc_sql += mysql_info.database_name();
+    desc_sql += "`.`";
+    desc_sql += mysql_info.table_name();
+    desc_sql += "`";
+    
+    MysqlInteract mysql_interact(mysql_info);
+    baikal::client::ResultSet result;
+    int ret = mysql_interact.query(desc_sql, &result);
+    if (ret != 0) {
+        DB_WARNING("Fail to init query, mysql_info: %s, desc_sql: %s", 
+                    mysql_info.ShortDebugString().c_str(), desc_sql.c_str());
+        return -1;
+    }
+    while (result.next()) {
+        pb::FieldInfo field;
+        std::string field_name;
+        if (result.get_string("Field", &field_name) != 0) {
+            DB_WARNING("Fail to get field name");
+            return -1;
+        }
+        std::string field_type;
+        if (result.get_string("Type", &field_type) != 0) {
+            DB_WARNING("Fail to get field type");
+            return -1;
+        }
+        // 填充字段名
+        field.set_field_name(field_name);
+        // 填充字段类型
+        std::string mysql_type_str = field_type;
+        // e.g. 
+        //  - bigint(20)
+        //  - bigint(20) unsigned
+        //  - double
+        //  - double unsigned
+        size_t pos = field_type.find("(");
+        if (pos != std::string::npos) {
+            mysql_type_str = field_type.substr(0, pos);
+        } else {
+            pos = field_type.find(" ");
+            if (pos != std::string::npos) {
+                mysql_type_str = field_type.substr(0, pos);
+            }
+        }
+        if (field_type.find("unsigned") != std::string::npos) {
+            mysql_type_str = "unsigned_" + mysql_type_str;
+        }
+        pb::PrimitiveType type = mysql_type_to_primitive_type(mysql_type_str);
+        if (type == pb::INVALID_TYPE) {
+            DB_WARNING("Invalid mysql_type: %s", mysql_type_str.c_str());
+            continue;
+        }
+        field.set_mysql_type(type);
+        fields.emplace_back(std::move(field));
+    }
+    return 0;
 }
 
 }//namespace 

@@ -14,12 +14,14 @@
 
 #pragma once
 
+#ifdef IN
+#undef IN
+#endif
 #include "expr_node.h"
-
 namespace baikaldb {
 namespace range {
 enum RangeType {
-    NONE, 
+    NONE,
     RANGE,
     EQ,
     LIKE,

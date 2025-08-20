@@ -22,7 +22,7 @@ enum OlapPrimitiveType {
     olap_bool_t = 12;    
     olap_enum_t = 13;    
     olap_date_t = 14;
-    olap_str36_t = 15;    
+    olap_string_t = 15;    
 };
 
 message OLAPHeaderMessage {

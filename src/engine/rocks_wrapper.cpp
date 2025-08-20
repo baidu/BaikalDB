@@ -25,6 +25,8 @@
 #include "transaction_db_bthread_mutex.h"
 #include "rocksdb_merge_operator.h"
 #include "rocksdb_filesystem.h"
+#include "rocksdb/statistics.h"
+
 namespace baikaldb {
 
 DEFINE_int32(rocks_transaction_lock_timeout_ms, 20000, "rocksdb transaction_lock_timeout, real lock_time is 'time + rand_less(time)' (ms)");
@@ -84,6 +86,9 @@ DEFINE_int32(zstd_max_train_bytes, 256 * 1024, "default 256K");
 DEFINE_bool(olap_import_mode, false, "is olap import, default: false");
 DEFINE_bool(rocks_enable_blob_files, false, "rocksdb enable_blob_files, default: false");
 DEFINE_uint64(rocks_min_blob_size, 4096, "rocksdb min_blob_size, default: 4096");
+DEFINE_bool(enable_remote_compaction, false, "enable remote compaction");
+DEFINE_string(compaction_server_bns, "10.143.17.41:8130", "compaction server bns");
+DEFINE_uint64(max_manifest_file_size, 1024 * 1024 * 1024, "max_manifest_file_size");
 
 const std::string RocksWrapper::RAFT_LOG_CF = "raft_log";
 const std::string RocksWrapper::BIN_LOG_CF  = "bin_log_new";
@@ -107,44 +112,12 @@ int32_t RocksWrapper::init(const std::string& path) {
     }
     std::shared_ptr<rocksdb::EventListener> my_listener = std::make_shared<MyListener>();
     rocksdb::BlockBasedTableOptions table_options;
+    pb::RocksdbGFLAGS rocksdb_gflags;
+    set_rocksdb_flags(&rocksdb_gflags);
+    set_table_options(table_options, rocksdb_gflags);
     if (FLAGS_rocks_use_partitioned_index_filters) {
-        // use Partitioned Index Filters
-        // https://github.com/facebook/rocksdb/wiki/Partitioned-Index-Filters
-        table_options.index_type = rocksdb::BlockBasedTableOptions::kTwoLevelIndexSearch;
-        table_options.partition_filters = true;
-        table_options.metadata_block_size = 4096;
-        table_options.cache_index_and_filter_blocks = true;
-        table_options.pin_top_level_index_and_filter = true;
-        table_options.cache_index_and_filter_blocks_with_high_priority = true;
-        table_options.pin_l0_filter_and_index_blocks_in_cache= true;
-        table_options.block_cache = rocksdb::NewLRUCache(FLAGS_rocks_block_cache_size_mb * 1024 * 1024LL,
-                8, false, FLAGS_rocks_high_pri_pool_ratio);
         // 通过cache控制内存，不需要控制max_open_files
         FLAGS_rocks_max_open_files = -1;
-    } else {
-        table_options.data_block_index_type = rocksdb::BlockBasedTableOptions::kDataBlockBinaryAndHash;
-        if (FLAGS_rocks_use_hyper_clock_cache) {
-#if ROCKSDB_MAJOR == 7
-            auto cache_opt = rocksdb::HyperClockCacheOptions(FLAGS_rocks_block_cache_size_mb * 1024 * 1024LL, FLAGS_rocks_block_size, 8);
-            cache_opt.metadata_charge_policy = rocksdb::kDontChargeCacheMetadata; //cache会比rocks_block_cache_size_mb多占用少量内存
-            table_options.block_cache = cache_opt.MakeSharedCache(); 
-#endif
-        } else {
-            table_options.block_cache = rocksdb::NewLRUCache(FLAGS_rocks_block_cache_size_mb * 1024 * 1024LL, 8);
-        }
-    }
-
-    table_options.block_size = FLAGS_rocks_block_size;
-    if (FLAGS_rocks_use_ribbon_filter) {
-#if ROCKSDB_MAJOR >= 7 || (ROCKSDB_MAJOR == 6 && ROCKSDB_MINOR > 22)
-        table_options.filter_policy.reset(rocksdb::NewRibbonFilterPolicy(9.9));
-#endif
-    } else {
-        table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
-    }
-    if (FLAGS_olap_table_only) {
-        // olap集群关闭bloomfilter
-        table_options.filter_policy = nullptr;
     }
     _cache = table_options.block_cache.get();
     rocksdb::Options db_options;
@@ -159,6 +132,7 @@ int32_t RocksWrapper::init(const std::string& path) {
     db_options.table_cache_numshardbits = 6;
     db_options.WAL_ttl_seconds = 10 * 60;
     db_options.WAL_size_limit_MB = 0;
+    db_options.max_manifest_file_size = FLAGS_max_manifest_file_size;
     //打开后有些集群内存严重上涨
     //db_options.avoid_unnecessary_blocking_io = true;
     db_options.max_background_compactions = FLAGS_rocks_max_background_compactions;
@@ -171,11 +145,13 @@ int32_t RocksWrapper::init(const std::string& path) {
     db_options.env->SetBackgroundThreads(2, rocksdb::Env::HIGH);
     db_options.listeners.emplace_back(my_listener);
     if (FLAGS_olap_import_mode) {
-        table_options.filter_policy = nullptr;
         db_options.max_background_flushes = 4;
         db_options.env->SetBackgroundThreads(4, rocksdb::Env::HIGH);
         db_options.allow_concurrent_memtable_write = false;
         db_options.memtable_factory.reset(new rocksdb::VectorRepFactory(1024*1024));
+    }
+    if (FLAGS_enable_remote_compaction) {
+        db_options.compaction_service.reset(new MyCompactionService(path, FLAGS_compaction_server_bns));
     }
     rocksdb::TransactionDBOptions txn_db_options;
     DB_NOTICE("FLAGS_rocks_transaction_lock_timeout_ms:%d FLAGS_rocks_default_lock_timeout_ms:%d", FLAGS_rocks_transaction_lock_timeout_ms, FLAGS_rocks_default_lock_timeout_ms);
@@ -287,8 +263,15 @@ int32_t RocksWrapper::init(const std::string& path) {
         _data_cf_option.bottommost_compression_opts.zstd_max_train_bytes = 1 << 18; // 256KB
     }
 
+    // 等待心跳成功后再开启rocksdb compaction
+    _data_cf_option.disable_auto_compactions = true;
+
     //todo
     //prefix: 0x01-0xFF,分别用来存储不同的meta信息
+    rocksdb::BlockBasedTableOptions meta_table_options;
+    meta_table_options.block_size = 4096;
+    meta_table_options.format_version = 5;
+    _meta_info_option.table_factory.reset(rocksdb::NewBlockBasedTableFactory(meta_table_options));
     _meta_info_option.prefix_extractor.reset(
             rocksdb::NewFixedPrefixTransform(1));
     _meta_info_option.OptimizeLevelStyleCompaction();
@@ -504,6 +487,7 @@ int32_t RocksWrapper::init_cold_rocksdb(const std::string& path) {
         return 0;
     }
     rocksdb::BlockBasedTableOptions table_options;
+    table_options.format_version = 5;
     table_options.data_block_index_type = rocksdb::BlockBasedTableOptions::kDataBlockBinaryAndHash;
     table_options.block_cache = rocksdb::NewLRUCache(FLAGS_rocks_block_cache_size_mb * 1024 * 1024LL, 8);
     table_options.block_size = FLAGS_cold_sst_block_size;
@@ -605,6 +589,52 @@ int32_t RocksWrapper::init_cold_rocksdb(const std::string& path) {
     }
     DB_WARNING("cold rocksdb init success");
     return 0;
+}
+
+void RocksWrapper::set_table_options(rocksdb::BlockBasedTableOptions& table_options,
+                            const pb::RocksdbGFLAGS& rocksdb_gflags) {
+    table_options.format_version = 5;
+    if (rocksdb_gflags.rocks_use_partitioned_index_filters()) {
+        // use Partitioned Index Filters
+        // https://github.com/facebook/rocksdb/wiki/Partitioned-Index-Filters
+        table_options.index_type = rocksdb::BlockBasedTableOptions::kTwoLevelIndexSearch;
+        table_options.partition_filters = true;
+        table_options.metadata_block_size = 4096;
+        table_options.cache_index_and_filter_blocks = true;
+        table_options.pin_top_level_index_and_filter = true;
+        table_options.cache_index_and_filter_blocks_with_high_priority = true;
+        table_options.pin_l0_filter_and_index_blocks_in_cache= true;
+        table_options.block_cache = rocksdb::NewLRUCache(rocksdb_gflags.rocks_block_cache_size_mb() * 1024 * 1024LL,
+                8, false, rocksdb_gflags.rocks_high_pri_pool_ratio());
+    } else {
+        table_options.data_block_index_type = rocksdb::BlockBasedTableOptions::kDataBlockBinaryAndHash;
+        if (rocksdb_gflags.rocks_use_hyper_clock_cache()) {
+#if ROCKSDB_MAJOR >= 7
+            auto cache_opt = rocksdb::HyperClockCacheOptions(rocksdb_gflags.rocks_block_cache_size_mb() * 1024 * 1024LL, rocksdb_gflags.rocks_block_size(), 8);
+            cache_opt.metadata_charge_policy = rocksdb::kDontChargeCacheMetadata; //cache会比rocks_block_cache_size_mb多占用少量内存
+            table_options.block_cache = cache_opt.MakeSharedCache(); 
+#endif
+        } else {
+            table_options.block_cache = rocksdb::NewLRUCache(rocksdb_gflags.rocks_block_cache_size_mb() * 1024 * 1024LL, 8);
+        }
+    }
+
+    table_options.block_size = rocksdb_gflags.rocks_block_size();
+    if (rocksdb_gflags.rocks_use_ribbon_filter()) {
+#if ROCKSDB_MAJOR >= 7 || (ROCKSDB_MAJOR == 6 && ROCKSDB_MINOR > 22)
+        table_options.filter_policy.reset(rocksdb::NewRibbonFilterPolicy(9.9));
+#endif
+    } else {
+        table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
+    }
+    if (rocksdb_gflags.olap_table_only()) {
+        // olap集群关闭bloomfilter
+        table_options.filter_policy = nullptr;
+    }
+    if (rocksdb_gflags.olap_import_mode()) {
+        table_options.filter_policy = nullptr;
+    }
+    return;
 }
 
 void RocksWrapper::collect_rocks_options() {
@@ -955,7 +985,7 @@ void RocksWrapper::adjust_option(std::map<std::string, std::string> new_options)
     });
 }
 
-void RocksWrapper::get_key_points(const std::string& start, const std::string& end, rocksdb::TablePropertiesCollection& props) {
+void RocksWrapper::get_sst_properties(const std::string& start, const std::string& end, rocksdb::TablePropertiesCollection& props) {
     std::vector<rocksdb::Range> ranges { rocksdb::Range(start, end) };
     auto data_cf = get_data_handle();
     if (data_cf == nullptr) {
@@ -964,10 +994,55 @@ void RocksWrapper::get_key_points(const std::string& start, const std::string& e
     _txn_db->GetPropertiesOfTablesInRange(data_cf, ranges.data(), ranges.size(), &props);
 }
 
-void RocksWrapper::get_cold_key_points(const std::string& start, const std::string& end, rocksdb::TablePropertiesCollection& props) {
+void RocksWrapper::get_cold_sst_properties(const std::string& start, const std::string& end, rocksdb::TablePropertiesCollection& props) {
     std::vector<rocksdb::Range> ranges { rocksdb::Range(start, end) };
     if (_cold_txn_db != nullptr) {
         _cold_txn_db->GetPropertiesOfTablesInRange(_cold_column_family, ranges.data(), ranges.size(), &props);
+    }
+}
+
+void RocksWrapper::decode_key_points(const std::string& region_start_key, const std::string& region_end_key, 
+        const std::string& prefix, const rocksdb::TablePropertiesCollection& props, std::vector<rocksdb::Slice>& out_keys) {
+    for (const auto& item : props) {
+        if (item.second == nullptr) {
+            continue;
+        }
+        auto& user_collected = item.second->user_collected_properties;
+        if (user_collected.find("key_point_lens") == user_collected.end() 
+            || user_collected.find("key_points") == user_collected.end()) {
+            continue;
+        }
+        rocksdb::Slice key_lens(user_collected.at("key_point_lens"));
+        rocksdb::Slice keys(user_collected.at("key_points"));
+        uint64_t len_pos = 0;
+        uint64_t key_pos = 0;
+        uint64_t key_len = 0;
+        rocksdb::Slice key;
+        while (len_pos + sizeof(key_len) - 1 < key_lens.size() && key_pos < keys.size()) {
+            char* c = const_cast<char*>(key_lens.data_ + len_pos);
+            key_len = KeyEncoder::to_endian_u64(*reinterpret_cast<uint64_t*>(c));
+            if (key_pos + key_len - 1 >= keys.size()) {
+                break;
+            } 
+
+            key = rocksdb::Slice(keys.data_ + key_pos, key_len);
+            len_pos += sizeof(key_len);
+            key_pos += key_len;
+
+            if (!key.starts_with(prefix)) {
+                continue;
+            }
+            key.remove_prefix(2 * sizeof(int64_t));
+
+            // 检查keypoint是否在region范围内
+            if (!region_start_key.empty() && key.compare(region_start_key) < 0) {
+                continue;
+            }
+            if (!region_end_key.empty() && key.compare(region_end_key) >= 0) {
+                continue;
+            }
+            out_keys.emplace_back(key);
+        }
     }
 }
 }

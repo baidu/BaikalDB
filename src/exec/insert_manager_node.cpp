@@ -176,6 +176,7 @@ int InsertManagerNode::subquery_open(RuntimeState* state) {
             return -1;
         }
     }
+    _sub_query_runtime_state->execute_type = pb::EXEC_ROW;
     ret = _sub_query_node->open(_sub_query_runtime_state);
     if (ret < 0) {
         return ret;

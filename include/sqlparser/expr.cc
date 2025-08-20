@@ -131,6 +131,14 @@ FuncExpr* FuncExpr::new_unary_op_node(FuncType t, Node* arg1, butil::Arena& aren
     return fun;
 }
 FuncExpr* FuncExpr::new_binary_op_node(FuncType t, Node* arg1, Node* arg2, butil::Arena& arena) {
+    // FT_LOGIC_OR支持多叉树
+    // TODO FT_LOGIC_AND后面也可以支持下，但是要考虑到sign会变，可能影响面比较大，一些sign的force inde和black list会受影响
+    if (t == FT_LOGIC_OR && arg1->node_type == NT_EXPR 
+            &&  static_cast<ExprNode*>(arg1)->expr_type == ET_FUNC
+            && static_cast<FuncExpr*>(arg1)->func_type == FT_LOGIC_OR) {
+        static_cast<FuncExpr*>(arg1)->children.push_back(arg2, arena);
+        return static_cast<FuncExpr*>(arg1);
+    }
     FuncExpr* fun = new(arena.allocate(sizeof(FuncExpr)))FuncExpr();
     fun->func_type = t;
     fun->fn_name = type_to_name(t);
@@ -170,7 +178,8 @@ void FuncExpr::to_stream(std::ostream& os) const {
     os << "(";
     switch (func_type) {
         case FT_COMMON:
-        case FT_AGG: {
+        case FT_AGG: 
+        case FT_WINDOW: {
             os << fn_name << "(";
             if (distinct) {
                 os << "DISTINCT ";
@@ -212,10 +221,19 @@ void FuncExpr::to_stream(std::ostream& os) const {
         case FT_LT:
         case FT_LE:
         case FT_LOGIC_AND:
-        case FT_LOGIC_OR:
         case FT_LOGIC_XOR:
             os << children[0] << FUNC_STR_MAP[func_type] << children[1];
             break;
+        case FT_LOGIC_OR: {
+            for (int i = 0; i < children.size(); i++) {
+                if (i == 0) {
+                    os << children[i];
+                } else {
+                os << FUNC_STR_MAP[func_type] << children[i];
+                }
+            }
+            break;
+        }
         case FT_IS_NULL:
             os << children[0] << " IS" << not_str[is_not] << " NULL";
             break;
@@ -331,14 +349,17 @@ void LiteralExpr::to_stream(std::ostream& os) const {
         case LT_INT:
             os << _u.int64_val;
             break;
-        case LT_DOUBLE:
-            os << std::setprecision(12) << _u.double_val;
+        case LT_DOUBLE: {
+            char buf[50] = {0};
+            double_to_string(_u.double_val, -1, buf, sizeof(buf));
+            os << buf;
             break;
+        }
         case LT_STRING:
             os << "'" << _u.str_val.value << "'";
             break;
         case LT_HEX:
-            os << "0x" << row_str.value;
+            os << raw_str.value;
             break;
         case LT_BOOL:
             os << true_str[_u.bool_val];
@@ -369,14 +390,17 @@ std::string LiteralExpr::to_string() const {
         case LT_INT:
             os << _u.int64_val;
             break;
-        case LT_DOUBLE:
-            os << std::setprecision(12) << _u.double_val;
+        case LT_DOUBLE:{
+            char buf[50] = {0};
+            double_to_string(_u.double_val, -1, buf, sizeof(buf));
+            os << buf;
             break;
+        }
         case LT_STRING:
             os << _u.str_val.value;
             break;
         case LT_HEX:
-            os << "0x" << row_str.value;
+            os << raw_str.value;
             break;
         case LT_BOOL:
             os << true_str[_u.bool_val];

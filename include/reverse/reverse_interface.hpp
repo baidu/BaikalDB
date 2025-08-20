@@ -63,12 +63,12 @@ int CommRindexNodeParser<Schema>::init(const std::string& term) {
 } 
 
 template<typename Schema>
-const typename Schema::ReverseNode* CommRindexNodeParser<Schema>::current_node() {
+const ReverseNode* CommRindexNodeParser<Schema>::current_node() {
     return _curr_node; 
 }
 
 template<typename Schema>
-const typename Schema::PrimaryIdT* CommRindexNodeParser<Schema>::current_id() {
+const PrimaryIdT* CommRindexNodeParser<Schema>::current_id() {
     if (_curr_node == nullptr) {
         return nullptr;
     }
@@ -76,7 +76,7 @@ const typename Schema::PrimaryIdT* CommRindexNodeParser<Schema>::current_id() {
 }
 
 template<typename Schema>
-const typename Schema::ReverseNode* CommRindexNodeParser<Schema>::next() {
+const ReverseNode* CommRindexNodeParser<Schema>::next() {
     if (_curr_node == nullptr) {
         return _curr_node;
     } else {
@@ -161,7 +161,7 @@ uint32_t CommRindexNodeParser<Schema>::binary_search(uint32_t first,
 }
 
 template<typename Schema>
-const typename Schema::ReverseNode*    
+const ReverseNode*
                 CommRindexNodeParser<Schema>::advance(const PrimaryIdT& target_id) {
     if (_curr_node == nullptr) {
         return _curr_node;
@@ -204,83 +204,8 @@ const typename Schema::ReverseNode*
     }
 }
 
-//--common interface
-template<typename Node, typename List>
-int NewSchema<Node, List>::segment(
-                    const std::string& word, 
-                    const std::string& pk,
-                    SmartRecord record,
-                    pb::SegmentType segment_type,
-                    const std::map<std::string, int32_t>& name_field_id_map,
-                    pb::ReverseNodeType flag,
-                    std::map<std::string, ReverseNode>& res,
-                    const pb::Charset& charset) {
-    // hit seg_cache, replace pk and flag
-    if (res.size() > 0) {
-        for (auto& pair : res) {
-            pair.second.set_key(pk);
-            pair.second.set_flag(flag);
-        }
-        return 0;
-    }
-    std::map<std::string, float> term_map;
-    int ret = 0;
-    switch (segment_type) {
-        case pb::S_NO_SEGMENT:
-            term_map[word] = 0;
-            break;
-        case pb::S_UNIGRAMS:
-            ret = Tokenizer::get_instance()->simple_seg(word, 1, term_map, charset);
-            break;
-        case pb::S_BIGRAMS:
-            ret = Tokenizer::get_instance()->simple_seg(word, 2, term_map, charset);
-            break;
-        case pb::S_ES_STANDARD:
-            ret = Tokenizer::get_instance()->es_standard(word, term_map, charset);
-            break;
-#ifdef BAIDU_INTERNAL
-        case pb::S_WORDRANK: 
-            ret = Tokenizer::get_instance()->wordrank(word, term_map, charset);
-            break;
-        case pb::S_WORDRANK_Q2B_ICASE: 
-            ret = Tokenizer::get_instance()->wordrank_q2b_icase(word, term_map, charset);
-            break;
-        case pb::S_WORDRANK_Q2B_ICASE_UNLIMIT: 
-            ret = Tokenizer::get_instance()->wordrank_q2b_icase_unlimit(word, term_map, charset);
-            break;
-        case pb::S_WORDSEG_BASIC: 
-            ret = Tokenizer::get_instance()->wordseg_basic(word, term_map, charset);
-            break;
-        case pb::S_WORDWEIGHT: 
-            ret = Tokenizer::get_instance()->wordweight(word, term_map, charset, true);
-            break;
-        case pb::S_WORDWEIGHT_NO_FILTER: 
-            ret = Tokenizer::get_instance()->wordweight(word, term_map, charset, false);
-            break;
-        case pb::S_WORDWEIGHT_NO_FILTER_SAME_WEIGHT: 
-            ret = Tokenizer::get_instance()->wordweight(word, term_map, charset, false, true);
-            break;
-#endif
-        default:
-            DB_WARNING("un-support segment:%d", segment_type);
-            ret = -1;
-            break;
-    }
-    if (ret < 0) {
-        return -1;
-    }
-    for (auto& pair : term_map) {
-        ReverseNode node;
-        node.set_key(pk);
-        node.set_flag(flag);
-        node.set_weight(pair.second);
-        res[pair.first] = node;
-    }
-    return 0;
-}
-
-template<typename Node, typename List>
-int NewSchema<Node, List>::create_executor(const std::string& search_data, 
+template<typename List>
+int NewSchema<List>::create_executor(const std::string& search_data,
     pb::MatchMode mode, pb::SegmentType segment_type, const pb::Charset& charset) {
     _weight_field = get_field_info_by_name(_table_info->fields, "__weight");
     _query_words_field = get_field_info_by_name(_table_info->fields, "__querywords");
@@ -300,9 +225,9 @@ int NewSchema<Node, List>::create_executor(const std::string& search_data,
         // 报告需求，like语法用|表示'或'
         Tokenizer::get_instance()->split_str(search_data, or_search, '|', charset);
     }
-    LogicalQuery<ThisType> logical_query(this);
-    ExecutorNode<ThisType>* parent = nullptr;
-    ExecutorNode<ThisType>* root = &logical_query._root;
+    LogicalQuery logical_query(this);
+    ExecutorNode* parent = nullptr;
+    ExecutorNode* root = &logical_query._root;
     if (or_search.size() == 0) {
         _exe = NULL;
         return 0;
@@ -311,14 +236,14 @@ int NewSchema<Node, List>::create_executor(const std::string& search_data,
         // https://dev.mysql.com/doc/refman/8.0/en/fulltext-search-ngram.html
         if (mode == pb::M_NARUTAL_LANGUAGE) {
             root->_type = OR;
-            root->_merge_func = ThisType::merge_or;
+            root->_merge_func = merge_or;
         } else {
             root->_type = AND;
-            root->_merge_func = ThisType::merge_and;
+            root->_merge_func = merge_and;
         }
     } else {
         root->_type = OR;
-        root->_merge_func = ThisType::merge_or;
+        root->_merge_func = merge_or;
         parent = root;
     }
     for (auto& or_item : or_search) {
@@ -373,11 +298,11 @@ int NewSchema<Node, List>::create_executor(const std::string& search_data,
         if (term_map.size() == 0) {
             continue;
         } 
-        ExecutorNode<ThisType>* and_node = nullptr;
+        ExecutorNode* and_node = nullptr;
         if (parent != nullptr) {
-            and_node = new ExecutorNode<ThisType>();
+            and_node = new ExecutorNode();
             and_node->_type = AND;
-            and_node->_merge_func = CommonSchema::merge_and;
+            and_node->_merge_func = merge_and;
         } else {
             and_node = root;
         }
@@ -387,7 +312,7 @@ int NewSchema<Node, List>::create_executor(const std::string& search_data,
             _query_words = term_map.begin()->first;
         } else {
             for (auto& pair : term_map) {
-                auto sub_node = new ExecutorNode<ThisType>();
+                auto sub_node = new ExecutorNode();
                 sub_node->_type = TERM;
                 sub_node->_term = pair.first;
                 and_node->_sub_nodes.push_back(sub_node);
@@ -410,12 +335,12 @@ int NewSchema<Node, List>::create_executor(const std::string& search_data,
     return 0;
 }
 
-template<typename Node, typename List>
-int NewSchema<Node, List>::next(SmartRecord record) {
+template<typename List>
+int NewSchema<List>::next(SmartRecord record) {
     if (!_cur_node) {
         return -1;
     }
-    const Node& reverse_node = *_cur_node;
+    const ReverseNode& reverse_node = *_cur_node;
     int ret = record->decode_key(*_index_info, reverse_node.key());
     if (ret < 0) {
         return -1;

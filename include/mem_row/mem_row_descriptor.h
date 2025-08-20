@@ -59,7 +59,8 @@ private:
     
     // kv: tuple_id => DescriptorProto (message, tuple)
     std::map<int32_t, const google::protobuf::Message*> _id_tuple_mapping;
-
+    // 数组替代map加速查询，第一层vector位置索引是tuple_id，第二层vector位置索引是slot_id，存储值为对应slots的位置
+    std::shared_ptr<std::vector<std::vector<int32_t>>> _slot_idxes_mapping;
 };
 }
 

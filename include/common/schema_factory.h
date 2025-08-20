@@ -245,6 +245,8 @@ struct TableInfo {
     std::vector<FieldInfo> fields_need_sum;
     FieldInfo version_field;
     bool has_version = false;
+    // 向量索引字段，前过滤使用
+    std::unordered_set<int32_t> vector_fields;
 
     // DBLINK表
     pb::DBLinkInfo dblink_info;
@@ -380,6 +382,7 @@ struct InstanceDBStatus {
     int64_t faulty_count = 0;
     TimeCost last_update_time;
     static const int64_t CHECK_COUNT = 10;
+    int64_t meta_id = 0;
 };
 struct IdcMapping {
     // meta_id => store，记录每个Meta对应的store实例信息，用于全量更新时删除对应Meta的store实例信息
@@ -705,6 +708,15 @@ public:
         return _additional_ranges;
     }
 
+    const Range partition_range(int64_t partition_id) {
+        for (const auto& range : _ranges) {
+            if (range.partition_id == partition_id) {
+                return range;
+            }
+        }
+        return Range();
+    }
+
     int get_specified_partition_ids(
             const std::shared_ptr<UserInfo>& user_info, std::set<int64_t>& partition_ids, bool is_read = false) {
         bool is_request_additional = false;
@@ -919,10 +931,22 @@ struct SqlStatistics {
     int64_t latency_us_9999 = 0;
     int64_t times_avg_and_9999 = 20; // latency_us_9999 / latency_us，应对平响上升后的突发响应
     int64_t counter = 0;
+
     bool first = true;
     Heap<int64_t> latency_heap{100};
     Heap<int64_t> scan_rows_heap{100};
     std::mutex mutex;
+
+    // for mpp, 99%
+    static const int64_t DB_STATISTIC_TOTAL_COUNT = 10000;
+    int64_t db_statistic_counter = 0;
+    bool db_statistic_first = true;
+    int64_t db_handle_rows_99 = INT64_MAX;
+    int64_t db_handle_bytes_99 = INT64_MAX;
+    Heap<int64_t, std::greater<int64_t>> db_handle_rows_heap{100, INT64_MAX}; // 大顶堆
+    Heap<int64_t, std::greater<int64_t>> db_handle_bytes_heap{100, INT64_MAX};
+    int64_t last_query_time = 0;
+    
     int64_t dynamic_timeout_ms() const {
         //有sql扫描量很大的并且不稳定的
         if (scan_rows_9999 > 20000 && avg_scan_rows > 0 && scan_rows_9999 / avg_scan_rows > 100) {
@@ -976,6 +1000,44 @@ struct SqlStatistics {
             scan_rows_heap.replace_top(scan_rows);
         }
     }
+
+    void get_db_handle_stats(int64_t& rows_99, int64_t& bytes_99, int64_t& cnt) {
+        rows_99 = (db_handle_rows_99 == INT64_MAX ? -1 : db_handle_rows_99);
+        bytes_99 = (db_handle_bytes_99 == INT64_MAX ? -1 : db_handle_bytes_99);
+        cnt = db_statistic_counter;
+    }
+
+    void update_db_stat(int64_t rows, int64_t bytes, int64_t query_time) {
+        std::unique_lock<std::mutex> lock(mutex);
+        last_query_time = query_time;
+        if (++db_statistic_counter > DB_STATISTIC_TOTAL_COUNT) {
+            db_handle_rows_99 = db_handle_rows_heap.top();
+            db_handle_bytes_99 = db_handle_bytes_heap.top();
+            db_statistic_counter = 0;
+            db_handle_rows_heap.clear();
+            db_handle_rows_heap.resize(100, INT64_MAX);
+            db_handle_bytes_heap.clear();
+            db_handle_bytes_heap.resize(100, INT64_MAX);
+            db_statistic_first = false;
+            return;
+        }
+        if (db_statistic_first) {
+            //第一轮计算，快速计算出非精确的值
+            if (db_statistic_counter < 1000) {
+                db_handle_rows_99 = std::min(db_handle_rows_99, rows);
+                db_handle_bytes_99 = std::min(db_handle_bytes_99, bytes);
+            } else {
+                db_handle_rows_99 = db_handle_rows_heap.top();
+                db_handle_bytes_99 = db_handle_bytes_heap.top();
+            }
+        }
+        if (rows < db_handle_rows_heap.top()) {
+            db_handle_rows_heap.replace_top(rows);
+        }
+        if (bytes < db_handle_bytes_heap.top()) {
+            db_handle_bytes_heap.replace_top(bytes);
+        }
+    }
 };
 
 // DBLink表使用，用于db侧存储BaikalMeta和meta_id的映射关系
@@ -985,9 +1047,17 @@ struct MetaMap {
     std::unordered_map<std::string, int64_t> meta_name_id_map; // <meta_name, meta_id>
 };
 
+// addresses里都是在 baikal_faulty_interval_times * baikal_heartbeat_interval_us
+// 状态为NORMAL的baikal实例
+struct BaikalAddresses {
+    std::vector<std::string> addresses;
+    std::unordered_map<std::string, int64_t> last_update_timestamp;
+};
+
 using SqlStatMap = std::unordered_map<uint64_t, std::shared_ptr<SqlStatistics>>;
 using DoubleBufferedSql = butil::DoublyBufferedData<SqlStatMap>;
 using DoublBufferedMetaMap = butil::DoublyBufferedData<MetaMap>;
+using DoublBufferedDBAddresses = butil::DoublyBufferedData<BaikalAddresses>;
 
 class SchemaFactory {
 typedef ::google::protobuf::RepeatedPtrField<pb::RegionInfo> RegionVec;
@@ -1018,6 +1088,9 @@ public:
     }
     //bucket_size
     int init(bool is_db = false, bool is_backup = false);
+
+    // 随机选择num个可用的db
+    int rolling_pick_db(int num, std::vector<std::string>& addresses);
 
     // not thread-safe, should be called in single thread
     // 删除判断deleted, name允许改
@@ -1072,8 +1145,10 @@ public:
     int64_t get_total_rows(int64_t table_id);
     // 从直方图中计算取值区间占比，如果计算小于某值的比率，则lower填null；如果计算大于某值的比率，则upper填null
     double get_histogram_ratio(int64_t table_id, int field_id, const ExprValue& lower, const ExprValue& upper);
-    // 计算单个值占比
+    // 使用cms计算单个值占比
     double get_cmsketch_ratio(int64_t table_id, int field_id, const ExprValue& value);
+    // 计算单个值占比，有cms使用cms，没有cms使用hll，都没有固定返回1.0
+    double get_eq_field_ratio(int64_t table_id, int field_id, const ExprValue& value);
     SmartStatistics get_statistics_ptr(int64_t table_id);
     int64_t get_histogram_sample_cnt(int64_t table_id);
     int64_t get_histogram_distinct_cnt(int64_t table_id, int field_id); 
@@ -1122,6 +1197,12 @@ public:
     std::shared_ptr<UserInfo> get_user_info(const std::string& user);
     std::shared_ptr<SqlStatistics> get_sql_stat(int64_t sign);
     std::shared_ptr<SqlStatistics> create_sql_stat(int64_t sign);
+    int get_mpp_signs_stat(std::vector<uint64_t>& signs, std::vector<int64_t>& rows99, 
+                           std::vector<int64_t>& bytes99, std::vector<int64_t>& cnt, 
+                           std::vector<int64_t>& last_query_time);
+    void add_mpp_signs_stats(std::vector<uint64_t>& signs, 
+                           std::vector<int64_t>& rows99, 
+                           std::vector<int64_t>& bytes99);
     std::vector<std::string> get_db_list(const std::shared_ptr<UserInfo>& user_info);
     std::set<int64_t> get_db_id_list(const std::shared_ptr<UserInfo>& user_info);
     std::vector<std::string> get_table_list(
@@ -1171,6 +1252,8 @@ public:
             const std::vector<int64_t>& partitions = std::vector<int64_t>{0});
     int get_all_partition_regions(int64_t table_id, 
             std::map<int64_t, pb::RegionInfo>* region_infos);
+    int get_partition_regions(int64_t table_id, const std::vector<int64_t>& partition_ids,  
+                                    std::map<int64_t, pb::RegionInfo>& region_infos);
     int check_region_ranges_consecutive(int64_t table_id);
     int get_region_by_key(int64_t main_table_id, 
             IndexInfo& index,
@@ -1616,7 +1699,7 @@ public:
         return true;
     }
 
-    // DBLINK表使用，获取主Meta上的所有DBLink表
+    // DBLINK表使用，获取主Meta上的所有DBLink BaikalDB表，用于心跳交互
     void get_all_dblink_infos(std::vector<pb::DBLinkInfo>& dblink_infos) {
         auto func = [&dblink_infos] (const SchemaMapping& schema) {
             for (auto& info_pair : schema.table_info_mapping) {
@@ -1624,7 +1707,8 @@ public:
                 if (meta_id != 0) {
                     continue;
                 }
-                if (info_pair.second->engine != pb::DBLINK) {
+                if (info_pair.second->engine != pb::DBLINK || 
+                        info_pair.second->dblink_info.type() != pb::LT_BAIKALDB) {
                     continue;
                 }
                 dblink_infos.emplace_back(info_pair.second->dblink_info);
@@ -1670,9 +1754,13 @@ public:
         meta_id_name_map = scoped_ptr->meta_id_name_map;
         return 0;
     }
-
+    void update_valiable_addresses(const std::vector<pb::BaikalStatus>& baikal_status_vec);
+    void set_db_unavailable(const std::string& db_address);
     void update_meta_map(const std::string& meta_name);
 
+    std::string get_address() const {
+        return _my_address;
+    }
 private:
     SchemaFactory() {
         _is_inited = false;
@@ -1686,6 +1774,7 @@ private:
             DB_FATAL("get physical room fail, ip: %s", address.c_str());
         }
     }
+    int update_valiable_addresses_internal(BaikalAddresses& db_addresses, const std::vector<pb::BaikalStatus>& baikal_status_vec);
     int update_table_internal(SchemaMapping& schema_mapping, const pb::SchemaInfo& table);
     int delete_table_internal(SchemaMapping& schema_mapping, const int64_t table_id);
     int update_meta_map_internal(MetaMap& meta_map, const std::string& meta_name);
@@ -1693,7 +1782,7 @@ private:
                             const pb::SchemaConf &schema_conf, 
                                            pb::SchemaConf& mem_conf);
     // 全量更新
-    void update_index(TableInfo& info, const pb::IndexInfo& index,
+    int update_index(TableInfo& info, const pb::IndexInfo& index,
             const pb::IndexInfo* pk_index, SchemaMapping& background);
     //delete table和index
     void delete_table(const pb::SchemaInfo& table, SchemaMapping& background);
@@ -1734,6 +1823,10 @@ private:
     // DBLINK表
     DoublBufferedMetaMap _doubly_buffer_meta_map;
     std::unordered_map<int64_t, int64_t> _last_updated_index_map; // <meta_id, last_updated_index>
+
+    DoublBufferedDBAddresses _doubly_valiable_addresses;
+    // ip:port
+    std::string _my_address;
 };
 }
 

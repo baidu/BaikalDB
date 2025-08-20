@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "common.h"
+#include <arpa/inet.h>
 #include <unordered_map>
 #include <cstdlib>
 #include <cctype>
@@ -48,6 +49,7 @@
 #include "re2/re2.h"
 
 #include <boost/algorithm/string.hpp>
+#include <arrow/type_fwd.h>
 
 using google::protobuf::FieldDescriptorProto;
 
@@ -68,8 +70,24 @@ DEFINE_bool(disambiguate_select_name, false, "whether use the first when select 
 DEFINE_int32(new_sign_read_concurrency, 10, "new_sign_read concurrency, default:20");
 DEFINE_bool(open_new_sign_read_concurrency, false, "open new_sign_read concurrency, default: false");
 DEFINE_bool(need_verify_ddl_permission, false, "default true");
-DEFINE_bool(use_cond_decrease_signal, false, "default false");
 DEFINE_int32(first_batch_size_for_vector, 1024, "first_batch_size_for_vector, default: 1024, max: 1024");
+DEFINE_int32(db_request_timeout, 30000, 
+            "db as server request timeout, default:30000ms");
+DEFINE_int32(db_connect_timeout, 5000, 
+            "db as server connect timeout, default:5000ms");
+DEFINE_int32(db_port, 8100, "db port");
+DEFINE_int64(mpp_min_statistics_rows, 500000, "mpp min statistics rows");
+DEFINE_int64(mpp_min_statistics_bytes, 1024 * 1024 * 32ULL, "mpp min statistics bytes"); 
+DEFINE_int32(remote_compaction_request_timeout, 900000, 
+"remote compaction request timeout, default:900000ms");
+DEFINE_int32(remote_compaction_request_file_timeout, 10000, 
+"remote compaction request timeout, default:10000");
+DEFINE_int32(remote_compaction_connect_timeout, 5000, 
+            "remote compaction connect timeout, default:5000ms");
+DEFINE_int32(store_port, 8110, "Server port");
+DEFINE_string(secondary_db_path, "./rocks_db_secondary", "rocks db path");
+DEFINE_string(compaction_db_path, "./rocks_db_compaction", "rocks db path for compaction server");
+DEFINE_int32(remote_compaction_server_concurrency, 10, "remote_compaction_server_concurrency");
 
 int64_t timestamp_diff(timeval _start, timeval _end) {
     return (_end.tv_sec - _start.tv_sec) * 1000000 
@@ -491,37 +509,94 @@ int primitive_type_bytes_len(pb::PrimitiveType type) {
     return _mysql_pb_type_bytes_count[type];
 }
 
-int primitive_to_proto_type(pb::PrimitiveType type) {
+std::pair<int32_t, int32_t> primitive_to_other_type(pb::PrimitiveType type) {
     using google::protobuf::FieldDescriptorProto;
-    static std::unordered_map<int32_t, int32_t> _mysql_pb_type_mapping = {
-        { pb::INT8,         FieldDescriptorProto::TYPE_SINT32 },
-        { pb::INT16,        FieldDescriptorProto::TYPE_SINT32 },
-        { pb::INT32,        FieldDescriptorProto::TYPE_SINT32 },
-        { pb::INT64,        FieldDescriptorProto::TYPE_SINT64 },
-        { pb::UINT8,        FieldDescriptorProto::TYPE_UINT32 },
-        { pb::UINT16,       FieldDescriptorProto::TYPE_UINT32 },
-        { pb::UINT32,       FieldDescriptorProto::TYPE_UINT32 },
-        { pb::UINT64,       FieldDescriptorProto::TYPE_UINT64 },
-        { pb::FLOAT,        FieldDescriptorProto::TYPE_FLOAT  },
-        { pb::DOUBLE,       FieldDescriptorProto::TYPE_DOUBLE },
-        { pb::STRING,       FieldDescriptorProto::TYPE_BYTES  },
-        { pb::DATETIME,     FieldDescriptorProto::TYPE_FIXED64},
-        { pb::TIMESTAMP,    FieldDescriptorProto::TYPE_FIXED32},
-        { pb::DATE,         FieldDescriptorProto::TYPE_FIXED32},
-        { pb::TIME,         FieldDescriptorProto::TYPE_SFIXED32},
-        { pb::HLL,          FieldDescriptorProto::TYPE_BYTES},
-        { pb::BOOL,         FieldDescriptorProto::TYPE_BOOL},
-        { pb::BITMAP,       FieldDescriptorProto::TYPE_BYTES},
-        { pb::TDIGEST,      FieldDescriptorProto::TYPE_BYTES},
-        { pb::JSON,         FieldDescriptorProto::TYPE_BYTES},
-        { pb::NULL_TYPE,    FieldDescriptorProto::TYPE_BOOL}
+    // arrow type和proto type保持一致
+    static std::unordered_map<int32_t, std::pair<int32_t, int32_t>> _mysql_pb_type_mapping = {
+        { pb::INT8,         {FieldDescriptorProto::TYPE_SINT32,   arrow::Type::type::INT32}},
+        { pb::INT16,        {FieldDescriptorProto::TYPE_SINT32,   arrow::Type::type::INT32}},
+        { pb::INT32,        {FieldDescriptorProto::TYPE_SINT32,   arrow::Type::type::INT32}},
+        { pb::INT64,        {FieldDescriptorProto::TYPE_SINT64,   arrow::Type::type::INT64}},
+        { pb::UINT8,        {FieldDescriptorProto::TYPE_UINT32,   arrow::Type::type::UINT32}},
+        { pb::UINT16,       {FieldDescriptorProto::TYPE_UINT32,   arrow::Type::type::UINT32}},
+        { pb::UINT32,       {FieldDescriptorProto::TYPE_UINT32,   arrow::Type::type::UINT32}},
+        { pb::UINT64,       {FieldDescriptorProto::TYPE_UINT64,   arrow::Type::type::UINT64}},
+        { pb::FLOAT,        {FieldDescriptorProto::TYPE_FLOAT,    arrow::Type::type::FLOAT}},
+        { pb::DOUBLE,       {FieldDescriptorProto::TYPE_DOUBLE,   arrow::Type::type::DOUBLE}},
+        { pb::STRING,       {FieldDescriptorProto::TYPE_BYTES,    arrow::Type::type::LARGE_BINARY}},
+        { pb::DATETIME,     {FieldDescriptorProto::TYPE_FIXED64,  arrow::Type::type::UINT64}},
+        { pb::TIMESTAMP,    {FieldDescriptorProto::TYPE_FIXED32,  arrow::Type::type::UINT32}},
+        { pb::DATE,         {FieldDescriptorProto::TYPE_FIXED32,  arrow::Type::type::UINT32}},
+        { pb::TIME,         {FieldDescriptorProto::TYPE_SFIXED32, arrow::Type::type::INT32}},
+        { pb::HLL,          {FieldDescriptorProto::TYPE_BYTES,    arrow::Type::type::LARGE_BINARY}},
+        { pb::BOOL,         {FieldDescriptorProto::TYPE_BOOL,     arrow::Type::type::BOOL}},
+        { pb::BITMAP,       {FieldDescriptorProto::TYPE_BYTES,    arrow::Type::type::LARGE_BINARY}},
+        { pb::TDIGEST,      {FieldDescriptorProto::TYPE_BYTES,    arrow::Type::type::LARGE_BINARY}},
+        { pb::NULL_TYPE,    {FieldDescriptorProto::TYPE_BOOL,     arrow::Type::type::BOOL}}
     };
     if (_mysql_pb_type_mapping.count(type) == 0) {
         DB_WARNING("mysql_type %d not supported.", type);
-        return -1;
+        return std::make_pair(-1, -1);
     }
     return _mysql_pb_type_mapping[type];
 }
+
+int primitive_to_proto_type(pb::PrimitiveType type) {
+    return primitive_to_other_type(type).first;
+}
+int primitive_to_arrow_type(pb::PrimitiveType type) {
+    return primitive_to_other_type(type).second;
+}
+
+pb::PrimitiveType mysql_type_to_primitive_type(const std::string& mysql_type_str) {
+    static std::unordered_map<std::string, pb::PrimitiveType> _mysql_type_to_primitive_type_mapping = {
+        {"boolean",             pb::BOOL},
+        {"tinyint",             pb::INT8},
+        {"smallint",            pb::INT16},
+        {"mediumint",           pb::INT32},
+        {"int",                 pb::INT32},
+        {"bigint",              pb::INT64},
+        {"unsigned_tinyint",    pb::UINT8},
+        {"unsigned_smallint",   pb::UINT16},
+        {"unsigned_mediumint",  pb::UINT32},
+        {"unsigned_int",        pb::UINT32},
+        {"unsigned_bigint",     pb::UINT64},
+        {"float",               pb::FLOAT},
+        {"double",              pb::DOUBLE},
+        {"decimal",             pb::DOUBLE}, // decimal使用double类型
+        {"unsigned_float",      pb::FLOAT},
+        {"unsigned_double",     pb::DOUBLE},
+        {"unsigned_decimal",    pb::DOUBLE},
+        {"time",                pb::TIME},
+        {"timestamp",           pb::TIMESTAMP},
+        {"date",                pb::DATE},
+        {"datetime",            pb::DATETIME},
+        {"char",                pb::STRING},
+        {"varchar",             pb::STRING},
+        {"text",                pb::STRING},
+        {"tinytext",            pb::STRING},
+        {"mediumtext",          pb::STRING},
+        {"longtext",            pb::STRING},
+        {"blob",                pb::STRING},
+        {"tinyblob",            pb::STRING},
+        {"mediumblob",          pb::STRING},
+        {"longblob",            pb::STRING},
+        {"year",                pb::INT16},
+        {"json",                pb::STRING},
+        {"enum",                pb::STRING},
+        {"set",                 pb::STRING},
+        {"bit",                 pb::STRING},
+        // {"null", /*TODO*/},
+        // {"geometry", /*TODO*/},
+        // {"array", /*TODO*/},
+    };
+    if (_mysql_type_to_primitive_type_mapping.count(mysql_type_str) == 0) {
+        DB_WARNING("Invalid mysql type:%s not supported.", mysql_type_str.c_str());
+        return pb::INVALID_TYPE;
+    }
+    return _mysql_type_to_primitive_type_mapping[mysql_type_str];
+}
+
 int get_physical_room(const std::string& ip_and_port_str, std::string& physical_room) {
 #ifdef BAIDU_INTERNAL
     butil::EndPoint point;
@@ -605,7 +680,7 @@ bool same_with_container_id_and_address(const std::string& container_id, const s
     if (instances[0] == address) {
         return true;
     } else {
-        DB_WARNING("diff with container_id:%s and address:%s", container_id.c_str(), address.c_str());
+        DB_WARNING("diff with container_id:%s(%s) and address:%s", container_id.c_str(), instances[0].c_str(), address.c_str());
         return false;
     }
 #else
@@ -957,6 +1032,13 @@ int convert_charset(const pb::Charset& from_charset, const std::string& from_str
         return -1;
     }
     return 0;
+}
+
+// 合法ipv4地址校验
+bool is_valid_ip(const std::string& ip) {
+    struct sockaddr_in sa;
+    int result = inet_pton(AF_INET, ip.c_str(), &(sa.sin_addr));
+    return result != 0;
 }
 
 }  // baikaldb

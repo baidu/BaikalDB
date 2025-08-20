@@ -23,7 +23,8 @@ ExternalProject_Add(
         extern_faiss
         ${EXTERNAL_PROJECT_LOG_ARGS}
         DEPENDS openblas
-        URL "https://github.com/facebookresearch/faiss/archive/refs/tags/v1.7.4.tar.gz"
+        GIT_REPOSITORY "https://github.com/baikalgroup/faiss.git"
+        GIT_TAG "v1.7.4"
         PREFIX ${FAISS_SOURCES_DIR}
         UPDATE_COMMAND ""
         CMAKE_ARGS -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
@@ -46,7 +47,7 @@ ExternalProject_Add(
         -DCMAKE_INSTALL_LIBDIR:PATH=${FAISS_INSTALL_DIR}/lib
         -DCMAKE_BUILD_TYPE:STRING=${THIRD_PARTY_BUILD_TYPE}
         BUILD_IN_SOURCE 1
-        BUILD_COMMAND $(MAKE) -j ${NUM_OF_PROCESSOR} faiss
+        BUILD_COMMAND $(MAKE) -j4 faiss
         INSTALL_COMMAND $(MAKE) install
 )
 ADD_DEPENDENCIES(extern_faiss openblas)

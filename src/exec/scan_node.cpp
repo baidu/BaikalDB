@@ -14,9 +14,11 @@
 
 #include <map>
 #include <cfloat>
+#include "mysql_scan_node.h"
 #include "scan_node.h"
 #include "filter_node.h"
 #include "join_node.h"
+#include "parquet_scan_node.h"
 #include "schema_factory.h"
 #include "scalar_fn_call.h"
 #include "slot_ref.h"
@@ -162,10 +164,12 @@ void ScanNode::close(RuntimeState* state) {
     ExecNode::close(state);
     clear_possible_indexes();
 }
-void ScanNode::show_explain(std::vector<std::map<std::string, std::string>>& output) {
+int ScanNode::show_explain(QueryContext* ctx, std::vector<std::map<std::string, std::string>>& output, int& next_id, int display_id) {
+    display_id = (display_id != -1 ? display_id : (next_id++));
+    bool is_simple = ctx->noncorrelated_subquerys.empty() && ctx->sub_query_plans.empty();
     std::map<std::string, std::string> explain_info = {
-        {"id", "1"},
-        {"select_type", "SIMPLE"},
+        {"id", std::to_string(display_id)},
+        {"select_type", is_simple ? "SIMPLE" : "PRIMARY"},
         {"table", "NULL"},
         {"partitions", "NULL"},
         {"type", "NULL"},
@@ -249,6 +253,7 @@ void ScanNode::show_explain(std::vector<std::map<std::string, std::string>>& out
         }
     }
     output.push_back(explain_info);
+    return display_id;
 }
 
 void AccessPathMgr::show_cost(std::vector<std::map<std::string, std::string>>& path_infos) {
@@ -526,8 +531,18 @@ int64_t AccessPathMgr::pre_process_select_index() {
 int64_t AccessPathMgr::select_index() {
     int64_t select_idx = pre_process_select_index();
     if (select_idx == 0) {
-        if (SchemaFactory::get_instance()->get_statistics_ptr(_table_id) != nullptr 
-            && SchemaFactory::get_instance()->is_switch_open(_table_id, TABLE_SWITCH_COST) && !_use_fulltext_or_vector) {
+        // hint 同时设置了WITH_CBO 和 WITHOUT_CBO， WITH_CBO生效
+        if (SchemaFactory::get_instance()->get_statistics_ptr(_table_id) == nullptr || _use_fulltext_or_vector) {
+            // 无法使用cbo
+            select_idx = select_index_common();
+        } else if (_explain_hint != nullptr && _explain_hint->get_flag<ExplainHint::HintType::WITH_CBO>()) {
+            // hint 强制使用CBO
+            DB_DEBUG("table %ld has statistics", _table_id);
+            select_idx = select_index_by_cost();
+        } else if (_explain_hint != nullptr && _explain_hint->get_flag<ExplainHint::HintType::WITHOUT_CBO>()) {
+            // hint 强制不使用CBO
+            select_idx = select_index_common();
+        } else if (SchemaFactory::get_instance()->is_switch_open(_table_id, TABLE_SWITCH_COST)) {
             DB_DEBUG("table %ld has statistics", _table_id);
             select_idx = select_index_by_cost();
         } else {
@@ -542,7 +557,7 @@ int64_t ScanNode::select_join_index_in_baikaldb(const std::string& sample_sql) {
     _select_index_for_join = _join_path.select_index();
     auto path = _join_path.path(_select_index_for_join);
 
-    if (path->is_virtual) {
+    if (path->is_virtual && !_join_path.get_explain_hint_flag<ExplainHint::HintType::KEEP_VIRTUAL>()) {
         // 删除，确保下次不再选择该虚拟索引
         _join_path.delete_possible_index(_select_index_for_join);
         _join_path.reset();
@@ -556,6 +571,14 @@ int64_t ScanNode::select_join_index_in_baikaldb(const std::string& sample_sql) {
     if (multi_reverse_index.size() > 0) {
         _select_index_for_join = multi_reverse_index[0];
     }
+    if (_select_idx == _table_id
+             && _main_path.path(_select_idx)->pos_index.ranges_size() == 1
+             && _main_path.path(_select_idx)->pos_index.ranges(0).left_key().empty()
+             && _main_path.path(_select_idx)->pos_index.ranges(0).right_key().empty()) {
+        // 当且仅当join非驱动表不推in条件时, 选择主键, 且主键range为空(扫全表)
+        // 如果推in条件后, 仍然选择主键, 且主键range依然为空(扫全表),可以使用no index join
+        calc_join_index_range();
+    }
     return _select_index_for_join;
 }
 
@@ -563,7 +586,7 @@ int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {
     // 预处理，使用倒排索引的sql不进行预处理，如果select_idx大于0则已经选出索引
     int64_t select_idx = _main_path.select_index();
     auto path = _main_path.path(select_idx);
-    if (path->is_virtual) {
+    if (path->is_virtual && !_main_path.get_explain_hint_flag<ExplainHint::HintType::KEEP_VIRTUAL>()) {
         // 虚拟索引需要重新选择
         _scan_indexs.clear();
         // 删除，确保下次不再选择该虚拟索引
@@ -626,6 +649,7 @@ int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {
         }
         filter_condition.insert(filter_condition.end(), path->other_condition.begin(),
                 path->other_condition.end());
+        
         _learner_use_diff_index = false;
         int64_t learner_idx = 0;
         if (path->need_select_learner_index() || _learner_path.has_disable_index()) {
@@ -696,21 +720,45 @@ void ScanNode::add_global_condition_again() {
     static_cast<FilterNode*>(get_parent())->modifiy_pruned_conjuncts_by_index(other_condition);
 }
 
-ScanNode* ScanNode::create_scan_node(const pb::PlanNode& node) {
+ScanNode* ScanNode::create_scan_node(const pb::PlanNode& node, const CreateExecOptions& options) {
+    // db侧，行存和列存ScanNode都转化为RocksdbScanNode；
+    // store侧，如果走列存，则ScanNode转化为ParquetScanNode；如果走行存，则ScanNode转化为RocksdbScanNode；
+    bool use_column_storage = node.derive_node().scan_node().use_column_storage();
     if (node.derive_node().scan_node().has_engine()) {
         pb::Engine engine = node.derive_node().scan_node().engine();
         switch (engine) {
-            case pb::ROCKSDB:
             case pb::BINLOG:
             case pb::ROCKSDB_CSTORE:
                 return new RocksdbScanNode;
+            case pb::ROCKSDB:
+                if (use_column_storage && options.use_column_storage) {
+                    return new ParquetScanNode;
+                } else {
+                    return new RocksdbScanNode;
+                }
             case pb::INFORMATION_SCHEMA:
                 return new InformationSchemaScanNode;
             case pb::REDIS:
                 return new RedisScanNode;
+            case pb::DBLINK: {
+                int64_t table_id = node.derive_node().scan_node().table_id();
+                SmartTable table_info = SchemaFactory::get_instance()->get_table_info_ptr(table_id);
+                if (table_info == nullptr) {
+                    DB_WARNING("table_info is nullptr, _table_id: %ld", table_id);
+                    return nullptr;
+                }
+                if (table_info->dblink_info.type() == pb::LT_MYSQL) {
+                    return new MysqlScanNode;
+                }
+                break;
+            }
         }
     } else {
-        return new RocksdbScanNode;
+        if (use_column_storage && options.use_column_storage) {
+            return new ParquetScanNode;
+        } else {
+            return new RocksdbScanNode;
+        }
     }
     return nullptr;
 }
@@ -741,20 +789,21 @@ int AccessPathMgr::choose_arrow_pb_reverse_index() {
             }
         }
         filter_type = pb_type_num <= arrow_type_num ? pb::ST_PROTOBUF_OR_FORMAT1 : pb::ST_ARROW;
-        DB_DEBUG("reverse_filter type[%s]", pb::StorageType_Name(filter_type).c_str());
-        auto remove_indexs_func = [this](std::vector<int>& to_remove_indexs) {
-            _multi_reverse_index.erase(std::remove_if(_multi_reverse_index.begin(), _multi_reverse_index.end(), [&to_remove_indexs](const int& index) {
-                return std::find(to_remove_indexs.begin(), to_remove_indexs.end(), index) 
-                    != to_remove_indexs.end() ? true : false;
-            }), _multi_reverse_index.end());
-        };
-
-        if (filter_type == pb::ST_PROTOBUF_OR_FORMAT1) {
-            remove_indexs_func(pb_indexs);
-            _fulltext_use_arrow = true;
-        } else if (filter_type == pb::ST_ARROW) {
-            remove_indexs_func(arrow_indexs);
-        }
+        // DB_DEBUG("reverse_filter type[%s]", pb::StorageType_Name(filter_type).c_str());
+        // auto remove_indexs_func = [this](std::vector<int>& to_remove_indexs) {
+        //     _multi_reverse_index.erase(std::remove_if(_multi_reverse_index.begin(), _multi_reverse_index.end(), [&to_remove_indexs](const int& index) {
+        //         return std::find(to_remove_indexs.begin(), to_remove_indexs.end(), index)
+        //             != to_remove_indexs.end() ? true : false;
+        //     }), _multi_reverse_index.end());
+        // };
+        //
+        // if (filter_type == pb::ST_PROTOBUF_OR_FORMAT1) {
+        //     remove_indexs_func(pb_indexs);
+        //     _fulltext_use_arrow = true;
+        // } else if (filter_type == pb::ST_ARROW) {
+        //     remove_indexs_func(arrow_indexs);
+        // }
+        _fulltext_use_arrow = true;
     }
     return 0;   
 }
@@ -770,11 +819,17 @@ int ScanNode::create_fulltext_index_tree(FulltextInfoNode* node, pb::FulltextInd
             root->set_fulltext_node_type(pb::FNT_TERM);
             auto possible_index = root->mutable_possible_index();
             possible_index->set_index_id(inner_node_pair.first);
-            if (inner_node.like_values.size() != 1) {
-                DB_WARNING("like values size not equal one");
+
+            std::string str;
+            if (inner_node.like_values.size() == 1) {
+                str = inner_node.like_values[0].get_string();
+            } else if (inner_node.eq_in_values.size() == 1) {
+                str = inner_node.eq_in_values[0].get_string();
+            } else {
+                DB_WARNING("like values size not equal one and `in` exprs size not equal one.");
                 return -1;
             }
-            std::string str = inner_node.like_values[0].get_string();
+
             auto range = possible_index->add_ranges();
             auto range_type = inner_node.type;
             range->set_left_key(str);
@@ -827,6 +882,20 @@ int ScanNode::create_fulltext_index_tree() {
     }
     return 0;
 }
+
+int ScanNode::set_partition_property_and_schema(QueryContext* ctx) {
+    auto tuple_desc = ctx->get_tuple_desc(_tuple_id);
+    if (tuple_desc == nullptr) {
+        DB_WARNING("get tuple desc failed, tuple_id:%d", _tuple_id);
+        return -1;
+    }
+    _partition_property.type = pb::AnyType;
+    for (auto slot : tuple_desc->slots()) {
+        _data_schema.insert(ColumnInfo{slot.tuple_id(), slot.slot_id(), slot.slot_type()});
+    }
+    return 0;
+}
+
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

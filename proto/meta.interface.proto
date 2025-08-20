@@ -172,6 +172,7 @@ message PartitionInfo {
 
 enum DBLinkType {
     LT_BAIKALDB = 1;
+    LT_MYSQL = 2;
 };
 
 message DBLinkInfo {
@@ -181,6 +182,7 @@ message DBLinkInfo {
     optional string database_name  = 4;
     optional string table_name     = 5;
     optional int64  meta_id        = 6;
+    optional MysqlInfo mysql_info  = 7;
 };
 
 // 增加新字段时，考虑是否对该字段增删meta标识，对应dblink表场景!!!
@@ -443,7 +445,15 @@ message InstanceInfo {
     optional string network_segment = 15;
     optional string container_id    = 16;
     optional int64 rocks_hang_check_cost = 17;
+    optional string init_address    = 18;
 };
+
+message BaikalStatus {
+    required string address                         = 1;
+    required string resource_tag                    = 2;
+    required Status status                          = 3;
+    optional int64 last_heartbeat_timestamp         = 4;
+}
 
 message MovePhysicalRequest {
     required string physical_room    = 1;
@@ -768,6 +778,7 @@ message BaikalHeartBeatRequest {
     optional bool need_binlog_heartbeat            = 10; // 指定是否binlog capturer的心跳 
     repeated BaikalHeartBeatTable heartbeat_tables = 11; // 指定需要进行同步的表全名
     optional bool need_global_index_heartbeat      = 12; // 指定心跳按需返回是否包含全局索引
+    optional BaikalStatus baikal_status            = 13;
 };
 
 message BaikalOtherHeartBeat {
@@ -785,7 +796,7 @@ message BaikalOtherHeartBeatResponse {
     optional string errmsg                        = 2;
     optional string leader                        = 3;
     repeated Statistics   statistics              = 4;
-    optional InstanceParam instance_param         = 5; // baikaldb动态参数
+    repeated InstanceParam instance_param         = 5; // baikaldb动态参数
 };
 
 message IdcInfo {
@@ -810,6 +821,7 @@ message BaikalHeartBeatResponse {
     repeated RegionDdlWork region_ddl_works       = 11;
     repeated DdlWorkInfo  ddl_works               = 12;
     repeated NameSpaceInfo ns_info                = 13; //全部同步
+    repeated BaikalStatus baikal_status           = 14;
 };
 
 enum QueryOpType {

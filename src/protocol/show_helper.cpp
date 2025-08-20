@@ -22,6 +22,9 @@
 namespace baikaldb {
 DEFINE_int32(active_range_delay_days, 1, "active_range_delay_days, default:1");
 
+DECLARE_string(fetcher_resource_tag);
+DECLARE_string(insulate_fetcher_resource_tag);
+
 void ShowHelper::init() {
     _calls[SQL_SHOW_ABNORMAL_REGIONS] = std::bind(&ShowHelper::_show_abnormal_regions,
             this, std::placeholders::_1, std::placeholders::_2);
@@ -133,6 +136,12 @@ void ShowHelper::init() {
     _calls[SQL_SHOW_CREATE_DATABASE] = std::bind(&ShowHelper::_show_create_database,
             this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_SHOW_ALL_META] = std::bind(&ShowHelper::_show_all_meta,
+            this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_SHOW_MPP_SIGNS] = std::bind(&ShowHelper::_show_mpp_signs,
+            this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_SHOW_FETCHER_RESOURCE_TAG] = std::bind(&ShowHelper::_handle_client_query_template_dispatch,
+            this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_SHOW_INSULATE_FETCHER_RESOURCE_TAG] = std::bind(&ShowHelper::_handle_client_query_template_dispatch,
             this, std::placeholders::_1, std::placeholders::_2);
     _wrapper = MysqlWrapper::get_instance();
 }
@@ -985,7 +994,7 @@ bool ShowHelper::_show_create_table(const SmartSocket& client, const std::vector
             } else if (index_info.type == pb::I_PRIMARY || index_info.type == pb::I_FULLTEXT || index_info.type == pb::I_VECTOR) {
                 oss << " " << index_map[index_info.type] << " ";
             } else if (index_info.type == pb::I_PRIMARY || index_info.type == pb::I_FULLTEXT || index_info.type == pb::I_VECTOR || index_info.type == pb::I_ROLLUP) {
-            oss << " " << index_map[index_info.type] << " ";
+                oss << " " << index_map[index_info.type] << " ";
             } else {
                 oss << "  " << index_map[index_info.type] << " LOCAL ";
             }
@@ -1022,6 +1031,11 @@ bool ShowHelper::_show_create_table(const SmartSocket& client, const std::vector
                 oss << "\"dimension\":" << index_info.dimension << ", ";
                 oss << "\"nprobe\":" << index_info.nprobe << ", ";
                 oss << "\"metric_type\":\"" << pb::MetricType_Name(index_info.metric_type) << "\", ";
+                std::string lower_vector_description = to_lower(index_info.vector_description);
+                if (lower_vector_description.empty() || lower_vector_description.find("hnsw") != std::string::npos) {
+                    oss << "\"efsearch\":" << index_info.efsearch << ", ";
+                    oss << "\"efconstruction\":" << index_info.efconstruction << ", ";
+                }
             }
             oss << "\"hint_status\":\"" << pb::IndexHintStatus_Name(index_info.index_hint_status) << "\"}'";
         } else {
@@ -1167,10 +1181,21 @@ bool ShowHelper::_show_create_table(const SmartSocket& client, const std::vector
         if (info.engine == pb::DBLINK) {
             oss << ", \"dblink_info\": {";
             oss << "\"type\":\"" << pb::DBLinkType_Name(info.dblink_info.type()) << "\"";
-            oss << ",\"meta_name\":\"" << info.dblink_info.meta_name() << "\"";
-            oss << ",\"namespace_name\":\"" << info.dblink_info.namespace_name() << "\"";
-            oss << ",\"database_name\":\"" << info.dblink_info.database_name() << "\"";
-            oss << ",\"table_name\":\"" << info.dblink_info.table_name() << "\"";
+            if (info.dblink_info.has_mysql_info()) {
+                oss << ", \"mysql_info\": {";
+                oss << "\"addr\":\"" << info.dblink_info.mysql_info().addr() << "\"";
+                oss << ",\"username\":\"" << info.dblink_info.mysql_info().username() << "\"";
+                // oss << ",\"password\":\"" << info.dblink_info.mysql_info().password() << "\""; // 隐去password
+                oss << ",\"database_name\":\"" << info.dblink_info.mysql_info().database_name() << "\"";
+                oss << ",\"table_name\":\"" << info.dblink_info.mysql_info().table_name() << "\"";
+                oss << ",\"charset\":\"" << info.dblink_info.mysql_info().charset() << "\"";
+                oss << "}";
+            } else {
+                oss << ",\"meta_name\":\"" << info.dblink_info.meta_name() << "\"";
+                oss << ",\"namespace_name\":\"" << info.dblink_info.namespace_name() << "\"";
+                oss << ",\"database_name\":\"" << info.dblink_info.database_name() << "\"";
+                oss << ",\"table_name\":\"" << info.dblink_info.table_name() << "\"";
+            }
             oss << "}";
         }
         if (info.is_linked) {
@@ -2489,7 +2514,12 @@ bool ShowHelper::_show_schema_conf(const SmartSocket& client, const std::vector<
                                                     "in_fast_import",
                                                     "tail_split_num",
                                                     "tail_split_step",
-                                                    "binlog_backup_days"};
+                                                    "binlog_backup_days",
+                                                    "use_column_storage",
+                                                    "enable_column_engine",
+                                                    "olap_pre_split_cnt",
+                                                    "cold_use_column_only",
+                                                    "force_column_storage"};
     // 前三个conf按照bool解析, pk_prefix_balance按照int32来解析
     if (split_vec.size() != 3 || allowed_conf.find(split_vec[2]) == allowed_conf.end()) {
         client->state = STATE_ERROR;
@@ -2518,7 +2548,12 @@ bool ShowHelper::_show_schema_conf(const SmartSocket& client, const std::vector<
             || split_vec[2] == "backup_table" 
             || split_vec[2] == "tail_split_num" 
             || split_vec[2] == "tail_split_step"
-            || split_vec[2] == "binlog_backup_days") {
+            || split_vec[2] == "binlog_backup_days"
+            || split_vec[2] == "use_column_storage"
+            || split_vec[2] == "enable_column_engine"
+            || split_vec[2] == "olap_pre_split_cnt"
+            || split_vec[2] == "cold_use_column_only"
+            || split_vec[2] == "force_column_storage") {
         names.emplace_back("value");
     }
 
@@ -2807,6 +2842,9 @@ bool ShowHelper::_show_all_tables(const SmartSocket& client, const std::vector<s
     };
     type_func_map["fulltext"] = [](const SmartTable& table) {
         return table != nullptr && table->has_fulltext;
+    };
+    type_func_map["vector"] = [](const SmartTable& table) {
+        return table != nullptr && table->has_vector_index;
     };
     type_func_map["cstore"] = [](const SmartTable& table) {
         return table != nullptr && table->engine == pb::ROCKSDB_CSTORE;
@@ -3301,7 +3339,7 @@ bool ShowHelper::_show_user(const SmartSocket& client, const std::vector<std::st
     row.emplace_back(ips);
     row.emplace_back(info->resource_tag);
     row.emplace_back(std::to_string(info->ddl_permission));
-    row.emplace_back(std::to_string(info->use_read_index));
+    row.emplace_back(std::to_string(info->need_use_read_index()));
     row.emplace_back(std::to_string(info->enable_plan_cache));
     row.emplace_back(pb::RangePartitionType_Name(info->request_range_partition_type));
     row.emplace_back(std::to_string(info->is_request_additional));
@@ -4986,6 +5024,66 @@ bool ShowHelper::_show_switch_tables(const SmartSocket& client, const std::vecto
     return true;
 }
 
+bool ShowHelper::_show_mpp_signs(const SmartSocket& client, const std::vector<std::string>& split_vec) {
+    if (client == nullptr) {
+        DB_FATAL("param invalid");
+        return false;
+    }
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    if (factory == nullptr) {
+        client->state = STATE_ERROR;
+        DB_FATAL("factory is nullptr");
+        return false;
+    }
+
+    std::vector<uint64_t> signs;
+    std::vector<int64_t> rows99;
+    std::vector<int64_t> byte99;
+    std::vector<int64_t> cnts;
+    std::vector<int64_t> last_query_time;
+    if (0 != factory->get_mpp_signs_stat(signs, rows99, byte99, cnts, last_query_time)) {
+        client->state = STATE_ERROR;
+        return false;
+    }
+
+    // Make fields.
+    std::vector<ResultField> fields;
+    std::vector<std::string> names = {"signs", "db_handle_rows99", "db_handle_bytes99", "count", "last_query_time"};
+    for(auto name : names) {
+        ResultField field;
+        field.name = name;
+        field.type = MYSQL_TYPE_VARCHAR;
+        field.length = 1024;
+        fields.emplace_back(field);
+    }
+
+    // Make rows.
+    std::vector< std::vector<std::string> > rows;
+    for (int i = 0; i < signs.size(); ++i) {
+        std::vector<std::string> row;
+        row.emplace_back(std::to_string(signs[i]));
+        row.emplace_back(std::to_string(rows99[i]));
+        row.emplace_back(std::to_string(byte99[i]));
+        row.emplace_back(std::to_string(cnts[i]));
+        ExprValue query_time(pb::TIMESTAMP);
+        query_time._u.uint32_val = last_query_time[i] / 1000000;
+        query_time.cast_to(pb::DATETIME);
+        row.emplace_back(query_time.get_string());
+        rows.emplace_back(row);
+    }
+
+    // Make mysql packet.
+    if (_make_common_resultset_packet(client, fields, rows) != 0) {
+        DB_FATAL_CLIENT(client, "Failed to make result packet.");
+        _wrapper->make_err_packet(client, ER_MAKE_RESULT_PACKET, "Failed to make result packet.");
+        client->state = STATE_ERROR;
+        return false;
+    }
+
+    client->state = STATE_READ_QUERY_RESULT;
+    return true;
+}
+
 bool ShowHelper::_show_all_meta(const SmartSocket& client, const std::vector<std::string>& split_vec) {
    if (client == nullptr) {
         DB_FATAL("param invalid");
@@ -5269,6 +5367,12 @@ bool ShowHelper::_handle_client_query_template_dispatch(const SmartSocket& clien
         }
         return _handle_client_query_template(client, "Disable Indexs", MYSQL_TYPE_VARCHAR,
                                       indexs);
+    } else if (boost::iequals(split_vec[1], "fetcher_resource_tag")) {
+        return _handle_client_query_template(client, "Fetcher_resource_tag",
+                                             MYSQL_TYPE_VARCHAR, {FLAGS_fetcher_resource_tag});
+    } else if (boost::iequals(split_vec[1], "insulate_fetcher_resource_tag")) {
+        return _handle_client_query_template(client, "Insulate_fetcher_resource_tag",
+                                             MYSQL_TYPE_VARCHAR, {FLAGS_insulate_fetcher_resource_tag});
     }
     return false;
 }

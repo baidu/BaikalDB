@@ -143,6 +143,16 @@ int Tokenizer::wordweight(std::string word, std::map<std::string, float>& term_m
     return 0;   
 }
 
+std::string gbk_substr(const std::string& word, size_t len) {
+    size_t i = 0;
+    for (size_t chars = 0; i < word.size() && chars < len; i++, chars++) {
+        if ((word[i] & 0x80) != 0) {
+            i++;
+        }
+    }
+    return word.substr(0, i);
+}
+
 int Tokenizer::wordrank(std::string word, std::map<std::string, float>& term_map, const pb::Charset& charset) {
     if (word.empty()) {
         return 0;
@@ -163,17 +173,29 @@ int Tokenizer::wordrank(std::string word, std::map<std::string, float>& term_map
         }
     }
 
-    int8_t status;
+    int retry = 0;
     nlpc::ver_1_0_0::wordrank_outputPtr s_output = 
-        sofa::create<nlpc::ver_1_0_0::wordrank_output>();
-    nlpc::ver_1_0_0::wordseg_inputPtr s_input = 
-                        sofa::create<nlpc::ver_1_0_0::wordseg_input>();
-    s_input->set_lang_id(0);
-    s_input->set_lang_para(0);
-    s_input->set_query(word);
-    status = nlpc_seg(*wordrank_client, word, s_output, s_input);
+            sofa::create<nlpc::ver_1_0_0::wordrank_output>();
+    int status = 0;
+    do {
+        nlpc::ver_1_0_0::wordseg_inputPtr s_input = 
+            sofa::create<nlpc::ver_1_0_0::wordseg_input>();
+        s_input->set_lang_id(0);
+        s_input->set_lang_para(0);
+        s_input->set_query(word);
+        status = nlpc_seg(*wordrank_client, word, s_output, s_input);
+        if (status != 0) {
+            if (word.size() < 600) {
+                DB_WARNING("segment failed, size:%lu, word[%s]", word.size(), word.c_str());
+                return -1;
+            } else {
+                // 第一次重试500，第二次用400，第三次用300，解决超长报错
+                word = gbk_substr(word, 500 - retry * 100);
+            }
+        }
+    } while (++retry < 4);
     if (status != 0) {
-        //DB_WARNING("segment failed, word[%s]", word.c_str());
+        DB_WARNING("segment failed, word[%s]", word.c_str());
         return -1;
     }
     for (uint32_t i = 0; i < s_output->nlpc_trunks_pb().size(); i++) {

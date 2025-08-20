@@ -176,6 +176,8 @@ struct NetworkSocket {
     std::mutex          mutex;        // mutex to protect socket from multi-thread process
     time_t              last_active;  // last active time of the socket
     timeval             connect_time;
+    bool                client_has_timeout = false; // received EPOLLRDHUP from client
+    bool                executing_query = false;
 
     // Socket buffer and session infomation.
     DataBuffer*     send_buf;                       // Send buffer.

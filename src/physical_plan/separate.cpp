@@ -37,6 +37,7 @@
 #include "single_txn_manager_node.h"
 #include "lock_primary_node.h"
 #include "lock_secondary_node.h"
+#include "window_node.h"
 
 namespace baikaldb {
 int Separate::analyze(QueryContext* ctx) {
@@ -193,15 +194,21 @@ int Separate::separate_simple_select(QueryContext* ctx, ExecNode* plan) {
     PacketNode* packet_node = static_cast<PacketNode*>(plan->get_node(pb::PACKET_NODE));
     LimitNode* limit_node = static_cast<LimitNode*>(plan->get_node(pb::LIMIT_NODE));
     AggNode* agg_node = static_cast<AggNode*>(plan->get_node(pb::AGG_NODE));
-    SortNode* sort_node = static_cast<SortNode*>(plan->get_node(pb::SORT_NODE));
+    SortNode* sort_node = static_cast<SortNode*>(plan->get_last_node(pb::SORT_NODE));
     std::vector<ExecNode*> scan_nodes;
     plan->get_node(pb::SCAN_NODE, scan_nodes);
     SelectManagerNode* manager_node_inter = static_cast<SelectManagerNode*>(plan->get_node(pb::SELECT_MANAGER_NODE));
+    bool is_rocksdb_scan_node = true;
+    if (scan_nodes.size() > 0) {
+        is_rocksdb_scan_node = static_cast<ScanNode*>(scan_nodes[0])->is_rocksdb_scan_node();
+    }
     // 复用prepare的计划
     if (manager_node_inter != nullptr) {
-        std::map<int64_t, pb::RegionInfo> region_infos =
-            static_cast<RocksdbScanNode*>(scan_nodes[0])->region_infos();
-        manager_node_inter->set_region_infos(region_infos);
+        if (is_rocksdb_scan_node) {
+            std::map<int64_t, pb::RegionInfo> region_infos =
+                static_cast<RocksdbScanNode*>(scan_nodes[0])->region_infos();
+            manager_node_inter->set_region_infos(region_infos);
+        }
         return 0;
     }
     std::unique_ptr<SelectManagerNode> manager_node(create_select_manager_node());
@@ -210,10 +217,12 @@ int Separate::separate_simple_select(QueryContext* ctx, ExecNode* plan) {
         return -1;
     }
     if (scan_nodes.size() > 0) {
-        std::map<int64_t, pb::RegionInfo> region_infos =
-                static_cast<RocksdbScanNode*>(scan_nodes[0])->region_infos();
-        manager_node->set_region_infos(region_infos);
-        static_cast<RocksdbScanNode*>(scan_nodes[0])->set_related_manager_node(manager_node.get());
+        if (is_rocksdb_scan_node) {
+            std::map<int64_t, pb::RegionInfo> region_infos =
+                    static_cast<RocksdbScanNode*>(scan_nodes[0])->region_infos();
+            manager_node->set_region_infos(region_infos);
+        }
+        static_cast<ScanNode*>(scan_nodes[0])->set_related_manager_node(manager_node.get());
     }
     std::vector<ExecNode*> dual_scan_nodes;
     plan->get_node(pb::DUAL_SCAN_NODE, dual_scan_nodes);
@@ -238,6 +247,7 @@ int Separate::separate_simple_select(QueryContext* ctx, ExecNode* plan) {
         manager_node->add_child(agg_node);
         merge_agg_node->add_child(manager_node.release());
         parent->replace_child(agg_node, merge_agg_node.release());
+        agg_node->set_has_merger(true);
         return 0;
     }
     if (sort_node != nullptr) {
@@ -301,9 +311,11 @@ int Separate::separate_join(QueryContext* ctx, const std::vector<ExecNode*>& joi
         join->join_get_scan_nodes(pb::DUAL_SCAN_NODE, dual_scan_nodes);
         for (auto& scan_node_ptr : scan_nodes) {
             // INFORMATION_SCHEMA
-            if (!static_cast<ScanNode*>(scan_node_ptr)->is_rocksdb_scan_node()) {
+            if (!static_cast<ScanNode*>(scan_node_ptr)->is_rocksdb_scan_node() && 
+                    !static_cast<ScanNode*>(scan_node_ptr)->is_mysql_scan_node()) {
                 continue;
             }
+            bool is_rocksdb_scan_node = static_cast<ScanNode*>(scan_node_ptr)->is_rocksdb_scan_node();
             ExecNode* manager_node_parent = scan_node_ptr->get_parent();
             ExecNode* manager_node_child = scan_node_ptr;
             if (manager_node_parent == nullptr) {
@@ -321,9 +333,11 @@ int Separate::separate_join(QueryContext* ctx, const std::vector<ExecNode*>& joi
             }
             // 复用prepare的计划
             if (manager_node_parent->node_type() == pb::SELECT_MANAGER_NODE) {
-                std::map<int64_t, pb::RegionInfo> region_infos =
-                    static_cast<RocksdbScanNode*>(scan_node_ptr)->region_infos();
-                manager_node_parent->set_region_infos(region_infos);
+                if (is_rocksdb_scan_node) {
+                    std::map<int64_t, pb::RegionInfo> region_infos =
+                        static_cast<RocksdbScanNode*>(scan_node_ptr)->region_infos();
+                    manager_node_parent->set_region_infos(region_infos);
+                }
                 continue;
             }
 
@@ -343,10 +357,12 @@ int Separate::separate_join(QueryContext* ctx, const std::vector<ExecNode*>& joi
                 DB_WARNING("create manager_node failed");
                 return -1;
             }
-            static_cast<RocksdbScanNode*>(scan_node_ptr)->set_related_manager_node(manager_node.get());
-            std::map<int64_t, pb::RegionInfo> region_infos =
-                    static_cast<RocksdbScanNode*>(scan_node_ptr)->region_infos();
-            manager_node->set_region_infos(region_infos);
+            if (is_rocksdb_scan_node) {
+                std::map<int64_t, pb::RegionInfo> region_infos =
+                        static_cast<RocksdbScanNode*>(scan_node_ptr)->region_infos();
+                manager_node->set_region_infos(region_infos);
+            }
+            static_cast<ScanNode*>(scan_node_ptr)->set_related_manager_node(manager_node.get());
             manager_node_parent->replace_child(manager_node_child, manager_node.get());
             manager_node->add_child(manager_node_child);
             manager_node.release();
@@ -378,6 +394,7 @@ int Separate::separate_join(QueryContext* ctx, const std::vector<ExecNode*>& joi
             continue;
         }
         LimitNode* limit_node = nullptr;
+        WindowNode* window_node = nullptr;
         AggNode* agg_node = nullptr;
         SortNode* sort_node = nullptr;
         ExecNode* parent = join_node->get_parent();
@@ -391,6 +408,9 @@ int Separate::separate_join(QueryContext* ctx, const std::vector<ExecNode*>& joi
             if (parent->node_type() == pb::AGG_NODE) {
                 agg_node = static_cast<AggNode*>(parent);
             }
+            if (parent->node_type() == pb::WINDOW_NODE) {
+                window_node = static_cast<WindowNode*>(parent);
+            }
             if (parent->node_type() == pb::SORT_NODE) {
                 sort_node = static_cast<SortNode*>(parent);
             }
@@ -401,7 +421,9 @@ int Separate::separate_join(QueryContext* ctx, const std::vector<ExecNode*>& joi
             }
             parent = parent->get_parent();
         }
-        if (agg_node != nullptr) {
+        if (window_node != nullptr) {
+            continue;
+        } else if (agg_node != nullptr) {
             continue;
         } else if (limit_node != nullptr) {
             parent = limit_node;
@@ -523,13 +545,13 @@ int Separate::separate_load(QueryContext* ctx) {
     if (!need_separate_plan(ctx, main_table_id)) {
         manager_node->set_op_type(pb::OP_INSERT);
         manager_node->set_region_infos(insert_node->region_infos());
-        manager_node->add_child(insert_node);
         manager_node->set_table_id(main_table_id);
         manager_node->set_selected_field_ids(insert_node->prepared_field_ids());
         int ret = manager_node->init_insert_info(insert_node, true);
         if (ret < 0) {
             return -1;
         }
+        manager_node->add_child(insert_node);
     } else {
         int ret = separate_global_insert(manager_node.get(), insert_node);
         if (ret < 0) {
@@ -546,6 +568,15 @@ int Separate::separate_load(QueryContext* ctx) {
     return 0;
 }
 
+/**
+ * @brief 将插入操作拆分为多个子操作，并插入到指定的表中
+ *
+ * 此函数根据给定的查询上下文（QueryContext），将插入操作拆分为多个子操作，并插入到指定的表中。
+ *
+ * @param ctx 查询上下文，包含插入操作的详细信息
+ *
+ * @return 如果成功，则返回0；如果失败，则返回-1
+ */
 int Separate::separate_insert(QueryContext* ctx) {
     ExecNode* plan = ctx->root;
     InsertNode* insert_node = static_cast<InsertNode*>(plan->get_node(pb::INSERT_NODE));
@@ -570,13 +601,13 @@ int Separate::separate_insert(QueryContext* ctx) {
     if (!need_separate_plan(ctx, main_table_id)) {
         manager_node->set_op_type(pb::OP_INSERT);
         manager_node->set_region_infos(insert_node->region_infos());
-        manager_node->add_child(insert_node);
         manager_node->set_table_id(main_table_id);
         manager_node->set_selected_field_ids(insert_node->prepared_field_ids());
         int ret = manager_node->init_insert_info(insert_node, true);
         if (ret < 0) {
             return -1;
         }
+        manager_node->add_child(insert_node);
     } else {
         int ret = separate_global_insert(manager_node.get(), insert_node);
         if (ret < 0) {

@@ -17,6 +17,7 @@
 #include "runtime_state.h"
 #include "query_context.h"
 #include <arrow/acero/options.h>
+#include "arrow_exec_node_manager.h"
 
 namespace baikaldb {
 int SortNode::init(const pb::PlanNode& node) {
@@ -130,7 +131,7 @@ int SortNode::expr_optimize(QueryContext* ctx) {
     return 0;
 }
 
-bool SortNode::can_use_arrow_vector() {
+bool SortNode::can_use_arrow_vector(RuntimeState* state) {
     // arrow sort目前排序所有列对于null的处理只能整体AtStart/AtEnd,不能配置单个列的规则
     if (!_monotonic) {
         return false;
@@ -147,15 +148,16 @@ bool SortNode::can_use_arrow_vector() {
         }
     }
     for (auto& c : _children) {
-        if (!c->can_use_arrow_vector()) {
+        if (!c->can_use_arrow_vector(state)) {
             return false;
         }
     }
+    state->vectorlized_parallel_execution = true;
     return true;
 }
 
 int SortNode::build_arrow_declaration(RuntimeState* state) {
-    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
+    START_LOCAL_TRACE_WITH_PARTITION_PROPERTY(get_trace(), state->get_trace_cost(), &_partition_property, OPEN_TRACE, nullptr);
     int ret = 0;
     for (auto c : _children) {
         ret = c->build_arrow_declaration(state);
@@ -174,7 +176,9 @@ int SortNode::build_arrow_declaration(RuntimeState* state) {
 }
 
 int SortNode::build_sort_arrow_declaration(RuntimeState* state, pb::TraceNode* trace_node) {
-    if (state->acero_declarations.size() > 0 && state->acero_declarations.back().factory_name == "order_by") {
+    if (state->acero_declarations.size() > 0 
+        && (state->acero_declarations.back().factory_name == "order_by"
+                || state->acero_declarations.back().factory_name == "topk")) {
         return 0;
     }
     // sortNode提到最后在packetNode里处理: otherNode build -> sortNode build -> packetNode build -> handle limit(slice)
@@ -226,11 +230,39 @@ int SortNode::build_sort_arrow_declaration(RuntimeState* state, pb::TraceNode* t
         state->append_acero_declaration(dec);
     }
     // NullPlacement: Whether nulls and NaNs are placed at the start or at the end
-    arrow::compute::Ordering ordering{sort_keys, 
-                                      _is_asc[0] ? arrow::compute::NullPlacement::AtStart : arrow::compute::NullPlacement::AtEnd};
-    arrow::acero::Declaration dec{"order_by", arrow::acero::OrderByNodeOptions{ordering}};
-    LOCAL_TRACE_ARROW_PLAN(dec);
-    state->append_acero_declaration(dec);
+    arrow::compute::NullPlacement null_placement = arrow::compute::NullPlacement::AtStart;
+    if (_is_asc.size() > 0 && !_is_asc[0]) {
+        null_placement = arrow::compute::NullPlacement::AtEnd;
+    }
+    arrow::compute::Ordering ordering{sort_keys, null_placement};
+    if (_limit < 0) {
+        // sort
+        arrow::acero::Declaration dec{"order_by", arrow::acero::OrderByNodeOptions{ordering}};
+        LOCAL_TRACE_ARROW_PLAN(dec);
+        state->append_acero_declaration(dec);
+    } else {
+        arrow::acero::Declaration dec{"topk", TopKNodeOptions{ordering, _limit}};
+        LOCAL_TRACE_ARROW_PLAN(dec);
+        state->append_acero_declaration(dec);
+    }
+    return 0;
+}
+
+int SortNode::set_partition_property_and_schema(QueryContext* ctx) {
+    if (0 != ExecNode::set_partition_property_and_schema(ctx)) {
+        return -1;
+    }
+    if (_tuple_id > 0) {
+         auto tuple_desc = ctx->get_tuple_desc(_tuple_id);
+        if (tuple_desc == nullptr) {
+            DB_WARNING("get tuple desc failed, tuple_id:%d", _tuple_id);
+            return -1;
+        }
+        for (auto slot : tuple_desc->slots()) {
+            _data_schema.insert(ColumnInfo{slot.tuple_id(), slot.slot_id(), slot.slot_type()});
+        }
+    }
+    _partition_property.set_single_partition();
     return 0;
 }
 

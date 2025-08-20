@@ -25,7 +25,7 @@ extern time_t str_to_timestamp(const char* str_time);
 extern std::string datetime_to_str(uint64_t datetime, int precision_len = 0);
 inline uint64_t str_to_datetime_internal(const char* str_time, size_t length, bool* is_full_datetime);
 extern uint64_t str_to_datetime(const char* str_time, bool* is_full_datetime = nullptr);
-extern uint64_t str_to_datetime(const char* str_time, size_t length);
+extern uint64_t str_to_datetime(const char* str_time, size_t length, bool* is_full_datetime = nullptr);
 
 extern time_t datetime_to_timestamp(uint64_t datetime);
 extern uint64_t timestamp_to_datetime(time_t timestamp);
@@ -43,6 +43,7 @@ inline uint32_t datetime_to_year(uint64_t datetime) {
 extern int32_t datetime_to_time(uint64_t datetime);
 extern uint64_t time_to_datetime(int32_t time);
 extern std::string time_to_str(int32_t time);
+extern int32_t str_to_time(const char* str_time, size_t length);
 extern int32_t str_to_time(const char* str_time);
 extern int32_t time_to_seconds(int32_t time);
 extern int32_t seconds_to_time(int32_t seconds);

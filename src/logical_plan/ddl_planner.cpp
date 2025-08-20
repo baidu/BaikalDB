@@ -651,6 +651,44 @@ int DDLPlanner::parse_pre_split_keys(std::string start_key,
     return 0;
 }
 
+int DDLPlanner::update_specify_split_keys(const std::string& ns, const std::string& db, const std::string& tbl, const std::string& split_keys) {
+    // 获取SchemaInfo
+    pb::QueryRequest query_request;
+    pb::QueryResponse query_response;
+    query_request.set_op_type(pb::QUERY_SCHEMA_FLATTEN);
+    query_request.set_namespace_name(ns);
+    query_request.set_database(db);
+    query_request.set_table_name(tbl);
+    MetaServerInteract::get_instance()->send_request("query", query_request, query_response);
+    if (query_response.errcode() != pb::SUCCESS || query_response.schema_infos().size() != 1) {
+        DB_FATAL("Fail to query schema");
+        return -1;
+    }
+    pb::SchemaInfo schema_info = query_response.schema_infos(0);
+    if (parse_partition_pre_split_keys(split_keys, schema_info) != 0) {
+        DB_FATAL("Fail to parse_partition_pre_split_keys");
+        return -1;
+    }
+
+    // 更改split_keys
+    pb::MetaManagerRequest request;
+    pb::MetaManagerResponse response;
+    request.set_op_type(pb::OP_SPECIFY_SPLIT_KEYS);
+    auto info = request.mutable_table_info();
+    info->set_namespace_name(ns);
+    info->set_database(db);
+    info->set_table_name(tbl);
+    info->mutable_split_keys()->Swap(schema_info.mutable_split_keys());
+    
+    MetaServerInteract::get_instance()->send_request("meta_manager", request, response);
+    DB_WARNING("req:%s res:%s", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
+    if (response.errcode() != pb::SUCCESS) {
+        DB_FATAL("Fail to send_request");
+        return -1;
+    }
+    return 0;
+}
+
 int DDLPlanner::parse_partition_pre_split_keys(const std::string& partition_split_keys, pb::SchemaInfo& table) {
     table.clear_split_keys();
 
@@ -904,6 +942,14 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                     iter = root.FindMember("nprobe");
                     if (iter != root.MemberEnd()) {
                         index->set_nprobe(iter->value.GetInt());
+                    }
+                    iter = root.FindMember("efsearch");
+                    if (iter != root.MemberEnd()) {
+                        index->set_efsearch(iter->value.GetInt());
+                    }
+                    iter = root.FindMember("efconstruction");
+                    if (iter != root.MemberEnd()) {
+                        index->set_efconstruction(iter->value.GetInt());
                     }
                     iter = root.FindMember("metric_type");
                     pb::MetricType metric_type = pb::METRIC_L2;
@@ -1201,6 +1247,7 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                         DB_WARNING("dblink type is not set or invalid");
                         return -1;
                     }
+                    // DBLink BaikalDB
                     iter = value.FindMember("meta_name");
                     if (iter != value.MemberEnd() && iter->value.IsString()) {
                         dblink_info->set_meta_name(iter->value.GetString());
@@ -1217,7 +1264,37 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                     if (iter != value.MemberEnd() && iter->value.IsString()) {
                         dblink_info->set_table_name(iter->value.GetString());
                     }
-                    if (check_dblink_table_valid(*dblink_info) != 0) {
+                    // DBLink Mysql
+                    iter = value.FindMember("mysql_info");
+                    if (iter != value.MemberEnd()) {
+                        const rapidjson::Value& mysql_info_value = iter->value;
+                        auto mysql_info_iter = mysql_info_value.FindMember("addr");
+                        if (mysql_info_iter != mysql_info_value.MemberEnd() && mysql_info_iter->value.IsString()) {
+                            dblink_info->mutable_mysql_info()->set_addr(mysql_info_iter->value.GetString());
+                        }
+                        mysql_info_iter = mysql_info_value.FindMember("username");
+                        if (mysql_info_iter != mysql_info_value.MemberEnd() && mysql_info_iter->value.IsString()) {
+                            dblink_info->mutable_mysql_info()->set_username(mysql_info_iter->value.GetString());
+                        }
+                        mysql_info_iter = mysql_info_value.FindMember("password");
+                        if (mysql_info_iter != mysql_info_value.MemberEnd() && mysql_info_iter->value.IsString()) {
+                            dblink_info->mutable_mysql_info()->set_password(mysql_info_iter->value.GetString());
+                        }
+                        mysql_info_iter = mysql_info_value.FindMember("database_name");
+                        if (mysql_info_iter != mysql_info_value.MemberEnd() && mysql_info_iter->value.IsString()) {
+                            dblink_info->mutable_mysql_info()->set_database_name(mysql_info_iter->value.GetString());
+                        }
+                        mysql_info_iter = mysql_info_value.FindMember("table_name");
+                        if (mysql_info_iter != mysql_info_value.MemberEnd() && mysql_info_iter->value.IsString()) {
+                            dblink_info->mutable_mysql_info()->set_table_name(mysql_info_iter->value.GetString());
+                        }
+                        mysql_info_iter = mysql_info_value.FindMember("charset");
+                        if (mysql_info_iter != mysql_info_value.MemberEnd() && mysql_info_iter->value.IsString()) {
+                            dblink_info->mutable_mysql_info()->set_charset(mysql_info_iter->value.GetString());
+                        }
+                    }
+                    DB_WARNING("dblink_info: %s", dblink_info->ShortDebugString().c_str());
+                    if (check_dblink_table_valid(table) != 0) {
                         DB_WARNING("invalid dblink table, dblink_info: %s", dblink_info->ShortDebugString().c_str());
                         return -1;
                     }
@@ -1823,6 +1900,19 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
                 DB_WARNING("add column to table failed.");
                 return -1;
             }
+            if (table->fields_size() > 0 && table->fields(0).can_null()) {
+                const std::string& name = table->fields(0).field_name();
+                for (auto idx_id : tbl_ptr->indices) {
+                    IndexInfo index_info = _factory->get_index_info(idx_id);
+                    for (auto& field : index_info.fields) {
+                        if (field.short_name == name) {
+                            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;
+                            _ctx->stat_info.error_msg << "column has index, need not null";
+                            return -1;
+                        }
+                    }
+                }
+            }
         }
         if (table->indexs_size() != 0) {
             _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
@@ -1847,6 +1937,19 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
             if (0 != add_column_def(*table, column, spec->is_unique_indicator, true, old_field_name)) {
                 DB_WARNING("add column to table failed.");
                 return -1;
+            }
+            if (table->fields_size() > 0 && table->fields(0).can_null()) {
+                const std::string& name = table->fields(0).field_name();
+                for (auto idx_id : tbl_ptr->indices) {
+                    IndexInfo index_info = _factory->get_index_info(idx_id);
+                    for (auto& field : index_info.fields) {
+                        if (field.short_name == name) {
+                            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;
+                            _ctx->stat_info.error_msg << "column has index, need not null";
+                            return -1;
+                        }
+                    }
+                }
             }
         }
         if (table->indexs_size() != 0) {
@@ -2943,12 +3046,27 @@ int DDLPlanner::add_default_partition_info(pb::SchemaInfo& table) {
 }
 
 // 请求对应MetaServer检查外部映射表是否存在
-int DDLPlanner::check_dblink_table_valid(const pb::DBLinkInfo& dblink_info) {
+int DDLPlanner::check_dblink_table_valid(const pb::SchemaInfo& table) {
+    if (!table.has_dblink_info()) {
+        DB_WARNING("table has no dblink_info, table: %s", table.ShortDebugString().c_str());
+        return -1;
+    }
+    const pb::DBLinkInfo& dblink_info = table.dblink_info();
+    if (dblink_info.type() == pb::LT_MYSQL) {
+        if (table.fields().size() != 0) {
+            DB_WARNING("DBLink Mysql should have no fields when create, table: %s", 
+                        table.ShortDebugString().c_str());
+            return -1;
+        }
+        return 0;
+    } else if (dblink_info.type() != pb::LT_BAIKALDB) {
+        DB_WARNING("Invalid dblink type: %d", dblink_info.type());
+        return -1;
+    }
     if (_ctx == nullptr) {
         DB_WARNING("_ctx is nullptr");
         return -1;
     }
-
     MetaServerInteract meta_server_interact;
     if (meta_server_interact.init_internal(dblink_info.meta_name()) != 0) {
         DB_WARNING("Fail to init meta_server_interact, meta_name: %s", dblink_info.meta_name().c_str());

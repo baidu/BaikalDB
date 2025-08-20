@@ -58,7 +58,6 @@ public:
     }
     bool any_limit_exceeded() {
         if (limit_exceeded() || (_parent !=nullptr && _parent->any_limit_exceeded())) {
-            _limit_exceeded = true;
             return true;
         }
         return false;
@@ -99,12 +98,6 @@ public:
     int64_t bytes_consumed() const {
         return _bytes_consumed.load(std::memory_order_relaxed);
     }
-    bool has_limit_exceeded() const {
-        return _limit_exceeded;
-    }
-    void set_limit_exceeded() {
-        _limit_exceeded = true;
-    }
     MemTracker* get_parent() {
         return _parent;
     }
@@ -116,7 +109,6 @@ private:
     int64_t  _last_active_time;
     std::atomic<int64_t> _bytes_consumed;
     MemTracker* _parent = nullptr;
-    bool _limit_exceeded;
 };
 
 typedef std::shared_ptr<MemTracker> SmartMemTracker;

@@ -46,10 +46,10 @@ int TransactionPool::init(int64_t region_id, bool use_ttl, int64_t online_ttl_ba
 }
 
 bool TransactionPool::exec_1pc_out_fsm() {
-    if (_txn_count > 0) {
+    if (_has_write_txn_count > 0) {
         return true;
     }
-    if (butil::gettimeofday_us() - _latest_active_txn_ts < FLAGS_1pc_out_fsm_interval_us) {
+    if (butil::gettimeofday_us() - _latest_has_write_txn_ts < FLAGS_1pc_out_fsm_interval_us) {
         return true;
     }
     return false;
@@ -99,7 +99,6 @@ int TransactionPool::begin_txn(uint64_t txn_id, SmartTransaction& txn,
         return -1;
     }
     txn = _txn_map.get(txn_id);
-    _latest_active_txn_ts = butil::gettimeofday_us();
     return 0;
 }
 
@@ -107,6 +106,10 @@ void TransactionPool::remove_txn(uint64_t txn_id, bool mark_finished) {
     int dml_num_affected_rows = 0;
     auto call = [this, &dml_num_affected_rows](SmartTransaction& txn) {
         dml_num_affected_rows = txn->dml_num_affected_rows;
+        if (txn->has_dml_executed()) {
+            --_has_write_txn_count;
+            update_latest_has_write_txn_ts();
+        }
         --_txn_count;
     };
     if (!_txn_map.call_and_erase(txn_id, call)) {
@@ -115,7 +118,6 @@ void TransactionPool::remove_txn(uint64_t txn_id, bool mark_finished) {
     if (mark_finished) {
         (*_finished_txn_map.read())[txn_id] = dml_num_affected_rows;
     }
-    _latest_active_txn_ts = butil::gettimeofday_us();
 }
 
 void TransactionPool::rollback_txn_before(const int64_t txn_timeout) {
@@ -732,5 +734,6 @@ void TransactionPool::update_txn_num_rows_after_split(const std::vector<pb::Tran
 void TransactionPool::clear() {
     _txn_map.clear();
     _txn_count = 0;
+    _has_write_txn_count = 0;
 }
 }

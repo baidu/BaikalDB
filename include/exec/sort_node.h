@@ -40,7 +40,7 @@ public:
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state);
-    virtual bool can_use_arrow_vector();
+    virtual bool can_use_arrow_vector(RuntimeState* state);
     virtual int build_arrow_declaration(RuntimeState* state);
     int build_sort_arrow_declaration(RuntimeState* state, pb::TraceNode* trace_node = nullptr);
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
@@ -105,15 +105,24 @@ public:
         return _monotonic;
     }
 
-    virtual void show_explain(std::vector<std::map<std::string, std::string>>& output) {
-        ExecNode::show_explain(output);
+    virtual int show_explain(QueryContext* ctx, std::vector<std::map<std::string, std::string>>& output, int& next_id, int display_id) {
+        int return_id = ExecNode::show_explain(ctx, output, next_id, display_id);
         if (output.empty()) {
-            return;
+            return return_id;
         }
-        if (output.back()["sort_index"] != "1") {
-            output.back()["Extra"] += "Using filesort";
+        auto it = std::find_if(output.begin(), output.end(), [return_id](std::map<std::string, std::string>& item){
+            auto id_iter = item.find("id");
+            if (id_iter == item.end()) {
+                return false;
+            }
+            return id_iter->second == std::to_string(return_id);
+        });
+        if ((*it)["sort_index"] != "1") {
+            (*it)["Extra"] += "Using filesort;";
         }
+        return return_id;
     }
+    virtual int set_partition_property_and_schema(QueryContext* ctx);
 private:
     int fill_tuple(RowBatch* batch);
 

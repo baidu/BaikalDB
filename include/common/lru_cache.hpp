@@ -26,6 +26,11 @@ int Cache<ItemKey, ItemType, HashType>::init(int64_t len_threshold) {
 }
 
 template <typename ItemKey, typename ItemType, typename HashType>
+size_t Cache<ItemKey, ItemType, HashType>::size() {
+    return _lru_map.size();
+}
+
+template <typename ItemKey, typename ItemType, typename HashType>
 std::string Cache<ItemKey, ItemType, HashType>::get_info() {
     char buf[100];
     snprintf(buf, sizeof(buf), "hit:%ld, total:%ld,", _hit_count, _total_count);

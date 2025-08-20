@@ -137,7 +137,7 @@ TEST(test_parquet_writer, case_all) {
 // ParquetExecutor
 TEST(test_parquet_executor_recur, case_all) {
     const std::string path = "./data/parquet";
-    ImporterFileSystemAdaptor* fs = new PosixFileSystemAdaptor();
+    FileSystem* fs = new PosixFileSystem();
     ASSERT_TRUE(fs->init() == 0);
 
     int64_t start_pos = 0;
@@ -186,7 +186,7 @@ TEST(test_parquet_executor_recur, case_all) {
 // ParquetReader
 TEST(test_parquet_reader_local, case_all) {
     const std::string path = "./data/parquet/test1.parquet";
-    ImporterFileSystemAdaptor* fs = new PosixFileSystemAdaptor();
+    FileSystem* fs = new PosixFileSystem();
     ASSERT_TRUE(fs->init() == 0);
 
     FileMode mode;
@@ -199,7 +199,7 @@ TEST(test_parquet_reader_local, case_all) {
     int result = 0;
     std::ostringstream import_ret;
     std::mutex ret_mtx;
-    int64_t all_row_group_count = fs->all_row_group_count(path);
+    int64_t all_row_group_count = ImporterUtils::all_row_group_count(fs, path);
     std::atomic<int64_t> handled_row_group_count { 0 };
 
     BthreadCond file_concurrency_cond(-3);
@@ -245,7 +245,7 @@ TEST(test_parquet_reader_local, case_all) {
 
 TEST(DISABLED_test_parquet_reader_afs, case_all) {
     const std::string path = "file_path";
-    ImporterFileSystemAdaptor* fs = new AfsFileSystemAdaptor("cluster_name", "user", "password", "./conf/client.conf");
+    FileSystem* fs = new AfsFileSystem("cluster_name", "user", "password", "./conf/client.conf");
     ASSERT_TRUE(fs->init() == 0);
 
     FileMode mode;
@@ -258,7 +258,7 @@ TEST(DISABLED_test_parquet_reader_afs, case_all) {
     int result = 0;
     std::ostringstream import_ret;
     std::mutex ret_mtx;
-    int64_t all_row_group_count = fs->all_row_group_count(path);
+    int64_t all_row_group_count = ImporterUtils::all_row_group_count(fs, path);
     std::atomic<int64_t> handled_row_group_count { 0 };
 
     BthreadCond file_concurrency_cond(-3);
@@ -297,7 +297,7 @@ TEST(DISABLED_test_parquet_reader_afs, case_all) {
 
 TEST(test_parquet_reader_error, case_all) {
     const std::string path = "./data/parquet/test_error.parquet";
-    ImporterFileSystemAdaptor* fs = new PosixFileSystemAdaptor();
+    FileSystem* fs = new PosixFileSystem();
     ASSERT_TRUE(fs->init() == 0);
 
     size_t file_size = 0;
@@ -333,7 +333,7 @@ TEST(test_parquet_reader_error, case_all) {
 
 TEST(test_parquet_reader_not_exist, case_all) {
     const std::string path = "./data/parquet/test_not_exist.parquet";
-    ImporterFileSystemAdaptor* fs = new PosixFileSystemAdaptor();
+    FileSystem* fs = new PosixFileSystem();
     ASSERT_TRUE(fs->init() == 0);
 
     size_t file_size = 0;
@@ -368,8 +368,8 @@ TEST(test_parquet_reader_not_exist, case_all) {
 }
 
 TEST(DISABLED_test_file_pos_to_row_group_idx, case_all) {
-    ImporterFileSystemAdaptor* fs = 
-        new AfsFileSystemAdaptor("cluster_name", "user", "password", "./conf/client.conf");
+    FileSystem* fs = 
+        new AfsFileSystem("cluster_name", "user", "password", "./conf/client.conf");
     ASSERT_TRUE(fs != nullptr);
     ASSERT_TRUE(fs->init() == 0);
 
@@ -378,8 +378,8 @@ TEST(DISABLED_test_file_pos_to_row_group_idx, case_all) {
     std::vector<std::string> output_file_paths;
     std::vector<int64_t> file_start_pos_vec;
     std::vector<int64_t> file_end_pos_vec;
-    ASSERT_TRUE(fs->cut_files(
-        input_file_path, cut_size, output_file_paths, file_start_pos_vec, file_end_pos_vec) == 0);
+    ASSERT_TRUE(ImporterUtils::cut_files(
+        fs, input_file_path, cut_size, output_file_paths, file_start_pos_vec, file_end_pos_vec) == 0);
     ASSERT_TRUE(output_file_paths.size() == file_start_pos_vec.size());
     ASSERT_TRUE(file_start_pos_vec.size() == file_end_pos_vec.size());
 
@@ -387,7 +387,7 @@ TEST(DISABLED_test_file_pos_to_row_group_idx, case_all) {
     int result = 0;
     std::ostringstream import_ret;
     std::mutex ret_mtx;
-    int64_t all_row_group_count = fs->all_row_group_count(input_file_path);
+    int64_t all_row_group_count = ImporterUtils::all_row_group_count(fs, input_file_path);
     std::atomic<int64_t> handled_row_group_count { 0 };
     BthreadCond file_concurrency_cond(-3);
 
@@ -437,7 +437,7 @@ TEST(DISABLED_test_file_pos_to_row_group_idx, case_all) {
             ASSERT_TRUE(p_reader->open() == 0);
 
             std::cout << "subtask[" << i << "], sub_file_paths[" << j << "]: " << path << ", " << file_size
-                      << ", row_group_cnt: " << fs->all_row_group_count(path)
+                      << ", row_group_cnt: " << ImporterUtils::all_row_group_count(fs, path)
                       << ", [file_start_pos, file_end_pos): [" << file_start_pos << ", " << file_end_pos
                       << ") => [row_start_idx, row_end_idx): [" << p_reader->file_pos_to_row_group_idx(file_start_pos)
                       << ", " << p_reader->file_pos_to_row_group_idx(file_end_pos) << ")" << std::endl;

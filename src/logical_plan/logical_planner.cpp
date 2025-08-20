@@ -33,6 +33,7 @@
 #include "parser.h"
 #include "mysql_err_code.h"
 #include "physical_planner.h"
+#include "vectorize_helpper.h"
 
 namespace bthread {
 DECLARE_int32(bthread_concurrency); //bthread.cpp
@@ -237,12 +238,9 @@ int LogicalPlanner::handle_in_subquery(const parser::FuncExpr* func_item,
         node->set_num_children(2);
         pb::JoinType join_type = pb::SEMI_JOIN;
         pb::Function* func = node->mutable_fn();
-        if (!func_item->is_not) {
-            func->set_name("eq");
-            func->set_fn_op(parser::FT_EQ);
-        } else {
-            func->set_name("ne");
-            func->set_fn_op(parser::FT_NE);
+        func->set_name("eq");
+        func->set_fn_op(parser::FT_EQ);
+        if (func_item->is_not) {
             join_type = pb::ANTI_SEMI_JOIN;
         }
         if (0 != create_expr_tree(arg1, expr, options)) {
@@ -369,6 +367,7 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
         parser::ExplainStmt* stmt = static_cast<parser::ExplainStmt*>(parser.result[0]);
         ctx->stmt = stmt->stmt;
         std::string format(stmt->format.c_str());
+        ctx->format = format;
         if (format == "trace") {
             ctx->explain_type = SHOW_TRACE;
         } else if (format == "trace2") {
@@ -376,10 +375,13 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
         } else if (format == "plan") {
             ctx->explain_type = SHOW_PLAN;
             ctx->is_explain = true;
-        } else if (format == "analyze") { 
+        } else if (boost::istarts_with(format, "analyze")) { 
             ctx->explain_type = ANALYZE_STATISTICS;
         } else if (format == "histogram") {
             ctx->explain_type = SHOW_HISTOGRAM;
+            ctx->is_explain = true;
+        } else if (format == "hyperloglog") {
+            ctx->explain_type = SHOW_HLL;
             ctx->is_explain = true;
         } else if (format == "cmsketch") {
             ctx->explain_type = SHOW_CMSKETCH;
@@ -393,6 +395,12 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
         } else if (format == "keypoint") {
             ctx->explain_type = SHOW_KEYPOINT;
             ctx->is_get_keypoint = true;
+        } else if (format == "sample_keypoint") {
+            ctx->explain_type = SAMPLE_KEYPOINT;
+            ctx->is_get_keypoint = true;
+        } else if (boost::istarts_with(format, "hint")) {
+            ctx->is_explain = true;
+            ctx->explain_hint = std::make_shared<ExplainHint>(format);
         } else {
             ctx->is_explain = true;
         }
@@ -402,8 +410,11 @@ int LogicalPlanner::analyze(QueryContext* ctx) {
         ctx->is_complex = ctx->stmt->is_complex_node();
     }
     ctx->stmt_type = ctx->stmt->node_type;
-    if (ctx->stmt_type != parser::NT_SELECT && ctx->explain_type != EXPLAIN_NULL &&
-        ctx->explain_type != SHOW_PLAN && ctx->explain_type != SHOW_SIGN) {
+    if (ctx->stmt_type != parser::NT_SELECT
+         && ctx->stmt_type != parser::NT_UNION
+         && ctx->explain_type != EXPLAIN_NULL 
+         && ctx->explain_type != SHOW_PLAN 
+         && ctx->explain_type != SHOW_SIGN) {
         ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
         ctx->stat_info.error_msg << "dml only support normal explain";
         DB_WARNING("dml only support normal explain");
@@ -537,7 +548,10 @@ int LogicalPlanner::generate_sql_sign(QueryContext* ctx, parser::StmtNode* stmt)
                     str.c_str());
             }
         }
-        if (!ctx->sign_forceindex.empty()) {
+        if (!ctx->sign_forceindex.empty()
+                && (!ctx->is_explain
+                        || ctx->explain_hint == nullptr
+                        || !ctx->explain_hint->get_flag<ExplainHint::HintType::NO_FORCE>())) {
             if (ctx->sign_forceindex.count(stat_info->sign) > 0) {
                 auto& table_index_map = ctx->sign_forceindex[stat_info->sign];
                 for (int i = 0; i < ctx->plan.nodes_size(); i++) {
@@ -580,6 +594,8 @@ int LogicalPlanner::gen_subquery_plan(parser::DmlNode* subquery, SmartPlanTableC
     _cur_sub_ctx->stmt_type = subquery->node_type;
     _cur_sub_ctx->cur_db = _ctx->cur_db;
     _cur_sub_ctx->is_explain = _ctx->is_explain;
+    _cur_sub_ctx->explain_hint = _ctx->explain_hint;
+    _cur_sub_ctx->explain_type = _ctx->explain_type;
     _cur_sub_ctx->stat_info.log_id = _ctx->stat_info.log_id;
     _cur_sub_ctx->user_info = _ctx->user_info;
     _cur_sub_ctx->row_ttl_duration = _ctx->row_ttl_duration;
@@ -595,6 +611,7 @@ int LogicalPlanner::gen_subquery_plan(parser::DmlNode* subquery, SmartPlanTableC
     _cur_sub_ctx->is_create_view = _ctx->is_create_view;
     _cur_sub_ctx->table_with_clause_mapping = _ctx->table_with_clause_mapping;
     _cur_sub_ctx->is_union_subquery = expr_params.is_union_subquery;
+    _cur_sub_ctx->efsearch = _ctx->efsearch;
     // from子查询完全ctx完全独立
     if (expr_params.is_from_subquery || expr_params.is_union_subquery) {
         plan_state.reset(new (std::nothrow)PlanTableContext);
@@ -645,6 +662,15 @@ int LogicalPlanner::gen_subquery_plan(parser::DmlNode* subquery, SmartPlanTableC
         DB_WARNING("Failed to pb_plan to execnode");
         return -1;
     }
+
+    if (_cur_sub_ctx->table_can_use_arrow_vectorize == false) {
+        _ctx->table_can_use_arrow_vectorize = false;
+    }
+    _ctx->sign_blacklist.insert(_cur_sub_ctx->sign_blacklist.begin(), _cur_sub_ctx->sign_blacklist.end());
+    _ctx->sign_forcelearner.insert(_cur_sub_ctx->sign_forcelearner.begin(), _cur_sub_ctx->sign_forcelearner.end());
+    _ctx->sign_rolling.insert(_cur_sub_ctx->sign_rolling.begin(), _cur_sub_ctx->sign_rolling.end());
+    _ctx->sign_forceindex.insert(_cur_sub_ctx->sign_forceindex.begin(), _cur_sub_ctx->sign_forceindex.end());
+    _ctx->sign_exec_type.insert(_cur_sub_ctx->sign_exec_type.begin(), _cur_sub_ctx->sign_exec_type.end());
     return 0;
 }
 
@@ -773,39 +799,46 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
         bool is_dblink = false;
         if (tbl_ptr->engine == pb::DBLINK) {
             is_dblink = true;
-            SmartTable orig_tbl_ptr = tbl_ptr;
-            const std::string& meta_name = tbl_ptr->dblink_info.meta_name();
-            const std::string& namespace_name = tbl_ptr->dblink_info.namespace_name();
-            const std::string& database_name = tbl_ptr->dblink_info.database_name();
-            const std::string& table_name = tbl_ptr->dblink_info.table_name();
-            int64_t meta_id = 0;
-            if (_factory->get_meta_id(meta_name, meta_id) != 0) {
-                DB_WARNING("unknown meta: %s", meta_name.c_str());
-                return -1;
-            }
-            std::string external_table_name = namespace_name + "." + database_name + "." + table_name;
-            external_table_name = ::baikaldb::get_add_meta_name(meta_id, external_table_name);
-            if (_factory->get_table_id(external_table_name, tableid) != 0) {
-                DB_WARNING("unknown external_table_name: %s", external_table_name.c_str());
-                _ctx->stat_info.error_code = ER_NO_SUCH_TABLE;
-                _ctx->stat_info.error_msg << "table: " << database << "." << table 
-                                          << "(@dblink_table:" << external_table_name << ") not exist";
-                return -1;
-            }
-            tbl_ptr = _factory->get_table_info_ptr(tableid);
-            if (tbl_ptr == nullptr) {
-                DB_WARNING("no table found with id: %ld", tableid);
-                _ctx->stat_info.error_code = ER_NO_SUCH_TABLE;
-                _ctx->stat_info.error_msg << "table: " << database << "." << table 
-                                          << "(@dblink_table:" << external_table_name << ") not exist";
+            if (tbl_ptr->dblink_info.type() == pb::LT_BAIKALDB) {
+                SmartTable orig_tbl_ptr = tbl_ptr;
+                const std::string& meta_name = tbl_ptr->dblink_info.meta_name();
+                const std::string& namespace_name = tbl_ptr->dblink_info.namespace_name();
+                const std::string& database_name = tbl_ptr->dblink_info.database_name();
+                const std::string& table_name = tbl_ptr->dblink_info.table_name();
+                int64_t meta_id = 0;
+                if (_factory->get_meta_id(meta_name, meta_id) != 0) {
+                    DB_WARNING("unknown meta: %s", meta_name.c_str());
+                    return -1;
+                }
+                std::string external_table_name = namespace_name + "." + database_name + "." + table_name;
+                external_table_name = ::baikaldb::get_add_meta_name(meta_id, external_table_name);
+                if (_factory->get_table_id(external_table_name, tableid) != 0) {
+                    DB_WARNING("unknown external_table_name: %s", external_table_name.c_str());
+                    _ctx->stat_info.error_code = ER_NO_SUCH_TABLE;
+                    _ctx->stat_info.error_msg << "table: " << database << "." << table 
+                                            << "(@dblink_table:" << external_table_name << ") not exist";
+                    return -1;
+                }
+                tbl_ptr = _factory->get_table_info_ptr(tableid);
+                if (tbl_ptr == nullptr) {
+                    DB_WARNING("no table found with id: %ld", tableid);
+                    _ctx->stat_info.error_code = ER_NO_SUCH_TABLE;
+                    _ctx->stat_info.error_msg << "table: " << database << "." << table 
+                                            << "(@dblink_table:" << external_table_name << ") not exist";
+                    return -1;
+                }
+                // 外部表到主meta的dblink表的映射
+                _plan_table_ctx->dblink_table_mapping[tableid] = orig_tbl_ptr;
+            } else if (tbl_ptr->dblink_info.type() == pb::LT_MYSQL) {
+                _ctx->has_dblink_mysql = true;
+            } else {
+                DB_WARNING("unknown dblink type: %d", tbl_ptr->dblink_info.type());
                 return -1;
             }
             if (can_use_dblink(tbl_ptr) != 0) {
                 DB_WARNING("can not use dblink, tableid: %ld", tableid);
                 return -1;                
             }
-            // 外部表到主meta的dblink表的映射
-            _plan_table_ctx->dblink_table_mapping[tableid] = orig_tbl_ptr;
         }
         if (tbl_ptr->engine == pb::ROCKSDB_CSTORE || tbl_ptr->has_vector_index) {
             _ctx->table_can_use_arrow_vectorize = false; 
@@ -1044,7 +1077,7 @@ int LogicalPlanner::create_join_node_from_item_join(const parser::JoinNode* join
     }
     parser::ExprNode* condition = join_item->expr;
     /*
-    //暂时不支持没有条件的join 
+    //暂时不支持没有条件的join
     if (condition == nullptr && join_item->using_col.size() == 0) {
         DB_WARNING("has no join condition");
         return -1;
@@ -1725,7 +1758,7 @@ int LogicalPlanner::parse_view_select_field(parser::SelectField* select_field,
     if (mysql_type == pb::INVALID_TYPE) {
         mysql_type = pb::STRING;
     }
-
+    
     std::string select_name;
     if (parse_select_name(select_field, select_name) == -1) {
         DB_WARNING("Fail to parse_select_name");
@@ -1943,15 +1976,16 @@ int LogicalPlanner::flatten_filter(const parser::ExprNode* item, std::vector<pb:
     return 0;
 }
 
-void LogicalPlanner::create_order_func_slot() {
-    if (_order_tuple_id == -1) {
-        _order_tuple_id = _unique_id_ctx->tuple_cnt++;
+void LogicalPlanner::create_order_func_slot(
+        int32_t& order_tuple_id, int32_t& order_slot_cnt, std::vector<pb::SlotDescriptor>& order_slots) {
+    if (order_tuple_id == -1) {
+        order_tuple_id = _unique_id_ctx->tuple_cnt++;
     }
     pb::SlotDescriptor slot;
-    slot.set_slot_id(_order_slot_cnt++);
-    slot.set_tuple_id(_order_tuple_id);
+    slot.set_slot_id(order_slot_cnt++);
+    slot.set_tuple_id(order_tuple_id);
     slot.set_slot_type(pb::INVALID_TYPE);
-    _order_slots.push_back(slot);
+    order_slots.push_back(slot);
 }
 
 std::vector<pb::SlotDescriptor>& LogicalPlanner::get_agg_func_slot(
@@ -1965,12 +1999,14 @@ std::vector<pb::SlotDescriptor>& LogicalPlanner::get_agg_func_slot(
         "multi_group_concat_distinct"
     };
     std::vector<pb::SlotDescriptor>* slots = nullptr;
-    auto iter = _agg_slot_mapping.find(agg);
+    std::string agg_lower = agg;
+    std::transform(agg.begin(), agg.end(), agg_lower.begin(), ::tolower);
+    auto iter = _agg_slot_mapping.find(agg_lower);
     if (iter != _agg_slot_mapping.end()) {
         slots = &iter->second;
         new_slot = false;
     } else {
-        slots = &_agg_slot_mapping[agg];
+        slots = &_agg_slot_mapping[agg_lower];
         slots->resize(1);
         (*slots)[0].set_slot_id(_agg_slot_cnt++);
         (*slots)[0].set_tuple_id(_agg_tuple_id);
@@ -2001,14 +2037,15 @@ int LogicalPlanner::create_agg_expr(const parser::FuncExpr* expr_item, pb::Expr&
 
     std::string fn_name = expr_item->fn_name.to_lower();
     if (_need_multi_distinct && expr_item->distinct) {
-        if (expr_item->fn_name.to_lower() == "count") {
+        if (fn_name == "count") {
             fn_name = "multi_count_distinct";
-        } else if (expr_item->fn_name.to_lower() == "sum") {
+        } else if (fn_name == "sum") {
             fn_name = "multi_sum_distinct";
-        } else if (expr_item->fn_name.to_lower() == "group_concat") {
+        } else if (fn_name == "group_concat") {
             fn_name = "multi_group_concat_distinct";
         }
     }
+    // prepare模式模式显示'?'号，不同item进行to_string()后可能相同
     auto& slots = get_agg_func_slot(
             expr_item->to_string(), fn_name, new_slot);
     if (slots.size() < 1) {
@@ -2040,9 +2077,23 @@ int LogicalPlanner::create_agg_expr(const parser::FuncExpr* expr_item, pb::Expr&
     bool count_star = expr_item->is_star;
     //count_star 参数为空
     if (!count_star) {
+        // 禁止child 继续为agg
+        CreateExprOptions options_cannot_agg = options;
+        options_cannot_agg.can_agg = false;
         // count_distinct 参数为expr list，其他聚合参数为单一expr或slot ref
         for (int i = 0; i < expr_item->children.size(); i++) {
-            if (0 != create_expr_tree(expr_item->children[i], agg_expr, options)) {
+            auto item = expr_item->children[i];
+            if (item != nullptr 
+                    && func->name() != "group_concat" 
+                    && func->name() != "multi_group_concat_distinct"
+                    && item->node_type == parser::NT_EXPR
+                    && static_cast<const parser::ExprNode*>(item)->expr_type == parser::ET_ROW_EXPR) {
+                // 除去group concat, 其他agg聚合函数不支持row expr, 如 count(distinct(a,b))
+                _ctx->stat_info.error_code = ER_OPERAND_COLUMNS;
+                _ctx->stat_info.error_msg << "Operand should contain 1 column(s)";
+                return -1;
+            }
+            if (0 != create_expr_tree(expr_item->children[i], agg_expr, options_cannot_agg)) {
                 DB_WARNING("create child expr failed");
                 return -1;
             }
@@ -2079,6 +2130,338 @@ int LogicalPlanner::create_agg_expr(const parser::FuncExpr* expr_item, pb::Expr&
                     _orderby_agg_exprs.push_back(orderby_expr);
                 }
             }
+        }
+    }
+    return 0;
+}
+
+std::vector<pb::SlotDescriptor>& LogicalPlanner::get_window_func_slot(const std::string& window) {    
+    if (_window_tuple_id == -1) {
+        _window_tuple_id = _unique_id_ctx->tuple_cnt++;
+        _ctx->current_table_tuple_ids.emplace(_window_tuple_id);
+    }
+    std::vector<pb::SlotDescriptor>* slots = nullptr;
+    auto iter = _window_slot_mapping.find(window);
+    if (iter != _window_slot_mapping.end()) {
+        slots = &iter->second;
+    } else {
+        slots = &_window_slot_mapping[window];
+        slots->resize(1);
+        (*slots)[0].set_slot_id(_window_slot_cnt++);
+        (*slots)[0].set_tuple_id(_window_tuple_id);
+        (*slots)[0].set_slot_type(pb::STRING);
+    }
+    return *slots;
+}
+
+int LogicalPlanner::check_window_expr_valid(const parser::WindowFuncExpr* item) {
+    static std::unordered_set<std::string> support_window = {
+        "count", "sum", "avg", "min", "max", "row_number", "rank", "dense_rank", "percent_rank", 
+        "cume_dist", "ntile", "lead", "lag", "first_value", "last_value", "nth_value"
+    };
+    if (item == nullptr) {
+        DB_WARNING("item is nullptr");
+        return -1;
+    }
+    if (item->func_expr == nullptr) {
+        DB_WARNING("func_expr is nullptr");
+        return -1;
+    }
+    if (item->window_spec == nullptr) {
+        DB_WARNING("window_spec is nullptr");
+        return -1;
+    }
+    const parser::FuncExpr* func_expr = item->func_expr;
+    const std::string& fn_name = func_expr->fn_name.to_lower();
+    if (support_window.count(fn_name) == 0) {
+        DB_WARNING("not support window function: %s", func_expr->fn_name.c_str());
+        _ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+        _ctx->stat_info.error_msg << "func \'" << func_expr->fn_name.to_string() << "\' not support";
+        return -1;
+    }
+    // SQLParser支持解析IGNORE NULLS，但实际执行时不支持，与MySQL一致
+    if (item->ignore_null) {
+        DB_WARNING("Window function not support IGNORE NULLS");
+        _ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+        _ctx->stat_info.error_msg << "Window function not support IGNORE NULLS";
+        return -1;
+    }
+    // SQLParser支持解析FROM LAST，但实际执行时不支持，与MySQL一致
+    if (item->from_last) {
+        DB_WARNING("Window function not support FROM LAST");
+        _ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+        _ctx->stat_info.error_msg << "Window function not support FROM LAST";
+        return -1;
+    }
+    // 开窗函数不支持distinct语法
+    if (func_expr->distinct) {
+        DB_WARNING("window function not support distinct");
+        _ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+        _ctx->stat_info.error_msg << "Window function not support distinct";
+        return -1;
+    }
+    const parser::WindowSpec* window_spec = item->window_spec;
+    if (window_spec->frame != nullptr) {
+        // 如果包含Frame，则必须包含Order by
+        if (window_spec->order_by == nullptr) {
+            DB_WARNING("Windowing clause requires ORDER BY clause");
+            _ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+            _ctx->stat_info.error_msg << "Windowing clause requires ORDER BY clause";
+            return -1;
+        }
+        if (window_spec->frame->frame_extent != nullptr) {
+            // Frame start不支持UNBOUNDED FOLLOWING
+            const parser::FrameBound* frame_start = window_spec->frame->frame_extent->frame_start;
+            const parser::FrameBound* frame_end = window_spec->frame->frame_extent->frame_end;
+            if (frame_start != nullptr &&
+                    frame_start->bound_type == parser::BT_FOLLOWING && frame_start->is_unbounded) {
+                DB_WARNING("Frame start can not be UNBOUNDED FOLLOWING");
+                _ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+                _ctx->stat_info.error_msg << "Frame start can not be UNBOUNDED FOLLOWING";
+                return -1;
+            }
+            // Frame end不支持UNBOUNDED PRECEDING
+            if (frame_end != nullptr &&
+                    frame_end->bound_type == parser::BT_PRECEDING && frame_end->is_unbounded) {
+                DB_WARNING("Frame end can not be UNBOUNDED PRECEDING");
+                _ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+                _ctx->stat_info.error_msg << "Frame end can not be UNBOUNDED PRECEDING";
+                return -1;
+            }
+            if (window_spec->frame->frame_type == parser::FT_RANGE) {
+                // 目前RANGE模式，只支持以下四种形式:
+                //      RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                //      RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
+                //      RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+                //      RANGE BETWEEN CURRENT ROW AND CURRENT ROW
+                if (frame_start != nullptr &&
+                        (!frame_start->is_unbounded && frame_start->bound_type != parser::BT_CURRENT_ROW)) {
+                    DB_WARNING("RANGE is only supported with both the lower and upper bounds "
+                               "UNBOUNDED or CURRENT ROW");
+                    _ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+                    _ctx->stat_info.error_msg << "RANGE is only supported with both the lower and upper bounds "
+                                                 "UNBOUNDED or CURRENT ROW";
+                    return -1;
+                }
+                if (frame_end != nullptr &&
+                        (!frame_end->is_unbounded && frame_end->bound_type != parser::BT_CURRENT_ROW)) {
+                    DB_WARNING("RANGE is only supported with both the lower and upper bounds "
+                               "UNBOUNDED or CURRENT ROW");
+                    _ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+                    _ctx->stat_info.error_msg << "RANGE is only supported with both the lower and upper bounds "
+                                                 "UNBOUNDED or CURRENT ROW";
+                    return -1;
+                }
+            }
+        }
+        if (fn_name == "row_number" || fn_name == "rank" || fn_name == "dense_rank" || fn_name == "percent_rank" ||
+                fn_name == "cume_dist" || fn_name == "ntile" || fn_name == "lead" || fn_name == "lag") {
+            DB_WARNING("Windowing clause not allowed with '%s'", fn_name.c_str());
+            _ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+            _ctx->stat_info.error_msg << "Windowing clause not allowed with \'" << fn_name.c_str() << "\'";
+            return -1;
+        }
+    }
+    return 0;
+}
+
+int LogicalPlanner::create_window_expr(const parser::WindowFuncExpr* item, pb::Expr& expr, const CreateExprOptions& options) {
+    if (check_window_expr_valid(item) != 0) {
+        DB_WARNING("Fail to check window expr valid");
+        return -1;
+    }
+    // prepare模式模式显示'?'号，不同item进行to_string()后可能相同
+    const auto& slots = get_window_func_slot(item->to_string());
+    if (slots.size() != 1) {
+        DB_WARNING("wrong number of window slots");
+        return -1;
+    }
+    const parser::FuncExpr* func_expr = item->func_expr;
+    const parser::WindowSpec* window_spec = item->window_spec;
+    std::string fn_name = func_expr->fn_name.to_lower();
+    if (fn_name == "count" && func_expr->is_star) {
+        fn_name = "count_star";
+    }
+    pb::Expr window_expr;
+    pb::ExprNode* node = window_expr.add_nodes();
+    node->set_node_type(pb::WINDOW_EXPR);
+    node->set_col_type(pb::INVALID_TYPE);
+    pb::Function* func = node->mutable_fn();
+    func->set_name(fn_name);
+    func->set_fn_op(func_expr->func_type);
+    func->set_has_var_args(false);
+    pb::DeriveExprNode* derive_node = node->mutable_derive_node();
+    derive_node->set_tuple_id(slots[0].tuple_id());
+    derive_node->set_slot_id(slots[0].slot_id());
+    for (int i = 0; i < func_expr->children.size(); ++i) {
+        if (create_expr_tree(func_expr->children[i], window_expr, options)) {
+            DB_WARNING("Fail to create_expr_tree");
+            return -1;
+        }
+    }
+    node->set_num_children(func_expr->children.size());
+    expr.MergeFrom(window_expr);
+
+    pb::WindowNode window_node;
+    // func expr
+    window_node.add_func_exprs()->CopyFrom(window_expr);
+    // window spec
+    pb::WindowSpec* pb_window_spec = window_node.mutable_window_spec();
+    if (create_window_spec(fn_name, window_spec, *pb_window_spec, options) != 0) {
+        DB_WARNING("Fail to create window spec");
+        return -1;
+    }
+    _window_nodes.emplace_back(std::move(window_node));
+    // prepare模式模式显示'?'号，不同窗口进行to_string()后可能相同，先不支持prepare模式
+    _window_specs.emplace_back(window_spec->to_string());
+    _ctx->has_window_func = true;
+    _ctx->has_unable_cache_expr = true;
+    return 0;
+}
+
+int LogicalPlanner::create_window_spec(
+        const std::string& fn_name, const parser::WindowSpec* item, 
+        pb::WindowSpec& window_spec, const CreateExprOptions& options) {
+    if (item == nullptr) {
+        DB_WARNING("item is nullptr");
+        return -1;
+    }
+    // 数据集按照(partition_by_list, order_by_list)进行排序
+    int32_t order_tuple_id = -1;
+    int32_t order_slot_cnt = 1;
+    std::vector<pb::SlotDescriptor> order_slots;
+    std::vector<pb::Expr> order_exprs;
+    std::vector<bool> order_ascs;
+    // partition by
+    parser::PartitionByClause* partition_by = item->partition_by;
+    if (partition_by != nullptr) {
+        for (int i = 0; i < partition_by->items.size(); ++i) {
+            const parser::ByItem* by_item = partition_by->items[i];
+            if (by_item == nullptr) {
+                DB_WARNING("by_item is nullptr");
+                return -1;
+            }
+            if (by_item->node_type != parser::NT_BY_ITEM) {
+                DB_WARNING("un-supported partition-by item type: %d", by_item->node_type);
+                return -1;
+            }
+            pb::Expr* expr = window_spec.add_partition_exprs();
+            if (create_expr_tree(by_item->expr, *expr, options) != 0) {
+                DB_WARNING("Fail to create_expr_tree");
+                return -1;
+            }
+        }
+        if (create_orderby_exprs(
+                partition_by->items, order_tuple_id, order_slot_cnt, order_slots, order_exprs, order_ascs) != 0) {
+            DB_WARNING("Fail to create order by exprs");
+            return -1;
+        }
+    }
+    // order by
+    parser::OrderByClause* order_by = item->order_by;
+    if (order_by != nullptr) {
+        if (create_orderby_exprs(
+                order_by->items, order_tuple_id, order_slot_cnt, order_slots, order_exprs, order_ascs) != 0) {
+            DB_WARNING("Fail to create order by exprs");
+            return -1;
+        }
+    }
+    if (order_exprs.size() != 0) {
+        _window_sort_slot_mapping[order_tuple_id].swap(order_slots);
+        for (auto& order_expr : order_exprs) {
+            pb::Expr* expr = window_spec.add_order_exprs();
+            expr->Swap(&order_expr);
+        }
+        for (auto order_asc : order_ascs) {
+            window_spec.add_is_asc(order_asc);
+        }
+        window_spec.set_tuple_id(order_tuple_id);
+    }
+    if (fn_name == "row_number" || fn_name == "rank" || fn_name == "dense_rank" || fn_name == "percent_rank" ||
+            fn_name == "cume_dist" || fn_name == "ntile" || fn_name == "lead" || fn_name == "lag") {
+        // 这些窗口函数不需要Frame
+        return 0;
+    }
+    // window frame
+    parser::WindowFrameClause* frame = item->frame;
+    if (frame != nullptr) {
+        pb::WindowFrame* window_frame = window_spec.mutable_window_frame();
+        if (frame->frame_type == parser::FT_ROWS) {
+            window_frame->set_frame_type(pb::FT_ROWS);
+        } else if (frame->frame_type == parser::FT_RANGE) {
+            window_frame->set_frame_type(pb::FT_RANGE);
+        } else {
+            DB_WARNING("not frame type: %d", frame->frame_type);
+            _ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+            _ctx->stat_info.error_msg << "Windowing clause only support ROWS/RANGE frame";
+            return -1;
+        }
+        const parser::FrameExtent* frame_extent = frame->frame_extent;
+        if (frame_extent == nullptr) {
+            DB_WARNING("frame_extent is nullptr");
+            return -1;
+        }
+        pb::FrameExtent* pb_frame_extent = window_frame->mutable_frame_extent();
+        if (create_window_frame_bound(
+                frame_extent->frame_start, *pb_frame_extent->mutable_frame_start(), options) != 0) {
+            DB_WARNING("Fail to create window frame start");
+            return -1;
+        }
+        if (create_window_frame_bound(
+                frame_extent->frame_end, *pb_frame_extent->mutable_frame_end(), options) != 0) {
+            DB_WARNING("Fail to create window frame end");
+            return -1;
+        }
+    } else {
+        // 没有FRAME场景
+        //      如果有ORDER BY，则FRAME设置为: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        //      如果没有ORDER BY，则FRAME设置为: RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+        pb::WindowFrame* window_frame = window_spec.mutable_window_frame();
+        window_frame->set_frame_type(pb::FT_RANGE);
+        pb::FrameExtent* pb_frame_extent = window_frame->mutable_frame_extent();
+        pb::FrameBound* pb_frame_start = pb_frame_extent->mutable_frame_start();
+        pb_frame_start->set_bound_type(pb::BT_PRECEDING);
+        pb_frame_start->set_is_unbounded(true);
+        pb::FrameBound* pb_frame_end = pb_frame_extent->mutable_frame_end();
+        if (order_by != nullptr) {
+            pb_frame_end->set_bound_type(pb::BT_CURRENT_ROW);
+        } else {
+            pb_frame_end->set_bound_type(pb::BT_FOLLOWING);
+            pb_frame_end->set_is_unbounded(true);
+        }
+    }
+    return 0;
+}
+
+int LogicalPlanner::create_window_frame_bound(
+        const parser::FrameBound* bound, pb::FrameBound& frame_bound, const CreateExprOptions& options) {
+    if (bound == nullptr) {
+        DB_WARNING("bound is nullptr");
+        return -1;
+    }
+    switch (bound->bound_type) {
+    case parser::BT_PRECEDING: {
+        frame_bound.set_bound_type(pb::BT_PRECEDING);
+        break;
+    }
+    case parser::BT_FOLLOWING: {
+        frame_bound.set_bound_type(pb::BT_FOLLOWING);
+        break;
+    }
+    case parser::BT_CURRENT_ROW: {
+        frame_bound.set_bound_type(pb::BT_CURRENT_ROW);
+        break;
+    }
+    default: {
+        DB_WARNING("Invalid frame bound type: %d", bound->bound_type);
+        return -1;
+    }
+    }
+    frame_bound.set_is_unbounded(bound->is_unbounded);
+    if (bound->expr != nullptr) {
+        if (create_expr_tree(bound->expr, *frame_bound.mutable_expr(), options) != 0) {
+            DB_WARNING("Fail to create_expr_tree");
+            return -1;
         }
     }
     return 0;
@@ -2126,6 +2509,16 @@ int LogicalPlanner::construct_apply_node(QueryContext* sub_ctx,
             pb::Expr& expr,
             const pb::JoinType join_type,
             const CreateExprOptions& options) {
+    if (sub_ctx == nullptr) {
+        DB_WARNING("sub_ctx is nullptr");
+        return -1;
+    }
+    if (sub_ctx->has_window_func) {
+        DB_WARNING("Not support correlated subquery when subquery has window func");
+        _ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+        _ctx->stat_info.error_msg << "Not support correlated subquery when subquery has window func";
+        return -1;
+    }
     for (auto& kv : sub_ctx->derived_table_ctx_mapping) {
         _ctx->derived_table_ctx_mapping[kv.first] = kv.second;
         _ctx->add_sub_ctx(kv.second);
@@ -2137,7 +2530,6 @@ int LogicalPlanner::construct_apply_node(QueryContext* sub_ctx,
     std::unique_ptr<ApplyMemTmp> apply_node_mem(new ApplyMemTmp);
     apply_node_mem->apply_node.set_join_type(join_type);
     apply_node_mem->apply_node.set_max_one_row(options.max_one_row);
-    apply_node_mem->apply_node.set_compare_type(options.compare_type);
     apply_node_mem->apply_node.set_is_select_field(options.is_select_field);
     apply_node_mem->outer_node = _join_root;
     std::set<int64_t> left_tuple_ids;
@@ -2434,8 +2826,9 @@ void LogicalPlanner::construct_literal_expr(const ExprValue& value, pb::ExprNode
     }    
 }
 
-
-int LogicalPlanner::exec_subquery_expr(QueryContext* sub_ctx, QueryContext* ctx) {
+int LogicalPlanner::exec_subquery_expr(std::shared_ptr<QueryContext> smart_sub_ctx, QueryContext* ctx) {
+    QueryContext* sub_ctx = smart_sub_ctx.get();
+    // sub_ctx->sql_exec_type_defined = SignExecType::SIGN_EXEC_ROW;
     int ret = PhysicalPlanner::analyze(sub_ctx);
     if (ret < 0) {
         DB_WARNING("exec PhysicalPlanner failed");
@@ -2448,8 +2841,33 @@ int LogicalPlanner::exec_subquery_expr(QueryContext* sub_ctx, QueryContext* ctx)
         return -1;
     }
     state.set_is_expr_subquery(true);
+    if (ctx->is_explain && ctx->explain_type == EXPLAIN_NULL) {
+        // 如果是普通explain (非explain format='plan')
+        // 把生成的物理计划暂存在runtime_state内，后面再explain
+        // 需要把fake data回填到对应的查询内 
+        state.is_explain = true;
+        auto packet_node = smart_sub_ctx->root->get_node(pb::PACKET_NODE);
+        std::vector<ExprNode*>& projections = dynamic_cast<PacketNode*>(packet_node)->mutable_projections();
+        auto subquery_exprs_vec_ptr = state.mutable_subquery_exprs();
+        std::vector<ExprValue> single_row;
+        for(int i = 0; i < projections.size(); ++i) {
+            pb::PrimitiveType field_type = projections[i]->col_type();
+            if (field_type == pb::DATETIME || field_type == pb::TIMESTAMP 
+                    || field_type == pb::DATE || field_type == pb::TIME) {
+                single_row.emplace_back(field_type, "2024-01-01");
+            } else {
+                single_row.emplace_back(field_type, "0");
+            }
+        }
+        subquery_exprs_vec_ptr->emplace_back(single_row);
+        ctx->add_noncorrelated_subquerys(smart_sub_ctx);
+        return 0;
+    }
+
+    if (sub_ctx->use_mpp) {
+        return PhysicalPlanner::execute_mpp(sub_ctx, nullptr);
+    }
     ret = sub_ctx->root->open(&state);
-    sub_ctx->root->close(&state);
     ctx->update_ctx_stat_info(&state, sub_ctx->get_ctx_total_time());
     if (ret < 0) {
         return -1;
@@ -2467,16 +2885,32 @@ int LogicalPlanner::create_common_subquery_expr(const parser::SubqueryExpr* item
         DB_WARNING("gen subquery plan failed");
         return -1;
     }
-
     if (!_cur_sub_ctx->expr_params.is_correlated_subquery) {
-        ret = exec_subquery_expr(_cur_sub_ctx.get(), _ctx);
+        ret = exec_subquery_expr(_cur_sub_ctx, _ctx);
+        SmartState state = _cur_sub_ctx->get_runtime_state();
+        ON_SCOPE_EXIT(([this, state]() {
+            // 列必须要在使用完结果才能close
+            if (state->is_expr_subquery() && _cur_sub_ctx->root != nullptr 
+                    && (!_cur_sub_ctx->is_explain || _cur_sub_ctx->explain_type != EXPLAIN_NULL)) {
+                _cur_sub_ctx->root->close(state.get());
+            }
+        }));
         if (ret < 0) {
             DB_WARNING("exec subquery failed");
             return -1;
         }
-        auto state = _cur_sub_ctx->get_runtime_state();
+        bool run_memrow = (state->execute_type == pb::EXEC_ROW);
         auto& subquery_exprs_vec = state->get_subquery_exprs();
-        if (options.max_one_row && subquery_exprs_vec.size() > 1) {
+        std::shared_ptr<arrow::Table> vec_result_table = state->subquery_result_table;
+        if (!run_memrow && vec_result_table == nullptr) {
+            DB_FATAL("run vectorized but subquery result table is null");
+            return -1;
+        }
+        int64_t row_cnt = subquery_exprs_vec.size();
+        if (!run_memrow) {
+            row_cnt = vec_result_table->num_rows();
+        }
+        if (options.max_one_row && row_cnt > 1) {
             _ctx->stat_info.error_code = ER_SUBQUERY_NO_1_ROW;
             _ctx->stat_info.error_msg << "Subquery returns more than 1 row";
             DB_WARNING("Subquery returns more than 1 row");
@@ -2484,34 +2918,64 @@ int LogicalPlanner::create_common_subquery_expr(const parser::SubqueryExpr* item
         }
         // select (SubSelect)
         if (options.is_select_field) {
-            if (subquery_exprs_vec.size() == 0) {
+            if (row_cnt == 0) {
                 pb::ExprNode* node = expr.add_nodes();
                 node->set_node_type(pb::NULL_LITERAL);
             } else {
-                if (subquery_exprs_vec.size() != 1 || subquery_exprs_vec[0].size() != 1) {
-                    _ctx->stat_info.error_code = ER_SUBQUERY_NO_1_ROW;
-                    _ctx->stat_info.error_msg << "Subquery returns more than 1 row";
-                    DB_WARNING("Subquery returns more than 1 row");
-                    return -1;
+                if (run_memrow) {
+                    if (subquery_exprs_vec.size() != 1 || subquery_exprs_vec[0].size() != 1) {
+                        _ctx->stat_info.error_code = ER_SUBQUERY_NO_1_ROW;
+                        _ctx->stat_info.error_msg << "Subquery returns more than 1 row";
+                        DB_WARNING("Subquery returns more than 1 row");
+                        return -1;
+                    }
+                    pb::ExprNode* node = expr.add_nodes();
+                    construct_literal_expr(subquery_exprs_vec[0][0], node); 
+                } else {
+                    if (vec_result_table->num_rows() != 1 || vec_result_table->num_columns() != 1) {
+                        _ctx->stat_info.error_code = ER_SUBQUERY_NO_1_ROW;
+                        _ctx->stat_info.error_msg << "Subquery returns more than 1 row";
+                        DB_WARNING("Subquery returns more than 1 row");
+                        return -1;
+                    }
+                    pb::ExprNode* node = expr.add_nodes();
+                    construct_literal_expr(VectorizeHelpper::get_vectorized_value(vec_result_table->column(0).get(), 0), node);
                 }
-                pb::ExprNode* node = expr.add_nodes();
-                construct_literal_expr(subquery_exprs_vec[0][0], node);
             }
         // in (SubSelect)
         } else {
-            if (subquery_exprs_vec.size() > 0) {
-                for (auto& rows : subquery_exprs_vec) {
-                    if (rows.size() > 1) {
-                        pb::ExprNode* row_node = expr.add_nodes();
-                        row_node->set_node_type(pb::ROW_EXPR);
-                        row_node->set_num_children(rows.size());
-                        for (auto& row : rows) {
+            if (row_cnt > 0) {
+                if (run_memrow) {
+                    for (auto& rows : subquery_exprs_vec) {
+                        if (rows.size() > 1) {
+                            pb::ExprNode* row_node = expr.add_nodes();
+                            row_node->set_node_type(pb::ROW_EXPR);
+                            row_node->set_num_children(rows.size());
+                            for (auto& row : rows) {
+                                pb::ExprNode* node = expr.add_nodes();
+                                construct_literal_expr(row, node);
+                            }
+                        } else {
                             pb::ExprNode* node = expr.add_nodes();
-                            construct_literal_expr(row, node);
+                            construct_literal_expr(rows[0], node);
                         }
-                    } else {
-                        pb::ExprNode* node = expr.add_nodes();
-                        construct_literal_expr(rows[0], node);
+                    }
+                } else {
+                    const int column_size = vec_result_table->num_columns();
+                    for (int64_t row_idx = 0; row_idx < vec_result_table->num_rows(); ++row_idx) {
+                        // 列转行
+                        if (column_size > 1) {
+                            pb::ExprNode* row_node = expr.add_nodes();
+                            row_node->set_node_type(pb::ROW_EXPR);
+                            row_node->set_num_children(column_size);
+                            for (int column_idx = 0; column_idx < column_size; ++column_idx) {
+                                pb::ExprNode* node = expr.add_nodes();
+                                construct_literal_expr(VectorizeHelpper::get_vectorized_value(vec_result_table->column(column_idx).get(), row_idx), node);
+                            }
+                        } else {
+                            pb::ExprNode* node = expr.add_nodes();
+                            construct_literal_expr(VectorizeHelpper::get_vectorized_value(vec_result_table->column(0).get(), row_idx), node);
+                        }
                     }
                 }
             } else {
@@ -2554,8 +3018,8 @@ int LogicalPlanner::handle_compare_subquery(const parser::ExprNode* expr_item, p
     parser::ExprNode* arg1 = (parser::ExprNode*)sub_query_expr->left_expr;
     if (arg1->expr_type == parser::ET_ROW_EXPR && arg1->children.size() > 1) {
         _ctx->stat_info.error_code = ER_OPERAND_COLUMNS;
-        _ctx->stat_info.error_msg << "Operand should contain 1 column(s)s";
-        DB_WARNING("Operand should contain 1 column(s)s");
+        _ctx->stat_info.error_msg << "Operand should contain 1 column(s)";
+        DB_WARNING("Operand should contain 1 column(s)");
         return -1;
     }
     int ret = create_expr_tree(sub_query_expr->left_expr, left_expr, options);
@@ -2571,18 +3035,41 @@ int LogicalPlanner::handle_compare_subquery(const parser::ExprNode* expr_item, p
     if (ret < 0) {
         return -1;
     }
+    if (_cur_sub_ctx->field_column_id_mapping.size() != 1) {
+        _ctx->stat_info.error_code = ER_OPERAND_COLUMNS;
+        _ctx->stat_info.error_msg << "Operand should contain 1 column(s)";
+        DB_WARNING("Operand should contain 1 column(s)");
+        return -1;
+    }
     // 非相关子查询表达式，直接执行获取结果
     if (!_cur_sub_ctx->expr_params.is_correlated_subquery) {
-        ret = exec_subquery_expr(_cur_sub_ctx.get(), _ctx);
+        ret = exec_subquery_expr(_cur_sub_ctx, _ctx);
+        SmartState state = _cur_sub_ctx->get_runtime_state();
+        ON_SCOPE_EXIT(([this, state]() {
+            // 列必须要在使用完结果才能close
+            if (state->is_expr_subquery() && _cur_sub_ctx->root != nullptr 
+                    && (!_cur_sub_ctx->is_explain || _cur_sub_ctx->explain_type != EXPLAIN_NULL)) {
+                _cur_sub_ctx->root->close(state.get());
+            }
+        }));
         if (ret < 0) {
             return -1;
         }
-        auto state = _cur_sub_ctx->get_runtime_state();
+        bool run_memrow = (state->execute_type == pb::EXEC_ROW);
         auto& subquery_exprs_vec = state->get_subquery_exprs();
+        std::shared_ptr<arrow::Table> vec_result_table = state->subquery_result_table;
         bool is_eq_all = false;
         ExprValue first_val;
         bool always_false = false;
         bool is_neq_any = false;
+        if (!run_memrow && vec_result_table == nullptr) {
+            DB_FATAL("run vectorized but subquery result table is null");
+            return -1;
+        }
+        auto row_cnt = subquery_exprs_vec.size();
+        if (!run_memrow) {
+            row_cnt = vec_result_table->num_rows();
+        }
         // =
         if (_cur_sub_ctx->expr_params.func_type == parser::FT_EQ) {
             pb::ExprNode* node = compare_expr.mutable_nodes(0);
@@ -2595,15 +3082,26 @@ int LogicalPlanner::handle_compare_subquery(const parser::ExprNode* expr_item, p
             if (_cur_sub_ctx->expr_params.cmp_type == parser::CMP_ALL) {
                 is_eq_all = true;
             }
-            
-            if (subquery_exprs_vec.size() > 0) {
+            if (row_cnt > 0) {
                 if (is_eq_all) {
-                    first_val = subquery_exprs_vec[0][0];
-                    for (uint32_t i = 1; i < subquery_exprs_vec.size(); i++) {
-                        // = all返回多个不同值
-                        if (first_val.compare(subquery_exprs_vec[i][0]) != 0) {
-                            DB_WARNING("always_false");
-                            always_false = true;
+                    if (run_memrow) { 
+                        first_val = subquery_exprs_vec[0][0];
+                        for (uint32_t i = 1; i < subquery_exprs_vec.size(); i++) {
+                            // = all返回多个不同值
+                            if (first_val.compare(subquery_exprs_vec[i][0]) != 0) {
+                                DB_WARNING("always_false");
+                                always_false = true;
+                            }
+                        }
+                    } else {
+                        // 行转列
+                        first_val = VectorizeHelpper::get_vectorized_value(vec_result_table->column(0).get(), 0);
+                        for (uint32_t i = 1; i < vec_result_table->num_rows(); i++) {
+                            // = all返回多个不同值
+                            if (first_val.compare(VectorizeHelpper::get_vectorized_value(vec_result_table->column(0).get(), i)) != 0) {
+                                DB_WARNING("always_false");
+                                always_false = true;
+                            }
                         }
                     }
                     node->set_num_children(2);
@@ -2633,14 +3131,26 @@ int LogicalPlanner::handle_compare_subquery(const parser::ExprNode* expr_item, p
             if (_cur_sub_ctx->expr_params.cmp_type != parser::CMP_ALL) {
                 is_neq_any = true;
             }
-            if (subquery_exprs_vec.size() > 0) {
+            
+            if (row_cnt > 0) {
                 if (is_neq_any) {
-                    first_val = subquery_exprs_vec[0][0];
-                    for (uint32_t i = 1; i < subquery_exprs_vec.size(); i++) {
-                        // = all返回多个不同值
-                        if (first_val.compare(subquery_exprs_vec[i][0]) != 0) {
-                            DB_WARNING("always_false");
-                            always_false = true;
+                    if (run_memrow) {
+                        first_val = subquery_exprs_vec[0][0];
+                        for (uint32_t i = 1; i < subquery_exprs_vec.size(); i++) {
+                            // = all返回多个不同值
+                            if (first_val.compare(subquery_exprs_vec[i][0]) != 0) {
+                                DB_WARNING("always_false");
+                                always_false = true;
+                            }
+                        }
+                    } else {
+                        first_val = VectorizeHelpper::get_vectorized_value(vec_result_table->column(0).get(), 0);
+                        for (uint32_t i = 1; i < vec_result_table->num_rows(); i++) {
+                            // = all返回多个不同值
+                            if (first_val.compare(VectorizeHelpper::get_vectorized_value(vec_result_table->column(0).get(), i)) != 0) {
+                                DB_WARNING("always_false");
+                                always_false = true;
+                            }
                         }
                     }
                     node->set_num_children(2);
@@ -2648,65 +3158,109 @@ int LogicalPlanner::handle_compare_subquery(const parser::ExprNode* expr_item, p
                     node->set_num_children(subquery_exprs_vec.size() + 1);
                 }
             } else {
-                 node->set_num_children(2);
+                node->set_num_children(2);
             }
         } else if (_cur_sub_ctx->expr_params.func_type == parser::FT_GT
             || _cur_sub_ctx->expr_params.func_type == parser::FT_GE) {
-            if (_cur_sub_ctx->expr_params.cmp_type == parser::CMP_ALL 
-                && subquery_exprs_vec.size() == 1 && subquery_exprs_vec[0][0].is_null()) {
-                // > >= all (null) 恒为true
-                pb::ExprNode* node = expr.add_nodes();
-                node->set_node_type(pb::BOOL_LITERAL);
-                node->set_col_type(pb::BOOL);
-                node->mutable_derive_node()->set_bool_val(true);
-                return 0;
+            if (_cur_sub_ctx->expr_params.cmp_type == parser::CMP_ALL && row_cnt == 1) {
+                bool is_null = false;
+                if (run_memrow 
+                        && subquery_exprs_vec[0][0].is_null()) {
+                    is_null = true;
+                }
+                if (!run_memrow
+                        && VectorizeHelpper::get_vectorized_value(vec_result_table->column(0).get(), 0).is_null()) {
+                    is_null = true;
+                }
+                if (is_null) {
+                    // > >= all (null) 恒为true
+                    pb::ExprNode* node = expr.add_nodes();
+                    node->set_node_type(pb::BOOL_LITERAL);
+                    node->set_col_type(pb::BOOL);
+                    node->mutable_derive_node()->set_bool_val(true);
+                    return 0;
+                }
             }
         }
         for (auto& old_node : left_expr.nodes()) {
-                compare_expr.add_nodes()->CopyFrom(old_node);
+            compare_expr.add_nodes()->CopyFrom(old_node);
         }
-        if (subquery_exprs_vec.size() > 0 && !always_false) {
+        if (row_cnt > 0 && !always_false) {
             if (is_neq_any || is_eq_all) {
-               pb::ExprNode* node = compare_expr.add_nodes();
+                pb::ExprNode* node = compare_expr.add_nodes();
                 construct_literal_expr(first_val, node);
             } else {
-                for (auto& rows : subquery_exprs_vec) {
-                    pb::ExprNode* node = compare_expr.add_nodes();
-                    construct_literal_expr(rows[0], node);
+                if (run_memrow) {
+                    for (auto& rows : subquery_exprs_vec) {
+                        pb::ExprNode* node = compare_expr.add_nodes();
+                        construct_literal_expr(rows[0], node);
+                    }
+                } else {
+                    for (auto row_idx = 0; row_idx < vec_result_table->num_rows(); row_idx++) {
+                        pb::ExprNode* node = compare_expr.add_nodes();
+                        construct_literal_expr(VectorizeHelpper::get_vectorized_value(vec_result_table->column(0).get(), row_idx), node);
+                    }
                 }
             }
+        } else if (row_cnt == 0 && sub_query_expr->cmp_type == parser::CMP_ALL) {
+            compare_expr.clear_nodes();
+            pb::ExprNode* true_node = compare_expr.add_nodes();
+            true_node->set_node_type(pb::BOOL_LITERAL);
+            true_node->set_col_type(pb::BOOL);
+            true_node->mutable_derive_node()->set_bool_val(true);
         } else {
-            pb::ExprNode* node = compare_expr.add_nodes();
-            node->set_node_type(pb::BOOL_LITERAL);
-            node->set_col_type(pb::BOOL);
-            node->mutable_derive_node()->set_bool_val(false);
+            compare_expr.clear_nodes();
+            pb::ExprNode* false_node = compare_expr.add_nodes();
+            false_node->set_node_type(pb::BOOL_LITERAL);
+            false_node->set_col_type(pb::BOOL);
+            false_node->mutable_derive_node()->set_bool_val(false);
         }
         for (auto& old_node : compare_expr.nodes()) {
             expr.add_nodes()->CopyFrom(old_node);
         }
     } else {
+        // field op any (select x where conditions) <=> exists (select ... where conditions and (field op x))
+        // field op all (select x where conditions) <=> not field anti-op any (select x where conditions)
+        //                                          <=> not exists (select ... where conditions and (field anti-op x))
         _is_correlate_subquery_expr = true;
-        for (auto& old_node : compare_expr.nodes()) {
-            expr.add_nodes()->CopyFrom(old_node);
-        }
-        for (auto& old_node : left_expr.nodes()) {
-                expr.add_nodes()->CopyFrom(old_node);
-        }
+
         CreateExprOptions tmp_options = options;
+        pb::JoinType joinType = pb::NULL_JOIN;
         switch (sub_query_expr->cmp_type) {
+            case parser::CMP_ALL:{
+                static std::map<parser::FuncType, std::pair<parser::FuncType, std::string>> anti_op_map = {
+                        {parser::FT_EQ, {parser::FT_NE, "ne"}},
+                        {parser::FT_NE, {parser::FT_EQ, "eq"}},
+                        {parser::FT_GT, {parser::FT_LE, "le"}},
+                        {parser::FT_GE, {parser::FT_LT, "lt"}},
+                        {parser::FT_LT, {parser::FT_GE, "ge"}},
+                        {parser::FT_LE, {parser::FT_GT, "gt"}},
+                };
+                auto op = (parser::FuncType) func->fn_op();
+                auto iter = anti_op_map.find(op);
+                if (iter == anti_op_map.end()) {
+                    DB_FATAL("Unexpected OP while handle_compare_subquery: %d", op);
+                    return -1;
+                }
+                func->set_name(iter->second.second);
+                func->set_fn_op(iter->second.first);
+                joinType = pb::ANTI_SEMI_JOIN;
+                break;
+            }
             case parser::CMP_ANY:
-                tmp_options.compare_type = pb::CMP_ANY;
-                break;
-            case parser::CMP_ALL:
-                tmp_options.compare_type = pb::CMP_ALL;
-                break;
             case parser::CMP_SOME:
-                tmp_options.compare_type = pb::CMP_SOME;
+                joinType = pb::SEMI_JOIN;
                 break;
             default:
                 break;
         }
-        ret = construct_apply_node(_cur_sub_ctx.get(), expr, pb::LEFT_JOIN, tmp_options);
+        for (auto& old_node : compare_expr.nodes()) {
+            expr.add_nodes()->CopyFrom(old_node);
+        }
+        for (auto& old_node : left_expr.nodes()) {
+            expr.add_nodes()->CopyFrom(old_node);
+        }
+        ret = construct_apply_node(_cur_sub_ctx.get(), expr, joinType, tmp_options);
         if (ret < 0) {
             DB_WARNING("construct apply node failed");
             return -1;
@@ -2730,18 +3284,35 @@ int LogicalPlanner::handle_exists_subquery(const parser::ExprNode* expr_item, pb
 
     // 非相关子查询表达式，直接执行获取结果
     if (!_cur_sub_ctx->expr_params.is_correlated_subquery) {
-        ret = exec_subquery_expr(_cur_sub_ctx.get(), _ctx);
+        ret = exec_subquery_expr(_cur_sub_ctx, _ctx);
+        SmartState state = _cur_sub_ctx->get_runtime_state();
+        ON_SCOPE_EXIT(([this, state]() {
+            // 列必须要在使用完结果才能close
+            if (state->is_expr_subquery() && _cur_sub_ctx->root != nullptr 
+                    && (!_cur_sub_ctx->is_explain || _cur_sub_ctx->explain_type != EXPLAIN_NULL)) {
+                _cur_sub_ctx->root->close(state.get());
+            }
+        }));
         if (ret < 0) {
             return -1;
         }
-        auto state = _cur_sub_ctx->get_runtime_state();
         auto& subquery_exprs_vec = state->get_subquery_exprs();
+        bool run_memrow = (state->execute_type == pb::EXEC_ROW);
+        std::shared_ptr<arrow::Table> vec_result_table = state->subquery_result_table;
+        if (!run_memrow && vec_result_table == nullptr) {
+            DB_FATAL("run vectorized but subquery result table is null");
+            return -1;
+        }
         pb::ExprNode* node = expr.add_nodes();
         node->set_node_type(pb::BOOL_LITERAL);
         node->set_col_type(pb::BOOL);
-        if (subquery_exprs_vec.size() > 0 && !is_not) {
+        int64_t row_cnt = subquery_exprs_vec.size();
+        if (!run_memrow) {
+            row_cnt = vec_result_table->num_rows();
+        }
+        if (row_cnt > 0 && !is_not) {
             node->mutable_derive_node()->set_bool_val(true);
-        } else if (subquery_exprs_vec.size() == 0 && is_not) {
+        } else if (row_cnt == 0 && is_not) {
             node->mutable_derive_node()->set_bool_val(true);
         } else {
             node->mutable_derive_node()->set_bool_val(false);
@@ -2804,7 +3375,8 @@ int LogicalPlanner::create_expr_tree(const parser::Node* item, pb::Expr& expr, c
     } else if (expr_item->expr_type == parser::ET_COLUMN) {
         int ret = -1;
         if (options.use_alias) {
-            ret = create_alias_node(static_cast<const parser::ColumnName*>(expr_item), expr);
+            // TODO：目前都是别名优先，后续需要关注mysql别名和列名的优先级
+            ret = create_alias_node(static_cast<const parser::ColumnName*>(expr_item), expr, options.can_agg);
         }
         if (ret == -2) {
             if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
@@ -2812,13 +3384,18 @@ int LogicalPlanner::create_expr_tree(const parser::Node* item, pb::Expr& expr, c
                 _ctx->stat_info.error_msg << "Column \'" << expr_item->to_string() << "\' is ambiguous";
             }
             return -1;
-        } else if (ret == -1) {
+        } else if (ret == -1 || ret == -3) {
             if (0 != create_term_slot_ref_node(static_cast<const parser::ColumnName*>(expr_item), expr, options)) {
-                if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                if (ret == -1 && _ctx->stat_info.error_code == ER_ERROR_FIRST) {
                     _ctx->stat_info.error_code = ER_BAD_FIELD_ERROR;
                     _ctx->stat_info.error_msg << "Unknown column \'" << expr_item->to_string() << "\'";
                 }
-                return -1;
+                if (ret == -3) {
+                    _ctx->stat_info.error_msg.str("");
+                    _ctx->stat_info.error_code = ER_INVALID_GROUP_FUNC_USE;
+                    _ctx->stat_info.error_msg << "Invalid use of group function";
+                }
+                return ret;
             }
         }
     } else if (expr_item->expr_type == parser::ET_ROW_EXPR) {
@@ -2901,6 +3478,16 @@ int LogicalPlanner::create_expr_tree(const parser::Node* item, pb::Expr& expr, c
         return handle_compare_subquery(expr_item, expr, options);
     } else if (expr_item->expr_type == parser::ET_EXISTS_SUB_QUERY_EXPR) {
         return handle_exists_subquery(expr_item, expr, options);
+    } else if (expr_item->expr_type == parser::ET_WINDOW) {
+        if (!options.can_window) {
+            if (_ctx->stat_info.error_code == ER_ERROR_FIRST) {
+                _ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+                _ctx->stat_info.error_msg << "Only support window function in select field";
+            }
+            DB_WARNING("Only support window function in select field");
+            return -1;
+        }
+        return create_window_expr(static_cast<const parser::WindowFuncExpr*>(expr_item), expr, options);
     } else {
         DB_WARNING("un-supported expr_type: %d", expr_item->expr_type);
         return -1;
@@ -3066,7 +3653,7 @@ pb::SlotDescriptor& LogicalPlanner::get_values_ref_slot(int64_t table,
 }
 
 // -2 means alias name ambiguous
-int LogicalPlanner::create_alias_node(const parser::ColumnName* column, pb::Expr& expr) {
+int LogicalPlanner::create_alias_node(const parser::ColumnName* column, pb::Expr& expr, bool can_agg) {
     if (!column->db.empty()) {
         DB_WARNING("alias no db");
         return -1;
@@ -3088,6 +3675,15 @@ int LogicalPlanner::create_alias_node(const parser::ColumnName* column, pb::Expr
         if (iter != _select_alias_mapping.end() && iter->second >= _select_exprs.size()) {
             //DB_WARNING("invalid column name: %s", column->name.c_str());
             return -1;
+        }
+        if (!can_agg) {
+            // group by内的别名不允许包含agg函数
+            const auto& sub_exprs = _select_exprs[iter->second].nodes();
+            for (const auto & sub_expr : sub_exprs) {
+                if (sub_expr.node_type() == pb::AGG_EXPR) {
+                    return -3;
+                }
+            }
         }
         expr.MergeFrom(_select_exprs[iter->second]);
     }
@@ -3272,7 +3868,16 @@ int LogicalPlanner::create_row_expr_node(const parser::RowExpr* item, pb::Expr& 
 }
 
 int LogicalPlanner::create_orderby_exprs(parser::OrderByClause* order) {
-    parser::Vector<parser::ByItem*> order_items = order->items;
+    return create_orderby_exprs(
+                order->items, _order_tuple_id, _order_slot_cnt, _order_slots, _order_exprs, _order_ascs);
+}
+
+int LogicalPlanner::create_orderby_exprs(parser::Vector<parser::ByItem*>& order_items, 
+                                         int32_t& order_tuple_id, 
+                                         int32_t& order_slot_cnt,
+                                         std::vector<pb::SlotDescriptor>& order_slots,
+                                         std::vector<pb::Expr>& order_exprs, 
+                                         std::vector<bool>& order_ascs) {
     CreateExprOptions options;
     options.use_alias = true;
     options.can_agg = true;
@@ -3300,7 +3905,7 @@ int LogicalPlanner::create_orderby_exprs(parser::OrderByClause* order) {
             if (node.node_type() != pb::SLOT_REF && node.node_type() != pb::AGG_EXPR) {
                 //DB_WARNING("un-supported order-by node type: %d", node.node_type());
                 //return -1;
-                create_order_func_slot();
+                create_order_func_slot(order_tuple_id, order_slot_cnt, order_slots);
             }
         } 
 #else
@@ -3308,11 +3913,11 @@ int LogicalPlanner::create_orderby_exprs(parser::OrderByClause* order) {
         if (node.node_type() != pb::SLOT_REF && node.node_type() != pb::AGG_EXPR) {
             //DB_WARNING("un-supported order-by node type: %d", node.node_type());
             //return -1;
-            create_order_func_slot();
+            create_order_func_slot(order_tuple_id, order_slot_cnt, order_slots);
         }
 #endif
-        _order_exprs.push_back(order_expr);
-        _order_ascs.push_back(is_asc);
+        order_exprs.push_back(order_expr);
+        order_ascs.push_back(is_asc);
     }
     return 0;
 }
@@ -3340,6 +3945,9 @@ void LogicalPlanner::create_scan_tuple_descs() {
             const pb::SlotDescriptor& desc = kv.second;
             pb::SlotDescriptor* slot = tuple_desc.add_slots();
             slot->CopyFrom(desc);
+            // 只对表的Tuple的slot_idxes赋值，对于agg/window/order/values tuple不赋值slot_idxes
+            // 后续无效列裁剪如果升级处理Agg/Window表达式，需要对相应tuple的slot_idxes进行赋值
+            tuple_desc.add_slot_idxes(slot->slot_id() - 1);
         }
         _scan_tuples.emplace_back(tuple_desc);
         _ctx->add_tuple(tuple_desc);
@@ -3506,14 +4114,23 @@ int LogicalPlanner::create_join_and_scan_nodes(JoinMemTmp* join_root, ApplyMemTm
         scan->set_table_id(join_root->join_node.left_table_ids(0));
         scan->set_engine(_factory->get_table_engine(scan->table_id()));
         //DB_WARNING("get_table_engine :%d", scan->engine());
-        for (auto index_id : join_root->use_indexes) {
-            scan->add_use_indexes(index_id);
+        if (!_ctx->is_explain || _ctx->explain_hint == nullptr
+            || !_ctx->explain_hint->get_flag<ExplainHint::HintType::NO_USE>()) {
+            for (auto index_id : join_root->use_indexes) {
+                scan->add_use_indexes(index_id);
+            }
         }
-        for (auto index_id : join_root->force_indexes) {
-            scan->add_force_indexes(index_id);
+        if (!_ctx->is_explain || _ctx->explain_hint == nullptr
+                || !_ctx->explain_hint->get_flag<ExplainHint::HintType::NO_FORCE>()) {
+            for (auto index_id : join_root->force_indexes) {
+                scan->add_force_indexes(index_id);
+            }
         }
-        for (auto index_id : join_root->ignore_indexes) {
-            scan->add_ignore_indexes(index_id);
+        if (!_ctx->is_explain || _ctx->explain_hint == nullptr
+                || !_ctx->explain_hint->get_flag<ExplainHint::HintType::NO_IGNORE>()) {
+            for (auto index_id : join_root->ignore_indexes) {
+                scan->add_ignore_indexes(index_id);
+            }
         }
         if (_ctx->select_for_update) {
             // 仅加主表行锁
@@ -3803,14 +4420,31 @@ int LogicalPlanner::can_use_dblink(SmartTable table) {
         _ctx->stat_info.error_msg << "not support dblink";
         return -1;
     }
-    // dblink表只支持INSERT/DELETE/UPDATE/SELECT
-    if (_ctx->stmt_type != parser::NT_INSERT 
-            && _ctx->stmt_type != parser::NT_DELETE
-            && _ctx->stmt_type != parser::NT_UPDATE 
-            && _ctx->stmt_type != parser::NT_SELECT) {
-        DB_WARNING("dblink table not support stmt type: %d", _ctx->stmt_type);
+    if (table->dblink_info.type() == pb::LT_BAIKALDB) {
+        // dblink BaikalDB表只支持INSERT/DELETE/UPDATE/SELECT/UNION
+        if (_ctx->stmt_type != parser::NT_INSERT 
+                && _ctx->stmt_type != parser::NT_DELETE
+                && _ctx->stmt_type != parser::NT_UPDATE 
+                && _ctx->stmt_type != parser::NT_SELECT
+                && _ctx->stmt_type != parser::NT_UNION) {
+            DB_WARNING("dblink table not support stmt type: %d", _ctx->stmt_type);
+            _ctx->stat_info.error_code = ER_BAD_TABLE_ERROR;
+            _ctx->stat_info.error_msg << "dblink table only supprt INSERT/DELETE/UPDATE/SELECT/UNION";
+            return -1;
+        }
+    } else if (table->dblink_info.type() == pb::LT_MYSQL){
+        // dblink MySQL表只支持SELECT/UNION
+        if (_ctx->stmt_type != parser::NT_SELECT 
+                && _ctx->stmt_type != parser::NT_UNION) {
+            DB_WARNING("dblink table not support stmt type: %d", _ctx->stmt_type);
+            _ctx->stat_info.error_code = ER_BAD_TABLE_ERROR;
+            _ctx->stat_info.error_msg << "dblink mysql table only supprt SELECT/UNION";
+            return -1;
+        }
+    } else {
+        DB_WARNING("dblink table not support, %d", table->dblink_info.type());
         _ctx->stat_info.error_code = ER_BAD_TABLE_ERROR;
-        _ctx->stat_info.error_msg << "dblink table only supprt INSERT/DELETE/UPDATE/SELECT";
+        _ctx->stat_info.error_msg << "dblink table only supprt BAIKALDB/MYSQL";
         return -1;
     }
     // dblink表不支持事务
@@ -3834,6 +4468,42 @@ int LogicalPlanner::can_use_dblink(SmartTable table) {
         _ctx->stat_info.error_code = ER_BAD_TABLE_ERROR;
         _ctx->stat_info.error_msg << "dblink table not support statistics table";
         return -1;
+    }
+    return 0;
+}
+
+int LogicalPlanner::inc_slot_ref_cnt(const pb::Expr& expr) {
+    if (_ctx == nullptr) {
+        DB_WARNING("_ctx is nullptr");
+        return -1;
+    }
+    // 遍历pb获取<tuple_id, slot_id>
+    std::vector<std::pair<int32_t, int32_t>> tuple_slot_ids;
+    tuple_slot_ids.reserve(expr.nodes().size());
+    for (const auto& node : expr.nodes()) {
+        if (node.node_type() == pb::SLOT_REF) {
+            std::pair<int32_t, int32_t> tuple_slot = 
+                std::make_pair(node.derive_node().tuple_id(), node.derive_node().slot_id());
+            tuple_slot_ids.emplace_back(tuple_slot);
+        }
+    }
+    for (const auto& [tuple_id, slot_id] : tuple_slot_ids) {
+        pb::TupleDescriptor* tuple = _ctx->get_tuple_desc(tuple_id);
+        if (tuple == nullptr) {
+            DB_WARNING("tuple is nullptr");
+            return -1;
+        }
+        if (slot_id - 1 < 0 || slot_id - 1 >= tuple->slot_idxes_size()) {
+            DB_WARNING("Invalid slot_id: %d, tuple slot_idxes size: %d", slot_id, tuple->slot_idxes_size());
+            return -1;
+        }
+        int slot_idx = tuple->slot_idxes(slot_id - 1);
+        if (slot_idx < 0 || slot_idx >= tuple->slots_size()) {
+            DB_WARNING("Invalid slot_idx: %d, tuple slots size: %d", slot_id, tuple->slots_size());
+            return -1;
+        }
+        int ref_cnt = tuple->slots(slot_idx).ref_cnt();
+        tuple->mutable_slots(slot_idx)->set_ref_cnt(ref_cnt + 1);
     }
     return 0;
 }

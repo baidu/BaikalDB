@@ -965,10 +965,10 @@ int Region::sync_olap_index_info(const pb::OlapRegionInfo& old_olap_info, pb::Ol
     return 0;
 }
 
-std::string make_make_relative_path_without_filename(int64_t table_id, int64_t partition_id) {
+std::string make_make_relative_path_without_filename(const std::string& prefix, int64_t table_id, int64_t partition_id) {
     //                                                            partition     
     //  baikal_olap/meta_bns/database_name/table_name/table_id/20230301_20230331
-    std::string path = "baikal_olap/";
+    std::string path = prefix + "/";
     path += FLAGS_meta_server_bns + "/";
     auto table = SchemaFactory::get_instance()->get_table_info_ptr(table_id);
     if (table == nullptr) {
@@ -996,7 +996,7 @@ std::string make_make_relative_path_without_filename(int64_t table_id, int64_t p
 std::string make_relative_path(int64_t table_id, int64_t partition_id, int64_t region_id, uint64_t size, uint64_t lines) {
     //                                                            partition     regionid_lines_size_timestamp.extsst
     //  baikal_olap/meta_bns/database_name/table_name/table_id/20230301_20230331/26783_1024_1234.extsst
-    std::string path = make_make_relative_path_without_filename(table_id, partition_id);
+    std::string path = make_make_relative_path_without_filename("baikal_olap", table_id, partition_id);
     if (path == "") {
         return "";
     }
@@ -1484,7 +1484,7 @@ int Region::manual_link_external_sst() {
         return -1;
     }
 
-    std::string done_path = make_make_relative_path_without_filename(_table_id, get_partition_id());
+    std::string done_path = make_make_relative_path_without_filename("baikal_olap", _table_id, get_partition_id());
     if (done_path.empty()) {
         return -1;
     }

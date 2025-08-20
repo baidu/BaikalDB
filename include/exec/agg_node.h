@@ -47,9 +47,8 @@ public:
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state);
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
-    void encode_agg_key(MemRow* row, MutTableKey& key);
     void process_row_batch(RuntimeState* state, RowBatch& batch, int64_t& used_size, int64_t& release_size);
-    virtual bool can_use_arrow_vector();
+    virtual bool can_use_arrow_vector(RuntimeState* state);
     int vectorize_build_group_by_exprs(RuntimeState* state, 
                                       ExprNode* group_by_expr, 
                                       std::vector<arrow::FieldRef>& group_by_fields,
@@ -57,6 +56,9 @@ public:
                                       std::vector<arrow::compute::Expression>& generate_projection_exprs,
                                       std::vector<std::string>& generate_projection_exprs_names);
     virtual int build_arrow_declaration(RuntimeState* state);
+    virtual int agg_pushdown(QueryContext* ctx, ExecNode* agg_node) override;
+    virtual bool can_agg_pushdown() override;
+
     std::vector<ExprNode*>* mutable_group_exprs() {
         return &_group_exprs;
     }
@@ -76,6 +78,44 @@ public:
     std::vector<AggFnCall*>* mutable_agg_fn_calls() {
         return &_agg_fn_calls;
     }
+    virtual int set_partition_property_and_schema(QueryContext* ctx);
+
+    void set_has_merger(bool has) {
+        _has_merger = has;
+    }
+
+    bool has_merger() {
+        return _has_merger;
+    }
+    bool is_pushdown() {
+        return _pb_node.derive_node().agg_node().is_pushdown();
+    }
+
+    void transfer_to_merge_agg() {
+        _pb_node.set_node_type(pb::MERGE_AGG_NODE);
+        _node_type = pb::MERGE_AGG_NODE;
+        _is_merger = true;
+    }
+    int delete_self() {
+        if (_parent == nullptr) {
+            DB_WARNING("_parent is nullptr");
+            return -1;
+        }
+        if (_children.size() == 0 || _children[0] == nullptr) {
+            DB_WARNING("Invalid child");
+            return -1;
+        }
+        ExecNode* child = _children[0];
+        clear_children();
+        _parent->replace_child(this, child);
+        delete this;
+        return 0;
+    }
+
+    int32_t agg_tuple_id() {
+        return _agg_tuple_id;
+    }
+
 private:
     //需要推导_agg_tuple_id内部slot的类型
     std::vector<ExprNode*> _group_exprs;
@@ -89,6 +129,7 @@ private:
     butil::FlatMap<std::string, MemRow*> _hash_map;
     butil::FlatMap<std::string, MemRow*>::iterator _iter;
     int32_t _arrow_ignore_tuple_id = -1; // 忽略的tuple_id, sort_tuple_id
+    bool _has_merger = false; // 是否有对应的merge agg节点, for mpp调整计划
 };
 }
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

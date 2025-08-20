@@ -162,7 +162,7 @@ public:
  *倒排链表分为三层，每层的存储形式不一样
  *MergeSortIterator作为倒排链表的中间层，屏蔽底层的差异性
  */
-template<typename ReverseNode, typename ReverseList>
+template<typename ReverseList>
 class MergeSortIterator{
 public:
     virtual ~MergeSortIterator() {}
@@ -181,8 +181,8 @@ public:
 /*
  *第一层倒排链表的抽象，ReverseNode是分散的形式
  */
-template<typename ReverseNode, typename ReverseList>
-class FirstLevelMSIterator : public MergeSortIterator<ReverseNode, ReverseList> {
+template<typename ReverseList>
+class FirstLevelMSIterator : public MergeSortIterator<ReverseList> {
 public:
     FirstLevelMSIterator(
                        std::unique_ptr<myrocksdb::Iterator>& iter,
@@ -227,14 +227,14 @@ private:
 
 //add_node对arrow进行特化
 template<>
-inline void FirstLevelMSIterator<ArrowReverseNode, ArrowReverseList>::add_node(ArrowReverseList& res_list) {
+inline void FirstLevelMSIterator<ArrowReverseList>::add_node(ArrowReverseList& res_list) {
     res_list.add_node(_curr_node.key(), _curr_node.flag(), _curr_node.weight());
 }
 /*
  *第二/三层倒排链表的抽象，ReverseNode是有序数组的形式
  */
-template<typename ReverseNode, typename ReverseList>
-class SecondLevelMSIterator : public MergeSortIterator<ReverseNode, ReverseList> {
+template<typename ReverseList>
+class SecondLevelMSIterator : public MergeSortIterator<ReverseList> {
 public:
     SecondLevelMSIterator(ReverseList& list, const KeyRange& key_range) : 
                             _list(list),
@@ -258,14 +258,14 @@ private:
 };
 
 template<>
-inline void SecondLevelMSIterator<ArrowReverseNode, ArrowReverseList>::add_node(ArrowReverseList& res_list) {
+inline void SecondLevelMSIterator<ArrowReverseList>::add_node(ArrowReverseList& res_list) {
     res_list.add_node(*_list.mutable_reverse_nodes(_index));
 }
 
 //合并不同层次的倒排链表，返回合并后的长度
-template<typename ReverseNode, typename ReverseList>
-int level_merge(MergeSortIterator<ReverseNode, ReverseList>* new_iter, 
-                MergeSortIterator<ReverseNode, ReverseList>* old_iter,
+template<typename ReverseList>
+int level_merge(MergeSortIterator<ReverseList>* new_iter,
+                MergeSortIterator<ReverseList>* old_iter,
                 ReverseList& res_list,
                 bool is_del);
 

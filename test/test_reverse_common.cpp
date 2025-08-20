@@ -44,6 +44,52 @@ int main(int argc, char* argv[])
 }
 
 namespace baikaldb {
+TEST(float_parse_cost, case_all) {
+    void from_chars_to_float_vec(const std::string& str, std::vector<float>& vec);
+    auto call = [&](std::string vector_index){
+        std::vector<float> flt_vec;
+        std::cout << vector_index << "\n";
+        from_chars_to_float_vec(vector_index, flt_vec);
+        std::vector<float> flt_vec2;
+        std::vector<std::string> split_vec;
+        boost::trim_if(vector_index, boost::is_any_of(" []"));
+        boost::split(split_vec, vector_index,
+                boost::is_any_of(" ,"), boost::token_compress_on);
+        for (auto& str : split_vec) {
+            flt_vec2.emplace_back(strtof(str.c_str(), NULL));
+        }
+        EXPECT_EQ(flt_vec.size(), flt_vec2.size());
+        for (size_t i = 0; i < flt_vec.size(); i++) {
+            EXPECT_EQ(flt_vec[i], flt_vec2[i]);
+            std::cout << flt_vec[i] << "\n";
+        }
+    };
+    call("0.12472, -13.1821465  , 0.1356781,0.265489");
+    call("0.1272,-13.1821465,0.1356,0.2689");
+    call("0.1272,-13.1821465e-13   ,     0.1356,0.2689,   0.113");
+    call(" 0.1272,-13.1821465e-13   ,     0.1356,0.2689,   0.113 ");
+    call("[0.1272,-13.1821465e-13   ,     0.1356,0.2689,   0.113]");
+    call(" [  ] ");
+}
+TEST(test_gbk_substr, case_all) {
+    Tokenizer::get_instance()->init();
+    std::string gbk_substr(const std::string& word, size_t len);
+    {
+        std::string word = "我是a你好c中";
+        std::string word0 = gbk_substr(word, 0);
+        std::cout << word0 << std::endl;
+        ASSERT_STREQ(word0.c_str(), "");
+        std::string word3 = gbk_substr(word, 3);
+        std::cout << word3 << std::endl;
+        ASSERT_STREQ(word3.c_str(), "我是a");
+        std::string word4 = gbk_substr(word, 4);
+        std::cout << word4 << std::endl;
+        ASSERT_STREQ(word4.c_str(), "我是a你");
+        std::string word100 = gbk_substr(word, 100);
+        std::cout << word100 << std::endl;
+        ASSERT_STREQ(word100.c_str(), "我是a你好c中");
+    }
+}
 TEST(test_q2b_tolower_gbk, case_all) {
     Tokenizer::get_instance()->init();
     {

@@ -68,7 +68,7 @@ public:
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state);
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
-    virtual bool can_use_arrow_vector();
+    virtual bool can_use_arrow_vector(RuntimeState* state);
     virtual int build_arrow_declaration(RuntimeState* state);
     virtual void find_place_holder(std::unordered_multimap<int, ExprNode*>& placeholders) {
         ExecNode::find_place_holder(placeholders);
@@ -105,7 +105,7 @@ public:
             }
         }
     }
-    virtual void show_explain(std::vector<std::map<std::string, std::string>>& output);
+    virtual int show_explain(QueryContext* ctx, std::vector<std::map<std::string, std::string>>& output, int& next_id, int display_id);
 
     void reset(RuntimeState* state) override {
         _child_eos = false;
@@ -116,6 +116,8 @@ public:
             e->reset(state);
         }
     }
+
+    bool need_check_memory();
 
     int arrow_steal_conjuncts(std::vector<arrow::compute::Expression>& conjuncts, int64_t& limit);
 

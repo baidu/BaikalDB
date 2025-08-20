@@ -111,6 +111,7 @@ int InsertPlanner::gen_select_plan() {
             _ctx->stat_info.error_msg << "Column count doesn't match value count at row 1";
             return -1;            
         }
+        _cur_sub_ctx->is_insert_select_subquery = true;
         _ctx->add_sub_ctx(_cur_sub_ctx);
     }
     return 0;

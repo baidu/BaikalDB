@@ -189,6 +189,10 @@ ExprValue InPredicate::get_value(MemRow* row) {
 }
 
 int InPredicate::transfer_to_arrow_expression() {
+    if (_children.empty()) {
+        DB_FATAL("children is empty");
+        return -1;
+    }
     if (_children[0]->transfer_to_arrow_expression() != 0) {
         DB_FATAL("in predicate column transfer error");
         return -1;
@@ -289,8 +293,9 @@ int InPredicate::transfer_to_arrow_expression() {
             return -1;
         }
     } else {
-        DB_FATAL("no in values");
-        return -1;
+        // in ()
+        _arrow_expr = arrow::compute::literal(false);
+        return 0;
     }
     arrow::Datum value_set(array);
     arrow::compute::SetLookupOptions in_args{value_set, /*skip_nulls*/true};

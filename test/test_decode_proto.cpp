@@ -284,11 +284,14 @@ int main(int argc, char** argv) {
     DB_WARNING("thread num:%d", bthread::FLAGS_bthread_concurrency);
     test_optional_to_repeated();
     sleep(10);
-    
-	int batch_cnt = std::stoi(argv[1]);
-    int test_cnt = std::stoi(argv[2]);
-    int use_arena = std::stoi(argv[3]);
-    int th_cnt = std::stoi(argv[4]);
+	// int batch_cnt = std::stoi(argv[1]);
+    // int test_cnt = std::stoi(argv[2]);
+    // int use_arena = std::stoi(argv[3]);
+    // int th_cnt = std::stoi(argv[4]);
+    int batch_cnt = 1;
+    int test_cnt = 1;
+    int use_arena = 1;
+    int th_cnt = 1;
 	DB_WARNING("batch_cnt: %d, test_cnt: %d, %d", batch_cnt, test_cnt, use_arena);
 
 	srand((unsigned)time(NULL));

@@ -24,7 +24,7 @@
 #include "proto/plan.pb.h"
 #include "common.h"
 #include "parser.h"
-
+#include <optional>
 namespace baikaldb {
 DECLARE_bool(need_verify_ddl_permission);
 DECLARE_bool(use_read_index);
@@ -160,10 +160,13 @@ public:
     }
 
     bool need_use_read_index() {
-        if (!FLAGS_use_read_index) {
-            return false;
+        if (use_read_index_opt.has_value()) {
+            return use_read_index_opt.value();
         }
-        return use_read_index;
+        if (FLAGS_use_read_index) {
+            return true;
+        }
+        return false;
     }
 
     bool acl_v2_is_valid() {
@@ -216,7 +219,7 @@ public:
     uint32_t        query_quota = 0;
     bool            need_auth_addr = false;
     bool            ddl_permission = false;
-    bool            use_read_index = true; // 上线先默认true
+    std::optional<bool> use_read_index_opt;
     bool            enable_plan_cache = false;
     bool            is_super = false;
     bool            is_request_additional = false;

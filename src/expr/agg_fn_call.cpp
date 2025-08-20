@@ -75,6 +75,11 @@ int AggFnCall::init(const pb::ExprNode& node) {
             _fn.name() == "multi_group_concat_distinct") {
         _is_distinct = true;
     }
+    if (_fn.name() == "multi_count_distinct" ||
+            _fn.name() == "multi_sum_distinct" ||
+            _fn.name() == "multi_group_concat_distinct") {
+        _is_multi_distinct = true;
+    }
     return 0;
 }
 int AggFnCall::type_inferer() {
@@ -98,8 +103,11 @@ int AggFnCall::type_inferer() {
             if (_children.size() == 0) {
                 return -1;
             }
-            if (is_double(_children[0]->col_type())) {
+            if (is_double(_children[0]->col_type())
+                || is_string(_children[0]->col_type())) {
                 _col_type = pb::DOUBLE;
+            } else if (is_uint(_children[0]->col_type())) {
+                _col_type = pb::UINT64;
             } else {
                 _col_type = pb::INT64;
             }
@@ -309,13 +317,6 @@ int AggFnCall::open() {
     }
     return 0;
 }
-
-struct AvgIntermediate {
-    double sum;
-    int64_t count;
-    AvgIntermediate() : sum(0.0), count(0) {
-    }
-};
 
 bool AggFnCall::is_initialize(const std::string& key, MemRow* dst) {
     if (_is_distinct 
@@ -1258,29 +1259,17 @@ bool AggFnCall::can_use_arrow_vector() {
         case MIN:
         case MAX: 
         case MULTI_COUNT_DISTINCT:
-            break;
         case AVG: 
-        case HLL_ADD_AGG:
-        case HLL_MERGE_AGG: 
-        case RB_OR_AGG:
-        case RB_OR_CARDINALITY_AGG:
-        case RB_AND_AGG:
-        case RB_AND_CARDINALITY_AGG:
-        case RB_XOR_AGG:
-        case RB_XOR_CARDINALITY_AGG:
-        case RB_BUILD_AGG: 
-        case TDIGEST_AGG:
-        case TDIGEST_BUILD_AGG: 
-        case GROUP_CONCAT:
+            break;
         default:
             return false;
     }
     if (_children.size() != 1) {
         return false; // count(distinct fieldA, filedB) not supported.
     }
-    if (_agg_type == COUNT && _children[0]->is_literal()) {
+    if (_agg_type == AVG && _children[0]->is_literal()) {
         if (_children[0]->get_value(nullptr).is_null()) {
-            return false; // count(null)
+            return false; // avg(null)
         }
     }
     for (auto& c : _children) {
@@ -1299,20 +1288,108 @@ void AggFnCall::add_agg_projection_slot_ref(bool is_merge,
         std::string field_name = std::to_string(_tuple_id) + "_" + std::to_string(_final_slot_id);
         generate_projection_exprs.emplace_back(arrow::compute::field_ref(field_name));
         generate_projection_exprs_names.emplace_back(field_name);
+        if (_agg_type == AVG) {
+            std::string field_name = std::to_string(_tuple_id) + "_" + std::to_string(_intermediate_slot_id);
+            generate_projection_exprs.emplace_back(arrow::compute::field_ref(field_name));
+            generate_projection_exprs_names.emplace_back(field_name);
+        }
     }
 }
 
-int AggFnCall::transfer_to_arrow_agg_function(std::vector<arrow::compute::Aggregate>& aggs, 
-                                              bool has_group_by, 
+int AggFnCall::build_arrow_schema(bool is_merge, std::set<ColumnInfo>& column_schema, bool ignore_multi_count) {
+    if (_agg_type == MULTI_COUNT_DISTINCT && ignore_multi_count) {
+        return 0;
+    }
+    if (!is_merge || _is_distinct) {
+        // 非distinct作用列是中间聚合列
+        column_schema.insert(ColumnInfo{_tuple_id, _final_slot_id, _col_type});
+        if (_final_slot_id != _intermediate_slot_id) {
+            pb::PrimitiveType col_type = (_agg_type == AVG ? pb::STRING : _col_type);
+            column_schema.insert(ColumnInfo{_tuple_id, _intermediate_slot_id, col_type});
+        }
+    } 
+    return 0;
+}
+
+int AggFnCall::build_agg_argument(int i, 
+                              bool need_cast_string_to_double, 
+                              std::vector<arrow::FieldRef>& args,
+                              std::vector<arrow::compute::Expression>& generate_projection_exprs,
+                              std::vector<std::string>& generate_projection_exprs_names) {
+    if (i >= _children.size()) {
+        return -1;
+    }
+    if (_agg_type == COUNT_STAR && _children[i]->is_literal()) {
+        return 0;
+    }
+    if (_children[i]->transfer_to_arrow_expression() != 0) {
+        DB_FATAL("get arrow agg function fail, id: %d", i);
+        return -1;
+    }
+    if (_children[i]->is_slot_ref() 
+            &&   !(need_cast_string_to_double && is_string(_children[i]->col_type()))) {
+        // 直接使用作用列
+        args.emplace_back(*(_children[i]->arrow_expr().field_ref()));
+    } else {
+        // 以下情况需要生成一个临时列, 用于后续的聚合
+        // 1. 作用列是slot_ref, 但是需要先加cast, 如sum(string slot_ref)
+        // 2. 作用列是function, 如sum(a+b)
+        if (need_cast_string_to_double 
+                &&  (_children[i]->is_slot_ref()
+                    || (_children[i]->col_type() == pb::STRING)
+                    || (_children[i]->arrow_expr().type() != nullptr && arrow::is_base_binary_like(_children[i]->arrow_expr().type()->id())))) {
+            generate_projection_exprs.emplace_back(arrow::compute::call("cast", 
+                                                        {_children[i]->arrow_expr()}, 
+                                                        arrow::compute::CastOptions::Unsafe(arrow::float64())));
+        } else {
+            generate_projection_exprs.emplace_back(_children[i]->arrow_expr());
+        }
+        std::string tmp_name = "tmp_" + std::to_string(generate_projection_exprs.size());
+        generate_projection_exprs_names.emplace_back(tmp_name);
+        args.emplace_back(arrow::FieldRef(tmp_name));
+    }
+    return 0;
+}
+
+int AggFnCall::transfer_to_arrow_avg(std::vector<arrow::compute::Aggregate>& aggs, 
                                               bool is_merge, 
                                               std::vector<arrow::compute::Expression>& generate_projection_exprs,
                                               std::vector<std::string>& generate_projection_exprs_names) {
-    // arrow里有没有group by用的两套算子, 有group by算子需要加前缀hash_
-    std::string func_name;
-    bool need_check_type = false;  // 处理sum(string)需要先加cast
-    if (has_group_by) {
-        func_name = "hash_";
+    std::string intermediate_slot = std::to_string(_tuple_id) + "_" + std::to_string(_intermediate_slot_id);
+    std::string final_slot = std::to_string(_tuple_id) + "_" + std::to_string(_final_slot_id);
+    std::vector<arrow::FieldRef> args;
+    if (is_merge && !_is_distinct) {
+        // hash_agg_finalize(intermidate_slot) -> final_slot
+        args.emplace_back(arrow::FieldRef(intermediate_slot));
+        aggs.emplace_back("hash_avg_finalize", nullptr, args, final_slot);
+        // agg下推需要保留intermediate_slot列
+        aggs.emplace_back("hash_avg_intermediate", nullptr, args, intermediate_slot);
+    } else {
+        // hash_avg_intermediate(child) -> intermediate_slot
+        // hash_mean(child) -> final_slot
+        // 简化逻辑, 兼容一阶段和两阶段agg, 实际上只有一个值有用
+        for (int i = 0; i < _children.size(); ++i) {
+            if (0 != build_agg_argument(i, true, args, generate_projection_exprs, generate_projection_exprs_names)) {
+                DB_FATAL("build agg argument fail, id: %d", i);
+                return -1;
+            }
+        }
+        aggs.emplace_back("hash_avg_intermediate", nullptr, args, intermediate_slot);
+        aggs.emplace_back("hash_mean", nullptr, args, final_slot);
     }
+    return 0;
+}
+
+int AggFnCall::transfer_to_arrow_agg_function(std::vector<arrow::compute::Aggregate>& aggs, 
+                                              bool is_merge, 
+                                              std::vector<arrow::compute::Expression>& generate_projection_exprs,
+                                              std::vector<std::string>& generate_projection_exprs_names) {
+    if (_agg_type == AVG) {
+        return transfer_to_arrow_avg(aggs, is_merge, generate_projection_exprs, generate_projection_exprs_names);
+    }
+    // arrow里有没有group by用的两套算子, 有group by算子需要加前缀hash_
+    std::string func_name = "hash_";
+    bool need_check_type = false;  // 处理sum(string)需要先加cast
     switch (_agg_type) {
         case COUNT_STAR:
             if (_is_distinct) {
@@ -1352,33 +1429,9 @@ int AggFnCall::transfer_to_arrow_agg_function(std::vector<arrow::compute::Aggreg
         args.emplace_back(new_field_name);
     } else {
         for (int i = 0; i < _children.size(); ++i) {
-            if (_agg_type == COUNT_STAR && _children[i]->is_literal()) {
-                continue;
-            }
-            if (_children[i]->transfer_to_arrow_expression() != 0) {
-                DB_FATAL("get arrow agg function fail, id: %d", i);
+            if (0 != build_agg_argument(i, need_check_type, args, generate_projection_exprs, generate_projection_exprs_names)) {
+                DB_FATAL("build agg argument fail, id: %d", i);
                 return -1;
-            }
-            if (_children[i]->is_slot_ref() 
-                    &&   !(need_check_type && is_string(_children[i]->col_type()))) {
-                // 直接使用作用列
-                args.emplace_back(*(_children[i]->arrow_expr().field_ref()));
-            } else {
-                // 以下情况需要生成一个临时列, 用于后续的聚合
-                // 1. 作用列是slot_ref, 但是需要先加cast, 如sum(string slot_ref)
-                // 2. 作用列是function, 如sum(a+b)
-                if (need_check_type 
-                        &&  (_children[i]->is_slot_ref()
-                            || (_children[i]->arrow_expr().type() != nullptr && arrow::is_base_binary_like(_children[i]->arrow_expr().type()->id())))) {
-                    generate_projection_exprs.emplace_back(arrow::compute::call("cast", 
-                                                                {_children[i]->arrow_expr()}, 
-                                                                arrow::compute::CastOptions::Unsafe(arrow::int64())));
-                } else {
-                    generate_projection_exprs.emplace_back(_children[i]->arrow_expr());
-                }
-                std::string tmp_name = "tmp_" + std::to_string(generate_projection_exprs.size());
-                generate_projection_exprs_names.emplace_back(tmp_name);
-                args.emplace_back(arrow::FieldRef(tmp_name));
             }
         }
     }

@@ -13,11 +13,12 @@
 // limitations under the License.
 
 #include "agg_node.h"
+#include "filter_node.h"
 #include "runtime_state.h"
 #include "query_context.h"
+#include "arrow_exec_node_manager.h"
 
 namespace baikaldb {
-DECLARE_int32(arrow_multi_threads);
 int AggNode::init(const pb::PlanNode& node) {
     int ret = 0;
     ret = ExecNode::init(node);
@@ -56,7 +57,7 @@ int AggNode::init(const pb::PlanNode& node) {
     }
     //_group_tuple_id = node.derive_node().agg_node().group_tuple_id();
     _agg_tuple_id = node.derive_node().agg_node().agg_tuple_id();
-    _hash_map.init(12301);
+    _hash_map.init(100);
     _iter = _hash_map.end();
     if (node.derive_node().agg_node().has_arrow_ignore_tuple_id()) {
         _arrow_ignore_tuple_id = node.derive_node().agg_node().arrow_ignore_tuple_id();
@@ -101,16 +102,13 @@ int AggNode::expr_optimize(QueryContext* ctx) {
     return 0;
 }
 
-bool AggNode::can_use_arrow_vector() {
+bool AggNode::can_use_arrow_vector(RuntimeState* state) {
     for (auto& expr : _group_exprs) {
         if (!expr->can_use_arrow_vector()) {
             return false;
         }
         if (expr->col_type() == pb::DOUBLE || expr->col_type() == pb::FLOAT) {
             return false;
-        }
-        if (!expr->is_slot_ref()) {
-            continue;
         }
     }
     for (auto& expr : _agg_fn_calls) {
@@ -119,10 +117,11 @@ bool AggNode::can_use_arrow_vector() {
         }
     }
     for (auto& c : _children) {
-        if (!c->can_use_arrow_vector()) {
+        if (!c->can_use_arrow_vector(state)) {
             return false;
         }
     }
+    state->vectorlized_parallel_execution = true;
     return true;
 }
 
@@ -155,8 +154,82 @@ int AggNode::vectorize_build_group_by_exprs(RuntimeState* state,
     return 0;
 }
 
+int AggNode::set_partition_property_and_schema(QueryContext* ctx) {
+    // 构建schema
+    if (0 != ExecNode::set_partition_property_and_schema(ctx)) {
+        return -1;
+    }
+    if (_parent != nullptr && _parent->node_type() == pb::MERGE_AGG_NODE) {
+        _has_merger = true;
+    }
+    // 特殊处理multi count distinct
+    // multi count distinct只有最上层的merge agg节点需要处理聚合列，其余merge agg节点不需要处理聚合列
+    // 非最上层的merge agg节点都转化成merge agg node(ignore multi_distinct expr) group by a,b,c这种形式
+    bool is_pushdown_merge_agg = (_node_type == pb::MERGE_AGG_NODE && is_pushdown());
+    bool transfer_multi_distinct_to_group_by = false;
+    if (_node_type == pb::AGG_NODE 
+            || (_node_type == pb::MERGE_AGG_NODE && _parent->node_type() == pb::MERGE_AGG_NODE)
+            || is_pushdown_merge_agg) {
+        transfer_multi_distinct_to_group_by = true;
+    }
+    // multicount distinct的agg和中间mergeagg,不产生聚合列
+    for (auto& agg_expr : _agg_fn_calls) {
+        agg_expr->build_arrow_schema(_is_merger, _data_schema, transfer_multi_distinct_to_group_by);
+    }
+
+    // 判断分区属性
+    if (_group_exprs.empty()) {
+        _partition_property.set_single_partition();
+        return 0;
+    }
+    if (_node_type == pb::AGG_NODE && _has_merger) {
+        // 继承孩子属性
+        return 0;
+    }
+    if (_children.size() > 0
+         && _children[0]->partition_property()->type == pb::SinglePartitionType) {
+        // 如 packet -> agg -> (union is single partition), agg没必要hash分区, 且没必要产生mergeagg
+        _partition_property.set_single_partition();
+        return 0;
+    }
+    // hash分区属性
+    _partition_property.type = pb::HashPartitionType;
+    _partition_property.hash_partition_propertys.clear();
+    std::shared_ptr<HashPartitionColumns> hash_columns = std::make_shared<HashPartitionColumns>();
+    int tmp_column = 0;
+    for (auto& expr : _group_exprs) {
+        ExprNode* hash_group_expr = nullptr;
+        pb::Expr pb_expr;
+        ExprNode::create_pb_expr(&pb_expr, expr);
+        if (ExprNode::create_tree(pb_expr, &hash_group_expr) < 0) {
+            //如何释放资源
+            return -1;
+        }
+        if (hash_group_expr->is_slot_ref()) {
+            hash_columns->add_slot_ref(hash_group_expr);
+        } else {
+            // 临时列, 和build_arrow_declaration逻辑一致
+            hash_columns->add_need_projection_column("tmp_" + std::to_string(++tmp_column), hash_group_expr);
+        }
+    }
+    _partition_property.hash_partition_propertys.emplace_back(std::move(hash_columns));
+
+    // 如果agg需要按照a,b分区, 且child已经是a分区属性, 则agg也按照a分区
+    shrink_partition_property(_partition_property.hash_partition_propertys[0], _children[0]->partition_property());
+    _partition_property.add_need_cast_string_columns(_children[0]->partition_property()->need_cast_string_columns);
+
+    if (_node_type == pb::MERGE_AGG_NODE 
+            && _children.size() > 0
+            && _children[0]->node_type() == pb::MERGE_AGG_NODE) {
+        // 由count(distinct a) group by b产生的俩merge agg, 按照b分区
+        // 两个连续的merge agg都按照b分区
+        _children[0]->set_partition_property(&_partition_property);
+    }
+    return 0;
+}
+
 int AggNode::build_arrow_declaration(RuntimeState* state) {
-    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
+    START_LOCAL_TRACE_WITH_PARTITION_PROPERTY(get_trace(), state->get_trace_cost(), &_partition_property, OPEN_TRACE, nullptr);
     int ret = 0;
     std::vector<arrow::FieldRef> group_by_fields;
     std::vector<arrow::compute::Aggregate> aggregates;
@@ -177,18 +250,13 @@ int AggNode::build_arrow_declaration(RuntimeState* state) {
     // ====>
     // merge agg node(multi_distinct expr) group by c -> merge agg node(ignore multi_distinct expr) group by a,b,c -> agg node(ignore multi_distinct expr) group by a,b,c
     // 同时store必须开启向量化执行避免行列混合
+    bool is_pushdown_merge_agg = (_node_type == pb::MERGE_AGG_NODE && is_pushdown());
     bool transfer_multi_distinct_to_group_by = false;
-    bool has_multi_distinct = false;
-    if (_node_type == pb::AGG_NODE || (_node_type == pb::MERGE_AGG_NODE && _parent->node_type() == pb::MERGE_AGG_NODE)) {
+    if (_node_type == pb::AGG_NODE 
+            || (_node_type == pb::MERGE_AGG_NODE && _parent->node_type() == pb::MERGE_AGG_NODE) 
+            || is_pushdown_merge_agg) { // multi distinct场景，聚合下推生成的merge agg node也需要处理
         transfer_multi_distinct_to_group_by = true;
     }
-    for (int i = 0; i < _agg_fn_calls.size(); ++i) {
-        if (_agg_fn_calls[i]->is_multi_distinct_agg()) { 
-            has_multi_distinct = true;
-        }
-    }
-
-    bool has_group_by = group_by_fields.size() > 0 || (transfer_multi_distinct_to_group_by && has_multi_distinct);
     for (int i = 0; i < _agg_fn_calls.size(); ++i) {
         if (transfer_multi_distinct_to_group_by && _agg_fn_calls[i]->is_multi_distinct_agg()) {
             for (auto& c : _agg_fn_calls[i]->children()) {
@@ -199,7 +267,6 @@ int AggNode::build_arrow_declaration(RuntimeState* state) {
             continue;
         }
         ret = _agg_fn_calls[i]->transfer_to_arrow_agg_function(aggregates, 
-                                                               has_group_by, 
                                                                _is_merger, 
                                                                generate_projection_exprs, 
                                                                generate_projection_exprs_names);
@@ -209,6 +276,14 @@ int AggNode::build_arrow_declaration(RuntimeState* state) {
         }
     }
     bool need_add_projections = (generate_projection_exprs.size() > 0);
+    if (group_by_fields.empty()) {
+        // 没有group by, 直接加 groupby 1, 支持pipeline并发和mpp异步执行
+        need_add_projections = true;
+        generate_projection_exprs.emplace_back(arrow::compute::literal(1));
+        std::string tmp_name = "tmp_" + std::to_string(generate_projection_exprs.size());
+        group_by_fields.emplace_back(arrow::FieldRef(tmp_name));
+        generate_projection_exprs_names.emplace_back(tmp_name);
+    }
     // aggnode很恶心, node输出schema是{groupBy key_fields list, agg_func_fields}
     // 所以不在group by里的key, 需要额外加first聚合取第一个值
     // 并且node输出会重排列顺序, 需要注意
@@ -220,19 +295,10 @@ int AggNode::build_arrow_declaration(RuntimeState* state) {
         for (const auto& slot : tuple.slots()) {
             std::string name = std::to_string(tuple.tuple_id()) + "_" + std::to_string(slot.slot_id());
             if (key_field_names.count(name) == 0) {
-                if (FLAGS_arrow_multi_threads > 0 && group_by_fields.size() > 0) {
-                    aggregates.emplace_back("hash_one", 
-                                            /*options*/nullptr, 
-                                            arrow::FieldRef(name), 
-                                            /*new field name*/name);
-                } else {
-                    // AGG first需要arrow 13.0版本, first不能parallel
-                    aggregates.emplace_back(group_by_fields.empty() ? "first" : "hash_first", 
-                                            /*options*/nullptr, 
-                                            arrow::FieldRef(name), 
-                                            /*new field name*/name);
-                    state->vectorlized_parallel_execution = false;
-                }
+                aggregates.emplace_back("hash_one", 
+                                        /*options*/nullptr, 
+                                        arrow::FieldRef(name), 
+                                        /*new field name*/name);
             }
             if (need_add_projections) {
                 generate_projection_exprs.emplace_back(arrow::compute::field_ref(name));
@@ -258,7 +324,82 @@ int AggNode::build_arrow_declaration(RuntimeState* state) {
             arrow::acero::AggregateNodeOptions{aggregates, group_by_fields}};
     LOCAL_TRACE_ARROW_PLAN(dec);
     state->append_acero_declaration(dec);
+    if (_group_exprs.size() == 0) {
+        ExecNode* packet = get_parent_node(pb::PACKET_NODE);
+        if (packet != nullptr) {
+            std::unordered_set<std::string> count_like_agg;
+            for (auto& call : _agg_fn_calls) {
+                call->get_count_likes_columns(count_like_agg);
+            }
+            // 兼容select count(1) from t; 当没有输入的时候输出{0}结果行
+            arrow::acero::Declaration dec{"make_default_agg_row_when_no_input",
+                    MakeDefaultAggRowWhenNoInputOptions{count_like_agg}};
+            LOCAL_TRACE_ARROW_PLAN(dec);
+            state->append_acero_declaration(dec);
+            return 0;
+        }
+    }
     return 0;
+}
+
+int AggNode::agg_pushdown(QueryContext* ctx, ExecNode* agg_node) {
+    if (agg_node != nullptr) {
+        DB_WARNING("agg_node should be empty");
+        return -1;
+    }
+    if (_children.size() == 0 || _children[0] == nullptr) {
+        DB_WARNING("Invalid children, size: %lu", _children.size());
+        return -1;
+    }
+    if (can_agg_pushdown()) {
+        _children[0]->agg_pushdown(ctx, this);
+    } else {
+        _children[0]->agg_pushdown(ctx, nullptr);
+    }
+    return 0;
+}
+
+bool AggNode::can_agg_pushdown() {
+    std::unordered_set<pb::PlanNodeType> node_types = {
+        pb::TABLE_FILTER_NODE, 
+        pb::WHERE_FILTER_NODE, 
+        pb::DUAL_SCAN_NODE, 
+        pb::UNION_NODE
+    };
+    bool ret = _children[0]->only_has_specified_node(node_types);
+    if (!ret) {
+        return false;
+    }
+    // 收集子查询中group by列涉及的SlotRef，如果group by列是表达式，不会收集表达式中的SlotRef中
+    std::set<std::pair<int32_t, int32_t>> group_by_slots;
+    for (auto* group_expr : _group_exprs) {
+        if (group_expr != nullptr && group_expr->is_slot_ref()) {
+            group_by_slots.emplace(group_expr->tuple_id(), group_expr->slot_id());
+        }
+    }
+    // 如果包含FilterNode且过滤条件中包含非group by列，则不能聚合下推
+    std::vector<ExecNode*> filter_nodes;
+    get_node(pb::TABLE_FILTER_NODE, filter_nodes);
+    get_node(pb::WHERE_FILTER_NODE, filter_nodes);
+    for (auto* node : filter_nodes) {
+        FilterNode* filter_node = static_cast<FilterNode*>(node);
+        if (filter_node == nullptr) {
+            DB_FATAL("filter_node is nullptr");
+            return false;
+        }
+        for (auto* expr : *(filter_node->mutable_conjuncts())) {
+            if (expr != nullptr) {
+                std::set<std::pair<int32_t, int32_t>> tuple_slots;
+                expr->get_all_tuple_slot_ids(tuple_slots);
+                for (const auto& tuple_slot : tuple_slots) {
+                    if (group_by_slots.find(tuple_slot) == group_by_slots.end()) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    return true;
 }
 
 int AggNode::open(RuntimeState* state) {
@@ -363,26 +504,12 @@ int AggNode::open(RuntimeState* state) {
     return 0;
 }
 
-void AggNode::encode_agg_key(MemRow* row, MutTableKey& key) {
-    uint8_t null_flag = 0;
-    key.append_u8(null_flag);
-    for (uint32_t i = 0; i < _group_exprs.size(); i++) {
-        ExprValue value = _group_exprs[i]->get_value(row);
-        if (value.is_null()) {
-            null_flag |= (0x01 << (7 - i));
-            continue;
-        }
-        key.append_value(value);
-    }
-    key.replace_u8(null_flag, 0);
-}
-
 void AggNode::process_row_batch(RuntimeState* state, RowBatch& batch, int64_t& used_size, int64_t& release_size) {
     for (batch.reset(); !batch.is_traverse_over(); batch.next()) {
         std::unique_ptr<MemRow>& row = batch.get_row();
         MutTableKey key;
         MemRow* cur_row = row.get();
-        encode_agg_key(cur_row, key);
+        encode_exprs_key(_group_exprs, cur_row, key);
         MemRow** agg_row = _hash_map.seek(key.data());
         
         if (agg_row == nullptr) { //不存在则新建

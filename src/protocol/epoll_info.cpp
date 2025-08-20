@@ -16,6 +16,7 @@
 #include "epoll_info.h"
 
 namespace baikaldb {
+DECLARE_bool(auto_kill_timeout_query);
 
 EpollInfo::EpollInfo(): _epfd(-1), _event_size(0) {}
 
@@ -89,6 +90,9 @@ bool EpollInfo::poll_events_mod(SmartSocket sock, unsigned int events) {
         ev.events |= EPOLLOUT;
     }
     ev.events |= EPOLLERR | EPOLLHUP;
+    if (FLAGS_auto_kill_timeout_query && !sock->client_has_timeout) {
+        ev.events |= EPOLLRDHUP;
+    }
     ev.data.fd = sock->fd;
 
     if (0 > epoll_ctl(_epfd, EPOLL_CTL_MOD, sock->fd, &ev)){
@@ -109,6 +113,9 @@ bool EpollInfo::poll_events_add(SmartSocket sock, unsigned int events) {
         ev.events |= EPOLLOUT;
     }
     ev.events |= EPOLLERR | EPOLLHUP;
+    if (FLAGS_auto_kill_timeout_query) {
+        ev.events |= EPOLLRDHUP;
+    }
     ev.data.fd = sock->fd;
 
     if (0 > epoll_ctl(_epfd, EPOLL_CTL_ADD, sock->fd, &ev)) {

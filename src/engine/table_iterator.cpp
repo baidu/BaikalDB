@@ -326,7 +326,7 @@ int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& field
             _iter = new myrocksdb::Iterator(_db->new_cold_iterator(read_options, RocksWrapper::COLD_DATA_CF));
         }
     }
-    if (!_iter) {
+    if (!_iter || _iter->is_null_iter()) {
         DB_FATAL("create iterator failed: %ld", index_id);
         return -1;
     }

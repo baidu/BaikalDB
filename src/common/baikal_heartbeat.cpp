@@ -12,18 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <boost/filesystem.hpp>
 #include "baikal_heartbeat.h"
 #include "proto_process.hpp"
 #include "schema_factory.h"
 #include "task_fetcher.h"
-
 namespace baikaldb {
 
 DEFINE_bool(enable_dblink, false, "enable dblink");
 DEFINE_bool(can_do_ddlwork, true, "can_do_ddlwork");
 DECLARE_int32(baikal_heartbeat_interval_us);
+DEFINE_string(baikal_resource_tag, "", "resource tag");
+DECLARE_int32(baikal_port);
+DEFINE_int32(baikal_port, 28282, "Server port");
 
-void BaikalHeartBeat::construct_heart_beat_request(pb::BaikalHeartBeatRequest& request, bool is_backup) {
+void BaikalHeartBeat::construct_heart_beat_request(pb::BaikalHeartBeatRequest& request, bool is_backup, bool is_binlog) {
     SchemaFactory* factory = nullptr;
     if (is_backup) {
         factory = SchemaFactory::get_backup_instance();
@@ -98,6 +101,17 @@ void BaikalHeartBeat::construct_heart_beat_request(pb::BaikalHeartBeatRequest& r
             pb::VirtualIndexInfluence* info_affect = request.add_info_affect();
             *info_affect = virtual_index_influence;
         }
+    }
+    // 添加baikal相关信息
+    // binlog不携带此部分
+    if (!is_backup && !is_binlog) {
+        pb::BaikalStatus* status = request.mutable_baikal_status();
+        std::string address = SchemaFactory::get_instance()->get_address();
+        status->set_address(address);
+        status->set_resource_tag(FLAGS_baikal_resource_tag);
+        // 检查是否迁移
+        bool is_stoped = boost::filesystem::exists("_stop.check");
+        status->set_status(!is_stoped ? pb::Status::NORMAL : pb::Status::FAULTY);
     }
 }
 
@@ -262,6 +276,15 @@ void BaikalHeartBeat::process_heart_beat_response(
             static_cast<
                 const google::protobuf::RepeatedPtrField<pb::DdlWorkInfo>& (pb::BaikalHeartBeatResponse::*)() const
             >(&pb::BaikalHeartBeatResponse::ddl_works));
+
+        if (response.baikal_status_size() != 0) {
+            std::vector<pb::BaikalStatus> address_status_vec;
+            for (int i = 0 ; i < response.baikal_status_size(); ++i) {
+                pb::BaikalStatus db_status = response.baikal_status(i);
+                address_status_vec.emplace_back(db_status);
+            }
+            factory->update_valiable_addresses(address_status_vec);
+        }
     }
 
     if (meta_id != 0) {
@@ -291,6 +314,14 @@ void BaikalHeartBeat::process_heart_beat_response_sync(
         }
     }
     factory->update_regions_double_buffer_sync(response.region_change_info());
+    if (response.baikal_status_size() != 0) {
+        std::vector<pb::BaikalStatus> address_status_vec;
+        for (int i = 0 ; i < response.baikal_status_size(); ++i) {
+            pb::BaikalStatus db_status = response.baikal_status(i);
+            address_status_vec.emplace_back(db_status);
+        }
+        factory->update_valiable_addresses(address_status_vec);
+    }
     DB_NOTICE("sync time:%ld", cost.get_time());
 }
 
@@ -381,7 +412,7 @@ bool BinlogNetworkServer::init() {
     pb::BaikalHeartBeatRequest request;
     pb::BaikalHeartBeatResponse response;
     //1、构造心跳请求
-    BaikalHeartBeat::construct_heart_beat_request(request);
+    BaikalHeartBeat::construct_heart_beat_request(request, false, true);
     request.set_can_do_ddlwork(false);
     request.set_need_heartbeat_table(true);
     request.set_need_binlog_heartbeat(true);
@@ -425,7 +456,7 @@ void BinlogNetworkServer::report_heart_beat() {
         pb::BaikalHeartBeatRequest request;
         pb::BaikalHeartBeatResponse response;
         //1、construct heartbeat request
-        BaikalHeartBeat::construct_heart_beat_request(request);
+        BaikalHeartBeat::construct_heart_beat_request(request, false, true);
         request.set_can_do_ddlwork(false);
         request.set_need_heartbeat_table(true);
         request.set_need_binlog_heartbeat(true);
@@ -497,6 +528,14 @@ void BinlogNetworkServer::process_heart_beat_response(const pb::BaikalHeartBeatR
         response.last_updated_index() > factory->last_updated_index()) {
         factory->set_last_updated_index(response.last_updated_index());
     }
+    if (response.baikal_status_size() != 0) {
+        std::vector<pb::BaikalStatus> address_status_vec;
+        for (int i = 0 ; i < response.baikal_status_size(); ++i) {
+            pb::BaikalStatus db_status = response.baikal_status(i);
+            address_status_vec.emplace_back(db_status);
+        }
+        factory->update_valiable_addresses(address_status_vec);
+    }
 }
 
 int BinlogNetworkServer::update_table_infos() {
@@ -561,10 +600,12 @@ int BinlogNetworkServer::update_table_infos() {
     }
     // 获取所有表公共的binlog表_binlog_id
     std::set<int64_t> common_binlog_ids;
+    std::ostringstream oss;
     for (auto id : all_binlog_ids) {
         bool find = true;
         for (auto& table_ptr : table_ptrs) {
             if(table_ptr != nullptr && table_ptr->binlog_ids.count(id) == 0) {
+                oss << "table[" << table_ptr->name << "] binlog id not found: " << id << ", ";
                 find = false;
                 break;
             }
@@ -574,7 +615,7 @@ int BinlogNetworkServer::update_table_infos() {
         }
     }
     if (common_binlog_ids.size() == 0) {
-        DB_FATAL("get binlog id error.");
+        DB_FATAL("get binlog id error. %s", oss.str().c_str());
         return -1;
     } else if (common_binlog_ids.size() == 1) {
         _binlog_id = *common_binlog_ids.begin();
