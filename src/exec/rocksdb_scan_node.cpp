@@ -864,6 +864,7 @@ int RocksdbScanNode::get_next_by_table_get(RuntimeState* state, RowBatch* batch,
             if (ret < 0) {
                 continue;
             }
+            _read_disk_size += txn->read_disk_size;
             if (use_mem_row) {
                 std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
                 for (auto slot : _tuple_desc->slots()) {
@@ -891,7 +892,6 @@ int RocksdbScanNode::get_next_by_table_get(RuntimeState* state, RowBatch* batch,
                     return -1;
                 }
             }
-            _read_disk_size += txn->read_disk_size;
         } else {
             auto key_pairs = _scan_range_keys.get_next_batch();
             _scan_rows += key_pairs.size();
