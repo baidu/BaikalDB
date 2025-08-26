@@ -863,6 +863,7 @@ bool ScanNode::need_index_merge() {
     for (auto conjunct : conditions) {
         if (conjunct->node_type() == pb::OR_PREDICATE && _or_conjunct == nullptr) {
             _or_conjunct = conjunct;
+            break;
         }
     }
     if (_or_conjunct == nullptr) {

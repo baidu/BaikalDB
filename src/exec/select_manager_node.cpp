@@ -948,7 +948,7 @@ int SelectManagerNode::merge_fetcher_store_run(RuntimeState* state, ExecNode* ex
             if (batch != nullptr && batch->size() != 0) {
                 std::shared_ptr<RowBatch> uniq_batch = std::make_shared<RowBatch>();
                 auto ret = remove_batch_same_row(batch, uniq_batch);
-                if (ret) {
+                if (ret != 0) {
                     return ret;
                 }
                 if (uniq_batch != nullptr && uniq_batch->size() != 0) {

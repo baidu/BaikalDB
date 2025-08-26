@@ -23,6 +23,8 @@
 namespace baikaldb {
 using namespace range;
 
+DEFINE_bool(use_index_merge, false, "if use index merge in index select");
+
 int get_field_hit_type_weight(RangeType &ty) {
     if (ty == EQ || ty == LIKE_EQ) {
         return 10;
@@ -145,7 +147,7 @@ int IndexSelector::analyze(QueryContext* ctx) {
             }
         }
 
-        if (ctx->is_select || ctx->execute_global_flow) {
+        if (FLAGS_use_index_merge && (ctx->is_select || ctx->execute_global_flow)) {
             int32_t r = index_merge_selector(ctx->tuple_descs(),
                                  static_cast<ScanNode*>(scan_node_ptr),
                                  filter_node,
