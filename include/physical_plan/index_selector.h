@@ -107,6 +107,18 @@ private:
     int select_partition(SmartTable& table_info, ScanNode* scan_node,
         std::map<int32_t, range::FieldRange>& field_range_map);
 
+    int64_t index_merge_selector(const std::vector<pb::TupleDescriptor>& tuple_descs,
+                        ScanNode* scan_node,
+                        FilterNode* filter_node,
+                        SortNode* sort_node,
+                        JoinNode* join_node,
+			PacketNode* packet_node,
+                        AggNode* agg_node,
+                        FilterNode* having_filter_node,
+                        bool* index_has_null,
+                        std::map<int32_t, int>& field_range_type,
+                        const std::string& sample_sql);
+
     SchemaFactory* _factory = SchemaFactory::get_instance();
     QueryContext*  _ctx = nullptr;
 

@@ -218,6 +218,7 @@ public:
     bool _is_eq_or_in = true;
     bool _need_filter = false;
     bool _pushed_join_on_condition = false;
+    uint32_t prefix_ratio_index_score = UINT32_MAX;
 };
 typedef std::shared_ptr<AccessPath> SmartPath;
 }

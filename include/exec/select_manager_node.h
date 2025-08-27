@@ -82,6 +82,8 @@ public:
     void multi_fetcher_store_open(FetcherInfo* self_fetcher, FetcherInfo* other_fetcher,
         RuntimeState* state, ExecNode* exec_node);
     int fetcher_store_run(RuntimeState* state, ExecNode* exec_node);
+    int merge_fetcher_store_run(RuntimeState* state, ExecNode* exec_node);
+
     int mpp_fetcher_global_index(RuntimeState* state);
     int open_global_index(FetcherInfo* fetcher, RuntimeState* state,
                           ExecNode* exec_node,

@@ -23,6 +23,8 @@ namespace baikaldb {
 DEFINE_bool(use_column_storage, false, "whether use column storage");
 using namespace range;
 
+DEFINE_bool(use_index_merge, false, "if use index merge in index select");
+
 int get_field_hit_type_weight(RangeType &ty) {
     if (ty == EQ || ty == LIKE_EQ) {
         return 10;
@@ -126,6 +128,23 @@ int IndexSelector::analyze(QueryContext* ctx) {
             // 子查询下推后可能选中全局索引，该场景下不使用全量导出
             if (ret != static_cast<ScanNode*>(scan_node_ptr)->table_id()) {
                 ctx->is_full_export = false;
+            }
+        }
+
+        if (FLAGS_use_index_merge && (ctx->is_select || ctx->execute_global_flow)) {
+            int32_t r = index_merge_selector(ctx->tuple_descs(),
+                                 static_cast<ScanNode*>(scan_node_ptr),
+                                 filter_node,
+                                 (join_node != NULL || agg_node != NULL) ? NULL: sort_node,
+                                 join_node,
+                                 packet_node,
+                                 agg_node,
+                                 having_filter_node,
+                                 &index_has_null,
+                                 field_range_type,
+                                 ctx->stat_info.sample_sql.str());
+            if (r > 0) {
+                scan_node_ptr->set_has_optimized(true);
             }
         }
     }
@@ -1184,6 +1203,75 @@ bool IndexSelector::check_rollup_index_valid(SmartTable& table_info,
     return true;
 }
 
+int64_t IndexSelector::index_merge_selector(const std::vector<pb::TupleDescriptor>& tuple_descs,
+                                    ScanNode* scan_node,
+                                    FilterNode* filter_node,
+                                    SortNode* sort_node,
+                                    JoinNode* join_node,
+                                    PacketNode* packet_node,
+                                    AggNode* agg_node,
+                                    FilterNode* having_filter_node,
+                                    bool* index_has_null,
+                                    std::map<int32_t, int>& field_range_type,
+                                    const std::string& sample_sql) {
+    if (join_node != nullptr) {
+        // join_node 暂不处理
+        return 0;
+    }
+    if (filter_node == nullptr) {
+        return 0;
+    }
+    if (!scan_node->need_index_merge()) {
+        return 0;
+    }
+    uint32_t select_index_score = scan_node->select_path()->prefix_ratio_index_score;
+    scan_node->swap_index_info(scan_node->origin_index_info());
+    std::vector<ExprNode*>& conjuncts_without_or = scan_node->conjuncts_without_or();
+    std::vector<ExprNode*>& or_sub_conjuncts = scan_node->or_sub_conjuncts();
+    bool use_index_merge = true;
+    for (auto or_sub_conjunct: or_sub_conjuncts) {
+        std::vector<ExprNode*> conjuncts = conjuncts_without_or;
+        std::vector<ExprNode*> sub_conjuncts;
+        or_sub_conjunct->flatten_and_expr(&sub_conjuncts);
+
+        conjuncts.insert(conjuncts.end(), sub_conjuncts.begin(), sub_conjuncts.end());
+        filter_node->modify_conjuncts(conjuncts); // filter_node's conjuncts are modified
+        IndexSelectorOptions options;
+        index_selector(tuple_descs, scan_node, filter_node, sort_node, join_node, packet_node, agg_node, having_filter_node, nullptr,
+                       index_has_null, field_range_type, sample_sql, options); // filter_node's pruned_conjuncts are modified
+        auto path = scan_node->select_path();
+        if (scan_node->select_path()->prefix_ratio_index_score <= select_index_score &&
+                scan_node->select_path()->prefix_ratio_index_score != UINT32_MAX) {
+            use_index_merge = false;
+            break;
+        }
+        if (!scan_node->has_index()) {
+            use_index_merge = false;
+            break;
+        }
+        bool select_index_contain_any_sub_conjunct = false;
+        for (auto expr : sub_conjuncts) {
+            if (scan_node->select_path()->need_cut_index_range_condition.count(expr) != 0) {
+                select_index_contain_any_sub_conjunct = true;
+                break;
+            }
+        }
+        if (!select_index_contain_any_sub_conjunct) {
+            use_index_merge = false;
+            break;
+        }
+        scan_node->add_merge_index_info();
+    }
+    // filter_node->modifiy_pruned_conjuncts_by_index(scan_node->origin_index_info()._pruned_conjuncts); // 还原filter_node
+    // scan_node中交换filter_node的_pruned_conjuncts
+    scan_node->swap_index_info(scan_node->origin_index_info()); // 还原scan_node
+    if (!use_index_merge) {
+        scan_node->clear_merge_index_info();
+    } else {
+        scan_node->scan_indexs().clear(); // 避免scan_plan_router
+    }
+    return 0;
+}
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

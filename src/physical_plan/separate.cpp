@@ -216,6 +216,7 @@ int Separate::separate_simple_select(QueryContext* ctx, ExecNode* plan) {
         DB_WARNING("create manager_node failed");
         return -1;
     }
+    bool has_merge_index = false;
     if (scan_nodes.size() > 0) {
         if (is_rocksdb_scan_node) {
             std::map<int64_t, pb::RegionInfo> region_infos =
@@ -223,6 +224,7 @@ int Separate::separate_simple_select(QueryContext* ctx, ExecNode* plan) {
             manager_node->set_region_infos(region_infos);
         }
         static_cast<ScanNode*>(scan_nodes[0])->set_related_manager_node(manager_node.get());
+        has_merge_index = static_cast<ScanNode*>(scan_nodes[0])->has_merge_index();
     }
     std::vector<ExecNode*> dual_scan_nodes;
     plan->get_node(pb::DUAL_SCAN_NODE, dual_scan_nodes);
@@ -238,6 +240,12 @@ int Separate::separate_simple_select(QueryContext* ctx, ExecNode* plan) {
 
     if (agg_node != nullptr) {
         ExecNode* parent = agg_node->get_parent();
+        if (has_merge_index) {
+            manager_node->add_child(agg_node->children(0));
+            agg_node->clear_children();
+            agg_node->add_child(manager_node.release());
+            return 0;
+        }
         pb::PlanNode pb_node;
         agg_node->transfer_pb(0, &pb_node);
         pb_node.set_node_type(pb::MERGE_AGG_NODE);
