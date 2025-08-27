@@ -498,6 +498,7 @@ public:
     }
     bool has_merge_index() const {
         return _merge_index_infos.size() > 0;
+    }
 
     virtual int set_partition_property_and_schema(QueryContext* ctx);
 
