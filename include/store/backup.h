@@ -153,7 +153,7 @@ private:
             return -1;
         }
 
-        auto append_file = [&pa, this, &buf](FileInfo& file_info) -> int {
+        auto append_file = [&pa, this, &buf](BackupFileInfo& file_info) -> int {
             butil::File f(butil::FilePath{file_info.path}, butil::File::FLAG_OPEN);
             if (!f.IsValid()) {
                 DB_WARNING("file[%s] is not valid.", file_info.path.c_str());

@@ -17,6 +17,7 @@
 #include "row_expr.h"
 #include "literal.h"
 #include "parser.h"
+#include "arrow_function.h"
 
 namespace baikaldb {
 DEFINE_bool(open_nonboolean_sql_forbid, false, "open nonboolean sqls forbid default:false");
@@ -32,6 +33,7 @@ int ScalarFnCall::init(const pb::ExprNode& node) {
         return -1;
     }
     _fn = node.fn();
+    _origin_fn_name = _fn.name();
     // rand不是const
     if (node_type() == pb::FUNCTION_CALL && _fn.name() == "rand") {
         _is_constant = false;
@@ -238,6 +240,25 @@ ExprValue ScalarFnCall::get_value(const ExprValue& value) {
     return _fn_call(args).cast_to(_col_type);
 }
 
+// 方便实现, 部分函数向量化实现有限制, 如date_format必须(expr, literal), date_sub必须是(expr, literal, literal)
+// 但是实际上literal的部分可以是任何expr
+// 简单加个校验
+const std::unordered_map<std::string, int> ARROW_FUNC_SLOT_REF_COUNT = {
+    {"date_format", 1},
+    {"time_format", 1},
+    {"date_sub", 1},
+    {"date_add", 1},
+    {"subdate", 1},
+    {"adddate", 1},
+    {"round", 1},
+    {"now", 0},
+    {"current_timestamp", 0},
+    {"repeat", 1},
+    {"substr", 1},
+    {"week", 1},
+    {"yearweek", 1}
+};
+
 bool ScalarFnCall::can_use_arrow_vector() {
     if (_node_type != pb::ExprNodeType::FUNCTION_CALL) {
         return false;
@@ -250,8 +271,20 @@ bool ScalarFnCall::can_use_arrow_vector() {
     if (_arrow_fn_call == nullptr) {
         return false;
     }
+    auto iter = ARROW_FUNC_SLOT_REF_COUNT.find(_fn.name());
+    if (iter != ARROW_FUNC_SLOT_REF_COUNT.end()) {
+        for (int idx = iter->second; idx < _children.size(); ++idx) {
+            if (!_children[idx]->is_literal()) {
+                return false;
+            }
+        }
+    }
     for (auto& c : _children) {
-        if (!c->can_use_arrow_vector()) {
+        if (c->is_row_expr()) {
+            if (!check_row_expr_is_support(_fn, c)) {
+                return false;
+            }
+        } else if (!c->can_use_arrow_vector()) {
             return false;
         }
     }
@@ -277,7 +310,45 @@ int ScalarFnCall::transfer_to_arrow_expression() {
             _fn.fn_op(), _fn.name().c_str(), _is_row_expr);
         return -1;
     }
+    if (_fn.name() == "cast_to_datetime") {
+        _float_precision_len = 0;
+    }
     return 0;
+}
+
+std::string ScalarFnCall::to_sql(const std::unordered_map<int32_t, std::string>& slotid_fieldname_map, 
+                                 baikal::client::MysqlShortConnection* conn) {
+    if (_is_row_expr) {
+        if (_fn.fn_op() != parser::FT_EQ &&
+                _fn.fn_op() != parser::FT_NE &&
+                _fn.fn_op() != parser::FT_GE &&
+                _fn.fn_op() != parser::FT_GT &&
+                _fn.fn_op() != parser::FT_LE &&
+                _fn.fn_op() != parser::FT_LT) {
+            DB_WARNING("Invalid row_expr fn: %d", _fn.fn_op());
+            return "";
+        }
+    }
+    std::string fn_name = _origin_fn_name;
+    // 一元负数运算符特殊处理
+    if (_fn.fn_op() == parser::FT_UMINUS) {
+        fn_name = "uminus";
+    }
+    auto to_sql_call = ToSqlFunctionManager::instance()->get_object(fn_name);
+    if (to_sql_call == NULL) {
+        DB_WARNING("Invalid function: %s", fn_name.c_str());
+        return "";
+    }
+    std::vector<std::string> args;
+    args.reserve(_children.size());
+    for (auto c : _children) {
+        if (c == nullptr) {
+            DB_WARNING("children is nullptr");
+            return "";
+        }
+        args.emplace_back(c->to_sql(slotid_fieldname_map, conn));
+    }
+    return to_sql_call(args);
 }
 
 }

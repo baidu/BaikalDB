@@ -53,8 +53,10 @@ int DeletePlanner::plan() {
             DB_WARNING("get truncate_table plan failed");
             return -1;
         }
-        if (0 != reset_auto_incr_id()) {
-            return -1;
+        if (_partition_names.size() == 0) {
+            if (0 != reset_auto_incr_id()) {
+                return -1;
+            }
         }
         return 0;
     }

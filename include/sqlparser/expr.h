@@ -15,6 +15,7 @@
 #pragma once
 #include "base.h"
 #include <stdlib.h>
+#include "arrow/vendored/fast_float/fast_float.h"
 
 namespace parser {
 enum ExprType {
@@ -25,7 +26,8 @@ enum ExprType {
     ET_SUB_QUERY_EXPR,
     ET_CMP_SUB_QUERY_EXPR,
     ET_EXISTS_SUB_QUERY_EXPR,
-    ET_COMMON_TABLE_EXPR
+    ET_COMMON_TABLE_EXPR,
+    ET_WINDOW
 };
 struct ExprNode : public Node {
     ExprType expr_type;
@@ -106,6 +108,7 @@ enum FuncType {
     FT_SUBSTRING,
     FT_TRIM
     */
+    FT_WINDOW,
 };
 
 struct FuncExpr : public ExprNode {
@@ -248,7 +251,7 @@ struct LiteralExpr : public ExprNode {
         double double_val;
         String str_val;
     } _u;
-    String row_str;
+    String raw_str;
 
     mutable LiteralType placeholder_literal_type = LT_INT;
     mutable int placeholder_id = -1; // PreparePlanner和PlanCache复用该字段
@@ -269,7 +272,7 @@ struct LiteralExpr : public ExprNode {
                 std::cout << _u.str_val.value;
                 break;
             case LT_HEX:
-                std::cout << row_str.value;
+                std::cout << raw_str.value;
                 break;
             case LT_BOOL:
                 std::cout << _u.bool_val;
@@ -300,11 +303,12 @@ struct LiteralExpr : public ExprNode {
     static LiteralExpr* make_double(const char* str, butil::Arena& arena) {
         LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
         lit->literal_type = LT_DOUBLE;
-        lit->_u.double_val = strtod(str, NULL);
+        using ::arrow_vendored::fast_float::from_chars;
+        from_chars(str, str + strlen(str), lit->_u.double_val);
         return lit;
     }
 
-    static LiteralExpr* make_bit(const char* str, size_t len, butil::Arena& arena) {
+    static LiteralExpr* make_bit(const char* raw, const char* str, size_t len, butil::Arena& arena) {
         LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
         std::string out_str;
         out_str.reserve(len / 8 + 1);
@@ -317,10 +321,11 @@ struct LiteralExpr : public ExprNode {
         }
         lit->_u.str_val.strdup(out_str.c_str(), out_str.size(), arena);
         lit->literal_type = LT_HEX;
+        lit->raw_str.strdup(raw, strlen(raw), arena);
         return lit;
     }
 
-    static LiteralExpr* make_hex(const char* str, size_t len, butil::Arena& arena) {
+    static LiteralExpr* make_hex(const char* raw, const char* str, size_t len, butil::Arena& arena) {
         LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
         std::string out_str;
         out_str.reserve(len / 2 + 1);
@@ -333,7 +338,7 @@ struct LiteralExpr : public ExprNode {
         }
         lit->_u.str_val.strdup(out_str.c_str(), out_str.size(), arena);
         lit->literal_type = LT_HEX;
-        lit->row_str.strdup(str, len, arena);
+        lit->raw_str.strdup(raw, strlen(raw), arena);
         return lit;
     }
 
@@ -427,6 +432,421 @@ struct CommonTableExpr : public ExprNode {
         }
     }
     virtual void to_stream(std::ostream& os) const override;
+};
+
+enum FrameType {
+    FT_ROWS,
+    FT_RANGE,
+};
+
+enum BoundType {
+    BT_FOLLOWING,
+    BT_PRECEDING,
+    BT_CURRENT_ROW,
+};
+
+struct ByItem : public Node {
+    ExprNode* expr = nullptr;
+    bool is_desc = false;
+    ByItem() {
+        node_type = NT_BY_ITEM;
+    }
+    virtual bool is_complex_node() override {
+        if (is_complex) {
+            return true;
+        }
+        if (expr != nullptr && expr->is_complex_node()) {
+            is_complex = true;
+            return true;
+        }
+        return false;
+    }
+    virtual void set_print_sample(bool print_sample_) override {
+        print_sample = print_sample_;
+        if (expr != nullptr) {
+            expr->set_print_sample(print_sample_);
+        }
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        if (expr != nullptr) {
+            expr->set_cache_param(p_cache_param_);
+        }
+    }
+    virtual void to_stream(std::ostream& os) const override {
+        static const char* desc_str[] = {" ASC", " DESC"};
+        os << expr << desc_str[is_desc];
+    }
+};
+
+struct PartitionByClause : public Node {
+    Vector<ByItem*> items;
+    PartitionByClause() {
+        node_type = NT_PARTITION_BY;
+    }
+    virtual bool is_complex_node() override {
+        if (is_complex) {
+            return true;
+        }
+        for (int i = 0; i < items.size(); ++i) {
+            if (items[i] != nullptr && items[i]->is_complex_node()) {
+                is_complex = true;
+                return true;
+            }
+        }
+        return false;
+    }
+    virtual void set_print_sample(bool print_sample_) override {
+        print_sample = print_sample_;
+        for (int i = 0; i < items.size(); ++i) {
+            if (items[i] != nullptr) {
+                items[i]->set_print_sample(print_sample_);
+            }
+        }
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        for (int i = 0; i < items.size(); ++i) {
+            if (items[i] != nullptr) {
+                items[i]->set_cache_param(p_cache_param_);
+            }
+        }
+    }
+    virtual void to_stream(std::ostream& os) const override {
+        for (int i = 0; i < items.size(); ++i) {
+            os << " " << items[i];
+            if (i != items.size() - 1) {
+                os << ",";
+            }
+        }
+    }
+};
+
+struct OrderByClause : public Node {
+    Vector<ByItem*> items;
+    OrderByClause() {
+        node_type = NT_ORDER_BY;
+    }
+    virtual bool is_complex_node() override {
+        if (is_complex) {
+            return true;
+        }
+        for (int i = 0; i < items.size(); i++) {
+            if (items[i] != nullptr && items[i]->is_complex_node()) {
+                is_complex = true;
+                return true;
+            }
+        }
+        return false;
+    }
+    virtual void set_print_sample(bool print_sample_) override {
+        print_sample = print_sample_;
+        for (int i = 0; i < items.size(); i++) {
+            items[i]->set_print_sample(print_sample_);
+        }
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        for (int i = 0; i < items.size(); i++) {
+            if (items[i] != nullptr) {
+                items[i]->set_cache_param(p_cache_param_);
+            }
+        }
+    }
+    virtual void to_stream(std::ostream& os) const override {
+        for (int i = 0; i < items.size(); i++) {
+            os << " " << items[i];
+            if (i != items.size() -1) {
+                os << ",";
+            }
+        }
+    }
+};
+
+struct FrameBound : public Node {
+    BoundType bound_type;
+    bool is_unbounded = false;
+    ExprNode* expr = nullptr;
+    FrameBound() {
+        node_type = NT_WINDOW_FRAME_BOUND;
+    }
+    virtual bool is_complex_node() override {
+        if (is_complex) {
+            return true;
+        }
+        if (expr != nullptr && expr->is_complex_node()) {
+            is_complex = true;
+            return true;
+        }
+        return false;
+    }
+    virtual void to_stream(std::ostream& os) const override {
+        if (is_unbounded) {
+            os << " UNBOUNDED";
+        }
+        if (expr != nullptr) {
+            os << " " << expr;
+        }
+        switch (bound_type) {
+        case BT_FOLLOWING:
+            os << " FOLLOWING";
+            break;
+        case BT_PRECEDING:
+            os << " PRECEDING";
+            break;
+        case BT_CURRENT_ROW:
+            os << " CURRENT ROW";
+            break;
+        default:
+            break;
+        }
+    }
+    virtual void set_print_sample(bool print_sample_) override {
+        print_sample = print_sample_;
+        if (expr != nullptr) {
+            expr->set_print_sample(print_sample_);
+        }
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        if (expr != nullptr) {
+            expr->set_cache_param(p_cache_param_);
+        }
+    }
+};
+
+struct FrameExtent : public Node {
+    FrameBound* frame_start = nullptr;
+    FrameBound* frame_end = nullptr;
+    bool use_between = false;
+    FrameExtent() {
+        node_type = NT_WINDOW_FRAME_EXTENT;
+    }
+    virtual bool is_complex_node() override {
+        if (is_complex) {
+            return true;
+        }
+        if (frame_start != nullptr && frame_start->is_complex_node()) {
+            is_complex = true;
+            return true;
+        }
+        if (frame_end != nullptr && frame_end->is_complex_node()) {
+            is_complex = true;
+            return true;
+        }
+        return false;
+    }
+    virtual void to_stream(std::ostream& os) const override {
+        if (use_between) {
+            os << " BETWEEN";
+            if (frame_start != nullptr) {
+                os << frame_start;
+            }
+            os << " AND";
+            if (frame_end != nullptr) {
+                os << frame_end;
+            }
+        } else {
+            if (frame_start != nullptr) {
+                os << frame_start;
+            }
+        }
+    }
+    virtual void set_print_sample(bool print_sample_) override {
+        print_sample = print_sample_;
+        if (frame_start != nullptr) {
+            frame_start->set_print_sample(print_sample_);
+        }
+        if (frame_end != nullptr) {
+            frame_end->set_print_sample(print_sample_);
+        }
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        if (frame_start != nullptr) {
+            frame_start->set_cache_param(p_cache_param_);
+        }
+        if (frame_end != nullptr) {
+            frame_end->set_cache_param(p_cache_param_);
+        }
+    }
+};
+
+struct WindowFrameClause : public Node {
+    FrameType frame_type;
+    FrameExtent* frame_extent = nullptr;
+    WindowFrameClause() {
+        node_type = NT_WINDOW_FRAME;
+    }
+    virtual bool is_complex_node() override {
+        if (is_complex) {
+            return true;
+        }
+        if (frame_extent != nullptr && frame_extent->is_complex_node()) {
+            is_complex = true;
+            return true;
+        }
+        return false;
+    }
+    virtual void to_stream(std::ostream& os) const override {
+        switch (frame_type) {
+        case FT_ROWS:
+            os << " ROWS";
+            break;
+        case FT_RANGE:
+            os << " RANGE";
+            break;
+        default:
+            break;
+        }
+        if (frame_extent != nullptr) {
+            os << frame_extent;
+        }
+    }
+    virtual void set_print_sample(bool print_sample_) override {
+        print_sample = print_sample_;
+        if (frame_extent != nullptr) {
+            frame_extent->set_print_sample(print_sample_);
+        }
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        if (frame_extent != nullptr) {
+            frame_extent->set_cache_param(p_cache_param_);
+        }
+    }
+};
+
+struct WindowSpec : public Node {
+    PartitionByClause* partition_by = nullptr;
+    OrderByClause* order_by = nullptr;
+    WindowFrameClause* frame = nullptr;
+    WindowSpec() {
+        node_type = NT_WINDOW_SPEC;
+    }
+    virtual bool is_complex_node() {
+        if (is_complex) {
+            return true;
+        }
+        if (partition_by != nullptr && partition_by->is_complex_node()) {
+            is_complex = true;
+            return true;
+        }
+        if (order_by != nullptr && order_by->is_complex_node()) {
+            is_complex = true;
+            return true;
+        }
+        if (frame != nullptr && frame->is_complex_node()) {
+            is_complex = true;
+            return true;
+        }
+        return false;
+    }
+    virtual void to_stream(std::ostream& os) const override {
+        if (partition_by != nullptr) {
+            os << " PARTITION BY" << partition_by;
+        }
+        if (order_by != nullptr) {
+            os << " ORDER BY" << order_by;
+        }
+        if (frame != nullptr) {
+            os << frame;
+        }
+    }
+    virtual void set_print_sample(bool print_sample_) override {
+        print_sample = print_sample_;
+        if (partition_by != nullptr) {
+            partition_by->set_print_sample(print_sample_);
+        }
+        if (order_by != nullptr) {
+            order_by->set_print_sample(print_sample_);
+        }
+        if (frame != nullptr) {
+            frame->set_print_sample(print_sample_);
+        }
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        if (partition_by != nullptr) {
+            partition_by->set_cache_param(p_cache_param_);
+        }
+        if (order_by != nullptr) {
+            order_by->set_cache_param(p_cache_param_);
+        }
+        if (frame != nullptr) {
+            frame->set_cache_param(p_cache_param_);
+        }
+    }
+};
+
+struct WindowFuncExpr : public ExprNode {
+    FuncExpr* func_expr = nullptr;     // 开窗函数
+    WindowSpec* window_spec = nullptr; // 窗口定义
+    // 是否忽略NULL值；MySQL当前只支持`RESPECT NULLS`，如果为true，逻辑计划执行报错，与MySQL保持一致
+    bool ignore_null = false;
+    // 是否按照从后往前的方向进行窗口计算；MySQL当前只支持`FROM FIRST`，如果为true，逻辑计划执行报错，与MySQL保持一致
+    bool from_last = false; 
+    WindowFuncExpr() {
+        expr_type = ET_WINDOW;
+    }
+    virtual bool is_complex_node() {
+        if (is_complex) {
+            return true;
+        }
+        if (func_expr != nullptr && func_expr->is_complex_node()) {
+            is_complex = true;
+            return true;
+        }
+        if (window_spec != nullptr && window_spec->is_complex_node()) {
+            is_complex = true;
+            return true;
+        }
+        return false;
+    }
+    virtual void to_stream(std::ostream& os) const override {
+        os << " " << func_expr;
+        if (func_expr != nullptr) {
+            if (func_expr->fn_name.to_string() == "NTH_VALUE") {
+                if (from_last) {
+                    os << " FROM LAST ";
+                } else {
+                    os << " FROM FIRST ";
+                }
+            }
+            if (func_expr->fn_name.to_string() == "LEAD"
+                    || func_expr->fn_name.to_string() == "LAG"
+                    || func_expr->fn_name.to_string() == "FIRST_VALUE"
+                    || func_expr->fn_name.to_string() == "LAST_VALUE"
+                    || func_expr->fn_name.to_string() == "NTH_VALUE") {
+                if (ignore_null) {
+                    os << " IGNORE NULLS ";
+                } else {
+                    os << " RESPECT NULLS ";
+                }
+            }
+        }
+        if (window_spec != nullptr) {
+            os << " OVER (" << window_spec << ")";
+        }
+    }
+    virtual void set_print_sample(bool print_sample_) override {
+        print_sample = print_sample_;
+        if (func_expr != nullptr) {
+            func_expr->set_print_sample(print_sample_);
+        }
+        if (window_spec != nullptr) {
+            window_spec->set_print_sample(print_sample_);
+        }
+    }
+    virtual void set_cache_param(PlanCacheParam* p_cache_param_) override {
+        p_cache_param = p_cache_param_;
+        if (func_expr != nullptr) {
+            func_expr->set_cache_param(p_cache_param_);
+        }
+        if (window_spec != nullptr) {
+            window_spec->set_cache_param(p_cache_param_);
+        }
+    }
 };
 
 }

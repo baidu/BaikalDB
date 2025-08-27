@@ -412,6 +412,7 @@ void DBManager::init() {
                             DB_NOTICE("re_launch task_%s %s", task_id.c_str(), task.second.region_info.ShortDebugString().c_str());
                             task.second.region_info.set_status(pb::DdlWorkIdle);
                             DDLManager::get_instance()->update_region_ddlwork(task.second.region_info);
+                            clear_store_check(task_id);
                         }
                         task_map.clear();
                     };
@@ -486,6 +487,7 @@ int DDLManager::init_del_index_ddlwork(int64_t table_id, const pb::IndexInfo& in
     mem_info.work_info.set_index_id(index_info.index_id());
     mem_info.work_info.set_errcode(pb::IN_PROCESS);
     mem_info.work_info.set_global(index_info.is_global());
+    mem_info.work_info.set_begin_timestamp(::time(NULL));
     _table_ddl_mem.emplace(table_id, mem_info);
     std::string index_ddl_string;
     if (!mem_info.work_info.SerializeToString(&index_ddl_string)) {
@@ -515,6 +517,7 @@ int DDLManager::init_index_ddlwork(int64_t table_id, const pb::IndexInfo& index_
     mem_info.work_info.set_errcode(pb::IN_PROCESS);
     mem_info.work_info.set_status(pb::DdlWorkIdle);
     mem_info.work_info.set_global(index_info.is_global());
+    mem_info.work_info.set_begin_timestamp(::time(NULL));
     if (index_info.index_type() == pb::I_ROLLUP) {
         mem_info.work_info.set_is_rollup(true);
     }
@@ -609,6 +612,7 @@ int DDLManager::init_column_ddlwork(int64_t table_id, const pb::DdlWorkInfo& wor
     mem_info.work_info.set_errcode(pb::IN_PROCESS);
     mem_info.work_info.set_status(pb::DdlWorkIdle);
     mem_info.work_info.set_job_state(pb::IS_NONE);
+    mem_info.work_info.set_begin_timestamp(::time(NULL));
     _table_ddl_mem.emplace(table_id, mem_info);
     std::string ddl_work_string;
     if (!mem_info.work_info.SerializeToString(&ddl_work_string)) {
@@ -786,6 +790,10 @@ void DDLManager::on_leader_start() {
     }
     for (auto& region_work_ptr : region_work_ptrs) {
         DB_NOTICE("leader start reload ddl work.");
+        if (region_work_ptr == nullptr) {
+            DB_WARNING("region_work_ptr is nullptr");
+            continue;
+        }
         region_work_ptr->traverse([this](MemRegionDdlWork& work) {
             auto& region_work = work.region_info;
             if (region_work.status() == pb::DdlWorkDoing) {

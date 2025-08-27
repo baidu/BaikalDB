@@ -37,6 +37,9 @@ DECLARE_int32(store_dead_interval_times);
 DECLARE_int32(store_faulty_interval_times);
 DECLARE_string(default_logical_room);
 DECLARE_string(default_physical_room);
+DECLARE_int32(baikal_heartbeat_interval_us);
+DECLARE_int32(baikal_faulty_interval_times);
+DECLARE_int32(baikal_clear_faulty_interval_times);
 
 bvar::Adder<int> min_fallback_count;
 bvar::Adder<int> min_count;
@@ -521,6 +524,94 @@ void ClusterManager::update_instance(const pb::MetaManagerRequest& request, braf
     DB_NOTICE("modify tag success, request:%s", request.ShortDebugString().c_str());
 }
 
+void ClusterManager::add_baikal_instance(const pb::BaikalStatus& baikal_status) {
+    std::string address = baikal_status.address();
+    std::string resource_tag = baikal_status.resource_tag();
+
+    if (address.empty() || resource_tag.empty()) {
+        // should not reach here
+        DB_FATAL("baikal address or resource tag empty when try to add baikal instance. address :%s, resource tag:%s", 
+                    address.c_str(), 
+                    resource_tag.c_str());
+        return;
+    }
+
+    // 判断该实例是否已经存在
+    if (0 != _baikal_instance_info.count(address)) {
+        DB_WARNING("baikal instance:%s has already exist", address.c_str());
+        return;
+    }
+
+    // 更新内存值
+    {
+        BAIDU_SCOPED_LOCK(_baikal_instance_mutex);
+        InstanceStateInfo state_info;
+        state_info.state = baikal_status.status();
+        state_info.timestamp = butil::gettimeofday_us();
+        _baikal_instance_info[address] = state_info;
+        _baikal_instance_resource_tag_map[address] = resource_tag;
+
+        if (0 == _resource_tag_baikal_instances_map.count(resource_tag)) {
+            _resource_tag_baikal_instances_map[resource_tag] = std::set<std::string>();
+        }
+        std::set<std::string>& instances = _resource_tag_baikal_instances_map[resource_tag];
+        instances.insert(address);
+    }
+    DB_NOTICE("add baikal instance success, baikal address:%s , new resource_tag:%s", 
+                address.c_str(), 
+                resource_tag.c_str());
+}
+
+void ClusterManager::update_baikal_instance(const pb::BaikalStatus& baikal_status) {
+    std::string address = baikal_status.address();
+    std::string resource_tag = baikal_status.resource_tag();
+
+    if (address.empty() || resource_tag.empty()) {
+        // should not reach here
+        DB_FATAL("baikal address or resource tag empty when try to update baikal instance. address :%s, resource tag:%s", 
+                    address.c_str(), 
+                    resource_tag.c_str());
+        return;
+    }
+
+    // 判断该实例是否已经存在
+    if (0 == _baikal_instance_info.count(address)) {
+        DB_WARNING("baikal instance:%s doesn't exist", address.c_str());
+        return;
+    }
+    // 更新内存值
+    {
+        BAIDU_SCOPED_LOCK(_baikal_instance_mutex);
+        InstanceStateInfo state_info;
+        state_info.state = baikal_status.status();
+        state_info.timestamp = butil::gettimeofday_us();
+        _baikal_instance_info[address] = state_info;
+
+        std::string old_resource_tag = _baikal_instance_resource_tag_map[address];
+        // 如果需要更新resource_tag
+        if(old_resource_tag != resource_tag) {
+            if (0 != _resource_tag_baikal_instances_map.count(old_resource_tag)) {
+                std::set<std::string>& instances = _resource_tag_baikal_instances_map[old_resource_tag];
+                auto iter = instances.find(address);
+                if (iter != instances.end()) {
+                    instances.erase(iter);
+                }
+            }
+
+            if (0 == _resource_tag_baikal_instances_map.count(resource_tag)) {
+                _resource_tag_baikal_instances_map[resource_tag] = std::set<std::string>();
+            }
+            std::set<std::string>& instances = _resource_tag_baikal_instances_map[resource_tag];
+            instances.insert(address);
+
+            _baikal_instance_resource_tag_map[address] = resource_tag;
+        }
+    }
+    DB_NOTICE("modify baikal resourece tag success, baikal address:%s , new resource_tag:%s", 
+                address.c_str(), 
+                resource_tag.c_str());
+}
+
 // 如果已存在则修改，不存在则新添加
 inline void agg_instance_param(const pb::InstanceParam& old_param, const pb::InstanceParam& new_param, pb::InstanceParam* out_param) {
     std::map<std::string, pb::ParamDesc> kv_map;
@@ -733,7 +824,7 @@ void ClusterManager::set_instance_status(const pb::MetaManagerRequest* request,
         return;
     }
 }
-void ClusterManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* /*request*/,
+void ClusterManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* request,
             pb::BaikalHeartBeatResponse* response) {
     auto idc_info_ptr = response->mutable_idc_info();
     {
@@ -757,7 +848,42 @@ void ClusterManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* 
                 instance->set_resource_tag(iter->second.resource_tag);
             }           
         }
-    }  
+    }
+
+    if (!request->can_do_ddlwork()) {
+        return;
+    }
+    // 非binlog backup实例，维护状态
+    int ret = update_baikal_instance_info(*request);
+    if (ret == 0) {
+        construct_baikal_heartbeat_response(request, response);
+        return;
+    }
+
+    if (ret == -1) {
+        add_baikal_instance(request->baikal_status());
+    } else if (ret == -2) {
+        update_baikal_instance(request->baikal_status());
+    }
+    construct_baikal_heartbeat_response(request, response);
+}
+
+void ClusterManager::construct_baikal_heartbeat_response(const pb::BaikalHeartBeatRequest *request, pb::BaikalHeartBeatResponse* response) {
+    if (!request->has_baikal_status()) {
+        return;
+    }
+    std::string resource_tag = request->baikal_status().resource_tag();
+    if (resource_tag.empty() || 0 == _resource_tag_baikal_instances_map.count(resource_tag)) {
+        return;
+    }
+
+    for (auto& address : _resource_tag_baikal_instances_map[resource_tag]) {
+        pb::BaikalStatus* baikal_status = response->add_baikal_status();
+        baikal_status->set_address(address);
+        baikal_status->set_status(_baikal_instance_info[address].state);
+        baikal_status->set_resource_tag(resource_tag);
+        baikal_status->set_last_heartbeat_timestamp(_baikal_instance_info[address].timestamp);
+    }
 }
 
 void ClusterManager::process_instance_heartbeat_for_store(const pb::InstanceInfo& instance_heart_beat) {
@@ -805,10 +931,14 @@ void ClusterManager::process_instance_param_heartbeat_for_baikal(const pb::Baika
     if (request->has_baikaldb_resource_tag()) {
         BAIDU_SCOPED_LOCK(_instance_param_mutex);
 
-        auto iter = _instance_param_map.find(request->baikaldb_resource_tag());
+        auto iter = _instance_param_map.find("__baikaldb");
         if (iter != _instance_param_map.end()) {
-            auto instance_param = response->mutable_instance_param();
-            instance_param->CopyFrom(iter->second);
+            *(response->add_instance_param()) = iter->second;
+        }
+
+        iter = _instance_param_map.find(request->baikaldb_resource_tag());
+        if (iter != _instance_param_map.end()) {
+            *(response->add_instance_param()) = iter->second;
         }
     }
 }
@@ -1060,6 +1190,51 @@ void ClusterManager::process_peer_heartbeat_for_store(const pb::StoreHeartBeatRe
                                                          table_average_counts);
     } else {
         DB_WARNING("instance: %s has been learner_load_balance, no need migrate", instance.c_str());
+    }
+}
+
+void ClusterManager::baikal_healthy_check_function() {
+    // 放在外面防止其他线程insert导致迭代器失效
+    BAIDU_SCOPED_LOCK(_baikal_instance_mutex);
+    for (auto instance_pair = _baikal_instance_info.begin(); instance_pair != _baikal_instance_info.end(); ) {
+        InstanceStateInfo& state_info = instance_pair->second;
+        std::string instance_name = instance_pair->first;
+        int64_t last_timestamp = state_info.timestamp;
+        if ((butil::gettimeofday_us() - last_timestamp) > 
+                    FLAGS_baikal_heartbeat_interval_us * FLAGS_baikal_clear_faulty_interval_times) {
+            // 超过清理时长获取不了心跳清除记录
+            instance_pair = _baikal_instance_info.erase(instance_pair);
+            DB_WARNING("baikal instance %s: No heartbeat received for more than %d seconds, cleared", 
+                        instance_name.c_str(), 
+                        FLAGS_baikal_heartbeat_interval_us * FLAGS_baikal_clear_faulty_interval_times / 1000000);
+            
+            if(0 == _baikal_instance_resource_tag_map.count(instance_name)) {
+                DB_WARNING("instance: %s resource tag does not exist", instance_name.c_str());
+                continue;
+            }
+            std::string resource_tag = _baikal_instance_resource_tag_map[instance_name];
+            _baikal_instance_resource_tag_map.erase(instance_name);
+
+            if(0 == _resource_tag_baikal_instances_map.count(resource_tag)) {
+                DB_WARNING("resource_tag: %s instances set does not exist", resource_tag.c_str());
+                continue;
+            }
+            std::set<std::string>& instances = _resource_tag_baikal_instances_map[resource_tag];
+            instances.erase(instance_name);
+            if (0 == instances.size()) {
+                _resource_tag_baikal_instances_map.erase(resource_tag);
+            }
+        } else if((butil::gettimeofday_us() - last_timestamp) > 
+                    FLAGS_baikal_heartbeat_interval_us * FLAGS_baikal_faulty_interval_times) {
+            // 超时获取不了心跳设置为FAULTY
+            state_info.state = pb::FAULTY;
+            ++ instance_pair;
+            DB_WARNING("baikal instance %s: No heartbeat received for more than %d seconds, set as 'FAULTY'", 
+                        instance_name.c_str(), 
+                        FLAGS_baikal_heartbeat_interval_us * FLAGS_baikal_faulty_interval_times / 1000000);
+        } else {
+            ++ instance_pair;
+        }
     }
 }
 
@@ -1352,6 +1527,7 @@ int ClusterManager::select_instance_min_on_pk_prefix(const IdcInfo& idc,
         selected_instance = candidate_instances_pk_prefix_dimension[random_index];
     }
     if (selected_instance.empty()) {
+        DB_WARNING("no instace pick");
         return -1;
     }
     add_peer_count_on_pk_prefix(selected_instance, table_id, pk_prefix_key);
@@ -1704,7 +1880,7 @@ bool ClusterManager::is_legal_for_select_instance(
     }
     if ((_instance_info[candicate_instance].used_size  * 100 / _instance_info[candicate_instance].capacity)  > 
                 FLAGS_disk_used_percent) {
-        DB_WARNING("instance:%s left size is not enough, used_size:%ld, capactity:%ld",
+        DB_DEBUG("instance:%s left size is not enough, used_size:%ld, capactity:%ld",
                     candicate_instance.c_str(), 
                     _instance_info[candicate_instance].used_size, 
                     _instance_info[candicate_instance].capacity);
@@ -1812,6 +1988,35 @@ int ClusterManager::load_logical_snapshot(const std::string& logical_prefix,
     for (auto logical_room : logical_info.logical_rooms()) {
         _logical_physical_map[logical_room] = std::set<std::string>{};
     }
+    return 0;
+}
+
+
+int ClusterManager::update_baikal_instance_info(const pb::BaikalHeartBeatRequest& request) {
+    if (!request.has_baikal_status()) {
+        return 0;
+    }
+    std::string address = request.baikal_status().address();
+    std::string resource_tag = request.baikal_status().resource_tag();
+    if (address.empty() || resource_tag.empty()) {
+        return 0;
+    }
+    BAIDU_SCOPED_LOCK(_baikal_instance_mutex);
+    
+    if (0 == _baikal_instance_info.count(address)) {
+        // 不存在 需要添加
+        return -1;
+    } else if (_baikal_instance_resource_tag_map[address] != resource_tag) {
+        // 存在 但需要更新
+        return -2;
+    }
+
+    if(_baikal_instance_info[address].state != request.baikal_status().status()) {
+        // 状态更新，需要同步到follower
+        return -2;
+    }
+    // 正常需要更新心跳, 不会更新到follower
+    _baikal_instance_info[address].timestamp = butil::gettimeofday_us();
     return 0;
 }
 

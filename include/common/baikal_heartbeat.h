@@ -42,7 +42,7 @@ class BaikalHeartBeat {
 public:
     // 主Meta使用
     static void construct_heart_beat_request(
-        pb::BaikalHeartBeatRequest& request, bool is_backup = false);
+        pb::BaikalHeartBeatRequest& request, bool is_backup = false, bool is_binlog = false);
     // 非主Meta使用
     static void construct_heart_beat_request(
         std::unordered_map<int64_t, pb::BaikalHeartBeatRequest>& meta_request_map);

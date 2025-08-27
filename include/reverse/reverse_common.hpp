@@ -42,7 +42,7 @@ int Tokenizer::nlpc_seg(drpc::NLPCClient& client,
     int ret = client.call_method(str_input, str_output);
     if (ret != 0)
     {
-        DB_WARNING("wordrank call method failed ret:%d", ret);
+        DB_WARNING("wordrank call method failed ret:%d, word:%s", ret, word.c_str());
         return -1;
     }
     //DB_WARNING("call :%ld", tt.get_time());
@@ -58,8 +58,8 @@ int Tokenizer::nlpc_seg(drpc::NLPCClient& client,
 }
 #endif
 
-template<typename ReverseNode, typename ReverseList>
-int FirstLevelMSIterator<ReverseNode, ReverseList>::next(std::string& key, bool& res) {
+template<typename ReverseList>
+int FirstLevelMSIterator<ReverseList>::next(std::string& key, bool& res) {
     int ret = 0;
 
     while (_need_next && _node_dq.size() < 2) {
@@ -109,8 +109,8 @@ int FirstLevelMSIterator<ReverseNode, ReverseList>::next(std::string& key, bool&
     return 0;
 }
 
-template<typename ReverseNode, typename ReverseList>
-int FirstLevelMSIterator<ReverseNode, ReverseList>::internal_next(ReverseNode* node, bool& res) {
+template<typename ReverseList>
+int FirstLevelMSIterator<ReverseList>::internal_next(ReverseNode* node, bool& res) {
     //当key >= _end_key时该term的拉链实际已经结束，但是merge的时候，所有的term
     //的拉链顺序在一起，所以需要把当前term的拉链遍历完，才能成功访问后续term
     std::string key;
@@ -133,17 +133,17 @@ int FirstLevelMSIterator<ReverseNode, ReverseList>::internal_next(ReverseNode* n
         res = true;
         rocksdb::Status s;
         rocksdb::ReadOptions read_opt;
-        rocksdb::PinnableSlice pin_slice;
+        // rocksdb::PinnableSlice pin_slice;
         auto data_cf = _rocksdb->get_data_handle();
-        s = _txn->GetForUpdate(read_opt, data_cf, _iter->key(), &pin_slice);
-        if (!s.ok()) {
-           DB_WARNING("get for update failed:%s, term:%s, key:%s", s.ToString().c_str(), 
-                     term.c_str(), _iter->key().ToString(true).c_str());
-           return -1;
-        }
-        //rocksdb::Slice pin_slice = _iter->value();
+        // s = _txn->GetForUpdate(read_opt, data_cf, _iter->key(), &pin_slice);
+        // if (!s.ok()) {
+        //    DB_WARNING("get for update failed:%s, term:%s, key:%s", s.ToString().c_str(),
+        //              term.c_str(), _iter->key().ToString(true).c_str());
+        //    return -1;
+        // }
+        rocksdb::Slice slice = _iter->value();
         
-        if (!node->ParseFromArray(pin_slice.data(), pin_slice.size())) {
+        if (!node->ParseFromArray(slice.data(), slice.size())) {
             DB_FATAL("parse first level from pb failed");
             return -1;
         }
@@ -163,24 +163,24 @@ int FirstLevelMSIterator<ReverseNode, ReverseList>::internal_next(ReverseNode* n
     return 0;
 }
 
-template<typename ReverseNode, typename ReverseList>
-void FirstLevelMSIterator<ReverseNode, ReverseList>::fill_node(ReverseNode* node) {
+template<typename ReverseList>
+void FirstLevelMSIterator<ReverseList>::fill_node(ReverseNode* node) {
     *node = _curr_node;
     return;
 }
 
-template<typename ReverseNode, typename ReverseList>
-pb::ReverseNodeType FirstLevelMSIterator<ReverseNode, ReverseList>::get_flag() {
+template<typename ReverseList>
+pb::ReverseNodeType FirstLevelMSIterator<ReverseList>::get_flag() {
     return _curr_node.flag();
 }
 
-template<typename ReverseNode, typename ReverseList>
-ReverseNode& FirstLevelMSIterator<ReverseNode, ReverseList>::get_value() {
+template<typename ReverseList>
+ReverseNode& FirstLevelMSIterator<ReverseList>::get_value() {
     return _curr_node;
 }
 
-template<typename ReverseNode, typename ReverseList>
-int SecondLevelMSIterator<ReverseNode, ReverseList>::next(std::string& key, bool& res) {
+template<typename ReverseList>
+int SecondLevelMSIterator<ReverseList>::next(std::string& key, bool& res) {
     while (true) {
         if (!_first) {
             _index++;
@@ -215,25 +215,25 @@ int SecondLevelMSIterator<ReverseNode, ReverseList>::next(std::string& key, bool
     }
 }
 
-template<typename ReverseNode, typename ReverseList>
-void SecondLevelMSIterator<ReverseNode, ReverseList>::fill_node(ReverseNode* node) {
+template<typename ReverseList>
+void SecondLevelMSIterator<ReverseList>::fill_node(ReverseNode* node) {
     *node = _list.reverse_nodes(_index);
     return;
 }
 
-template<typename ReverseNode, typename ReverseList>
-pb::ReverseNodeType SecondLevelMSIterator<ReverseNode, ReverseList>::get_flag() {
+template<typename ReverseList>
+pb::ReverseNodeType SecondLevelMSIterator<ReverseList>::get_flag() {
     return _list.reverse_nodes(_index).flag();
 }
 
-template<typename ReverseNode, typename ReverseList>
-ReverseNode& SecondLevelMSIterator<ReverseNode, ReverseList>::get_value() {
+template<typename ReverseList>
+ReverseNode& SecondLevelMSIterator<ReverseList>::get_value() {
     return *(_list.mutable_reverse_nodes(_index));
 }
 
-template<typename ReverseNode, typename ReverseList>
-int level_merge(MergeSortIterator<ReverseNode, ReverseList>* new_iter,
-                MergeSortIterator<ReverseNode, ReverseList>* old_iter,
+template<typename ReverseList>
+int level_merge(MergeSortIterator<ReverseList>* new_iter,
+                MergeSortIterator<ReverseList>* old_iter,
                 ReverseList& res_list,
                 bool is_del) {
     std::string new_key;
@@ -252,7 +252,7 @@ int level_merge(MergeSortIterator<ReverseNode, ReverseList>* new_iter,
     int result_count = 0;
     while (true) {
         if (new_not_end && old_not_end) {
-            MergeSortIterator<ReverseNode, ReverseList>* choose_iter;
+            MergeSortIterator<ReverseList>* choose_iter;
             int res = new_key.compare(old_key);
             if (res < 0) {
                 choose_iter = new_iter;

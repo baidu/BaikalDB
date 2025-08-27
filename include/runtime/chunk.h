@@ -36,12 +36,21 @@ public:
     }
 
     inline int get_field_pos(int tuple_id, int slot_id) {
-        if (tuple_id < 0 || tuple_id >= _tuple_offsets.size()) {
+        if (tuple_id < 0 || tuple_id >= _tuple_offsets.size() || tuple_id >= _slot_idxes_mapping.size()) {
             return -1;
         }
-        return _tuple_offsets[tuple_id] + slot_id - 1;
+        const auto& slot_idxes = _slot_idxes_mapping[tuple_id];
+        if (slot_idxes.empty()) {
+            return _tuple_offsets[tuple_id] + slot_id - 1;
+        }
+        if (slot_id - 1 < 0 || slot_id - 1 >= slot_idxes.size()) {
+            return -1;
+        }
+        return _tuple_offsets[tuple_id] + slot_idxes[slot_id - 1];
     }
-
+    bool has_init() {
+        return _init;
+    }
     void reserve(int row_size) {
         for (auto& builder : _builders) {
             builder->Reserve(row_size);
@@ -59,6 +68,8 @@ public:
     int64_t used_bytes_size() {
         return _size_per_row * _row_length + _string_value_size;
     }
+    
+    bool exceed_max_size();
 
     int append_value(const int tuple_id, const int slot_id, const ExprValue& value) {
         return append_value(get_field_pos(tuple_id, slot_id), value);
@@ -137,9 +148,11 @@ private:
     std::vector<std::shared_ptr<arrow::Field>> _fields;
     std::vector<std::shared_ptr<arrow::ArrayBuilder>> _builders;
     std::vector<int> _tuple_offsets;
+    std::vector<std::vector<int32_t>> _slot_idxes_mapping;
     std::vector<FieldDescriptorProto::Type> _field_types;
     std::vector<ExprValue> _tmp_row_values;
     std::shared_ptr<arrow::Schema> _schema;
+    bool _init = false;
 };
 }
 

@@ -38,6 +38,12 @@ struct ExprValueComparator {
 };
 using ExprValueUniqSet = std::unordered_set<ExprValue, ExprValueHashHasher, ExprValueComparator>;
 
+struct AvgIntermediate {
+    double sum;
+    int64_t count;
+    AvgIntermediate() : sum(0.0), count(0) {
+    }
+};
    
 class AggFnCall : public ExprNode {
 public:
@@ -177,6 +183,23 @@ public:
     bool is_multi_distinct_agg() const {
         return _agg_type == MULTI_COUNT_DISTINCT;
     }
+    void get_count_likes_columns(std::unordered_set<std::string>& count_like_columns) {
+        if (_agg_type == COUNT || _agg_type == COUNT_STAR || _agg_type == MULTI_COUNT_DISTINCT) {
+            count_like_columns.insert(std::to_string(_tuple_id) + "_" + std::to_string(_final_slot_id));
+        }
+    }
+    bool is_distinct() const {
+        return _is_distinct;
+    }
+    bool is_multi_distinct() const {
+        return _is_multi_distinct;
+    }
+    int32_t intermediate_slot_id() const {
+        return _intermediate_slot_id;
+    }
+    int32_t final_slot_id() const {
+        return _final_slot_id;
+    }
     const std::string& agg_func_name() const {
         return _fn.name();
     }
@@ -190,12 +213,23 @@ public:
         _arrow_expr = arrow::compute::field_ref(std::to_string(_tuple_id) + "_" + std::to_string(_final_slot_id));
         return 0;
     }
-    int transfer_to_arrow_agg_function(std::vector<arrow::compute::Aggregate>& aggs, bool has_group_by, bool is_merge, 
-                                       std::vector<arrow::compute::Expression>& generate_projection_exprs,
-                                       std::vector<std::string>& generate_projection_exprs_names);
+    int build_agg_argument(int i, 
+                bool need_cast_string_to_double, 
+                std::vector<arrow::FieldRef>& args,
+                std::vector<arrow::compute::Expression>& generate_projection_exprs,
+                std::vector<std::string>& generate_projection_exprs_names);
+    int transfer_to_arrow_avg(std::vector<arrow::compute::Aggregate>& aggs, 
+                bool is_merge, 
+                std::vector<arrow::compute::Expression>& generate_projection_exprs,
+                std::vector<std::string>& generate_projection_exprs_names);
+    int transfer_to_arrow_agg_function(std::vector<arrow::compute::Aggregate>& aggs, 
+                bool is_merge, 
+                std::vector<arrow::compute::Expression>& generate_projection_exprs,
+                std::vector<std::string>& generate_projection_exprs_names);
     void add_agg_projection_slot_ref(bool is_merge, 
-                                    std::vector<arrow::compute::Expression>& generate_projection_exprs,
-                                    std::vector<std::string>& generate_projection_exprs_names);
+                std::vector<arrow::compute::Expression>& generate_projection_exprs,
+                std::vector<std::string>& generate_projection_exprs_names);
+
     bool can_use_arrow_vector();
 
     int multi_distinct_serialize(ExprValue& value, const std::string& key);
@@ -213,6 +247,7 @@ public:
                                         char* end, 
                                         ExprValueUniqSet& set, 
                                         const pb::PrimitiveType& col_type);
+    int build_arrow_schema(bool is_merge, std::set<ColumnInfo>& column_schema, bool ignore_multi_count);
 private:
     struct InterVal {
         bool is_assign = false;
@@ -223,6 +258,7 @@ private:
     int32_t _intermediate_slot_id;
     int32_t _final_slot_id;
     bool _is_distinct = false;
+    bool _is_multi_distinct = false;
     bool _is_merge = false;
     std::map<std::string, InterVal> _intermediate_val_map;
     std::map<std::string, ExprValueUniqSet> _multi_distinct_intermediate_val_map;

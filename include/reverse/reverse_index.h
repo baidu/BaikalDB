@@ -14,8 +14,6 @@
 
 #pragma once
 #include "reverse_common.h"
-#include "rocksdb/utilities/transaction.h"
-#include "key_encoder.h"
 #include "table_record.h"
 #include "rocks_wrapper.h"
 #include "transaction.h"
@@ -27,6 +25,7 @@
 #include "proto/store.interface.pb.h"
 
 namespace baikaldb {
+using ReverseNode = pb::CommonReverseNode;
 
 class ReverseIndexBase {
 public:
@@ -86,14 +85,18 @@ public:
     void add_write_count() {
         ++_write_count;
     }
+
+    virtual std::string get_query_words() = 0;
+    virtual BooleanExecutorBase* get_executor() = 0;
+
 protected:
     std::atomic<int64_t> _write_count {1};  //重启，分裂后可以merge一次
 };
 
-template<typename ReverseNode, typename ReverseList>
+template<typename ReverseList>
 class SchemaBase {
 public:
-    using PrimaryIdT = typename ReverseTrait<ReverseList>::PrimaryType;
+    using PrimaryIdT = typename ReverseTrait<ReverseList>::PrimaryType; // string
     using PostingNodeT = ReverseNode;
     SchemaBase() {
     }
@@ -105,9 +108,7 @@ public:
         _conjuncts = conjuncts;
         _is_fast = is_fast;
     }
-    static int compare_id_func(const PrimaryIdT& id1, const PrimaryIdT& id2) {
-        return id1.compare(id2);
-    }
+
     // term filter，not return the node when true;
     static bool filter(const ReverseNode& node, BoolArg* arg) {
         return false;
@@ -140,7 +141,7 @@ public:
     KeyRange key_range() {
         return _key_range;
     }
-    BooleanExecutorBase<PostingNodeT>*& exe() {
+    BooleanExecutorBase*& exe() {
         return _exe;
     }
     ReverseSearchStatistic& statistic() {
@@ -161,7 +162,7 @@ public:
 
 protected:
     int32_t _idx = 0;
-    BooleanExecutorBase<PostingNodeT>* _exe = NULL;
+    BooleanExecutorBase* _exe = NULL;
     const ReverseNode* _cur_node = NULL;
     ReverseIndexBase *_reverse;
     myrocksdb::Transaction *_txn;//读取时用的transaction，由调用者释放
@@ -176,7 +177,6 @@ protected:
 template <typename Schema> 
 class ReverseIndex : public ReverseIndexBase {
 public:
-    typedef typename Schema::ReverseNode ReverseNode;
     typedef typename Schema::ReverseList ReverseList;
     using ReverseListSptr = typename Schema::ReverseListSptr;
     ReverseIndex(
@@ -294,7 +294,7 @@ public:
         _name_field_id_map[name] = field_id;
     }
     
-    BooleanExecutorBase<typename Schema::PostingNodeT>* get_executor() {
+    BooleanExecutorBase* get_executor() {
         auto schema_info = bthread_local_schema();
         if (schema_info == nullptr) {
             return nullptr;
@@ -303,7 +303,7 @@ public:
         schema_info->schema->exe() = nullptr;
         return exe_ptr;
     }
-    std::string get_query_words() {
+    std::string get_query_words() override {
         auto schema_info = bthread_local_schema();
         if (schema_info == nullptr) {
             return "";
@@ -424,11 +424,8 @@ private:
 };
 
 //多个倒排索引间做or操作，只读
-template<typename Schema>
 class MutilReverseIndex {
 public:
-    typedef typename Schema::ReverseNode ReverseNode;
-    typedef typename Schema::ReverseList ReverseList;
     ~MutilReverseIndex() {
         delete _exe;
         for (auto& index : _reverse_indexes) {
@@ -439,7 +436,7 @@ public:
             myrocksdb::Transaction* txn,
             SmartIndex& index_info,
             SmartTable& table_info,
-            const std::vector<ReverseIndex<Schema>*>& reverse_indexes,
+            const std::vector<ReverseIndexBase*>& reverse_indexes,
             const std::vector<std::string>& search_datas,
             const std::vector<pb::MatchMode>& modes,
             bool is_fast, bool bool_or); 
@@ -451,9 +448,9 @@ public:
             std::map<int64_t, ReverseIndexBase*>& reverse_index_map,
             bool is_fast, const pb::FulltextIndex& fulltext_index_info);
 
-    int init_operator_executor(const pb::FulltextIndex& fulltext_index_info, OperatorBooleanExecutor<Schema>*& exe);
+    int init_operator_executor(const pb::FulltextIndex& fulltext_index_info, OperatorBooleanExecutor*& exe);
 
-    int init_term_executor(const pb::FulltextIndex& fulltext_index_info, BooleanExecutor<Schema>*& exe);
+    int init_term_executor(const pb::FulltextIndex& fulltext_index_info, BooleanExecutor*& exe);
 
     bool valid() {
         if (_exe != NULL) {
@@ -515,12 +512,12 @@ public:
         return 0;
     }
 private:
-    OperatorBooleanExecutor<Schema>* _exe = nullptr;
+    OperatorBooleanExecutor* _exe = nullptr;
     const ReverseNode* _cur_node = NULL;
     SmartIndex _index_info;
     SmartTable _table_info;
-    std::vector<BooleanExecutorBase<typename Schema::PostingNodeT>*> _son_exe_vec;
-    std::vector<ReverseIndex<Schema>*> _reverse_indexes;
+    std::vector<BooleanExecutorBase*> _son_exe_vec;
+    std::vector<ReverseIndexBase*> _reverse_indexes;
     size_t _son_exe_vec_idx = 0;
     FieldInfo* _weight_field = nullptr;
     FieldInfo* _query_words_field = nullptr;
@@ -528,7 +525,7 @@ private:
     std::map<int64_t, ReverseIndexBase*> _reverse_index_map;
     bool _is_fast = false;
     myrocksdb::Transaction* _txn = nullptr;
-    bool_executor_type _type = ReverseTrait<ReverseList>::executor_type;
+    bool_executor_type _type = NODE_COPY;
 };
 } // end of namespace
 

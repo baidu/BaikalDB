@@ -165,7 +165,6 @@ REFERENCES { return REFERENCES; }
 REGEXP { return REGEXP; }
 RENAME { return RENAME; }
 REPLACE { return REPLACE; }
-MERGE { return MERGE; }
 RESTRICT { return RESTRICT; }
 REVOKE { return REVOKE; }
 RIGHT { return RIGHT; }
@@ -395,6 +394,25 @@ BITMAP { un_reserved_keyword(yylval, yyscanner, parser); return BITMAP; }
 TDIGEST { un_reserved_keyword(yylval, yyscanner, parser); return TDIGEST; }
 LEARNER { un_reserved_keyword(yylval, yyscanner, parser); return LEARNER; }
 ROLLUP { un_reserved_keyword(yylval, yyscanner, parser); return ROLLUP; }
+ROW_NUMBER { un_reserved_keyword(yylval, yyscanner, parser); return ROW_NUMBER; }
+RANK { un_reserved_keyword(yylval, yyscanner, parser); return RANK; }
+DENSE_RANK { un_reserved_keyword(yylval, yyscanner, parser); return DENSE_RANK; }
+PERCENT_RANK { un_reserved_keyword(yylval, yyscanner, parser); return PERCENT_RANK; }
+CUME_DIST { un_reserved_keyword(yylval, yyscanner, parser); return CUME_DIST; }
+NTILE { un_reserved_keyword(yylval, yyscanner, parser); return NTILE; }
+LEAD { un_reserved_keyword(yylval, yyscanner, parser); return LEAD; }
+LAG { un_reserved_keyword(yylval, yyscanner, parser); return LAG; }
+FIRST_VALUE { un_reserved_keyword(yylval, yyscanner, parser); return FIRST_VALUE; }
+LAST_VALUE { un_reserved_keyword(yylval, yyscanner, parser); return LAST_VALUE; }
+NTH_VALUE { un_reserved_keyword(yylval, yyscanner, parser); return NTH_VALUE; }
+OVER { un_reserved_keyword(yylval, yyscanner, parser); return OVER; }
+ROWS { un_reserved_keyword(yylval, yyscanner, parser); return ROWS; }
+UNBOUNDED { un_reserved_keyword(yylval, yyscanner, parser); return UNBOUNDED; }
+PRECEDING { un_reserved_keyword(yylval, yyscanner, parser); return PRECEDING; }
+FOLLOWING { un_reserved_keyword(yylval, yyscanner, parser); return FOLLOWING; }
+CURRENT { un_reserved_keyword(yylval, yyscanner, parser); return CURRENT; }
+RESPECT { un_reserved_keyword(yylval, yyscanner, parser); return RESPECT; }
+NULLS { un_reserved_keyword(yylval, yyscanner, parser); return NULLS; }
 
 ADDDATE { un_reserved_keyword(yylval, yyscanner, parser); return ADDDATE; /* The following tokens belong to builtin functions. */}
 BIT_AND { un_reserved_keyword(yylval, yyscanner, parser); return BIT_AND; }
@@ -468,25 +486,25 @@ VAR_SAMP { un_reserved_keyword(yylval, yyscanner, parser); return VAR_SAMP; }
 
 0[b][0-1]+ {
     // bit
-    yylval->expr = LiteralExpr::make_bit(yytext + 2, strlen(yytext) - 2, parser->arena);
+    yylval->expr = LiteralExpr::make_bit(yytext, yytext + 2, strlen(yytext) - 2, parser->arena);
     return STRING_LIT;
 }
 
 [bB]\'[0-1]*\' {
     // bit
-    yylval->expr = LiteralExpr::make_bit(yytext + 2, strlen(yytext) - 3, parser->arena);
+    yylval->expr = LiteralExpr::make_bit(yytext, yytext + 2, strlen(yytext) - 3, parser->arena);
     return STRING_LIT;
 }
 
 0[x][0-9a-fA-F]+ {
     // hex
-    yylval->expr = LiteralExpr::make_hex(yytext + 2, strlen(yytext) - 2, parser->arena);
+    yylval->expr = LiteralExpr::make_hex(yytext, yytext + 2, strlen(yytext) - 2, parser->arena);
     return STRING_LIT;
 }
 
 [xX]\'[0-9a-fA-F]*\' {
     // hex
-    yylval->expr = LiteralExpr::make_hex(yytext + 2, strlen(yytext) - 3, parser->arena);
+    yylval->expr = LiteralExpr::make_hex(yytext, yytext + 2, strlen(yytext) - 3, parser->arena);
     return STRING_LIT;
 }
 

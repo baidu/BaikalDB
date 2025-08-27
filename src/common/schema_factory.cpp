@@ -14,6 +14,10 @@
 
 #include "schema_factory.h"
 #include <unordered_set>
+#include <algorithm>
+#include <cstdlib>
+#include <ctime>
+#include <chrono>
 #include <boost/algorithm/string.hpp>
 #include <gflags/gflags.h>
 #include "table_key.h"
@@ -27,7 +31,12 @@
 using google::protobuf::FileDescriptor;
 namespace baikaldb {
 DEFINE_bool(need_health_check, true, "need_health_check");
+DECLARE_int32(baikal_faulty_interval_times);
+DECLARE_int32(baikal_heartbeat_interval_us);
 DECLARE_string(meta_server_bns);
+DECLARE_int32(baikal_port);
+DECLARE_int64(mpp_min_statistics_rows);
+DECLARE_int64(mpp_min_statistics_bytes);
 BthreadLocal<bool> SchemaFactory::use_backup;
 int SchemaFactory::init(bool is_db, bool is_backup) {
     if (_is_inited) {
@@ -44,7 +53,42 @@ int SchemaFactory::init(bool is_db, bool is_backup) {
     if (is_db && !is_backup) {
         update_meta_map(FLAGS_meta_server_bns);
     }
+    butil::EndPoint addr;
+    addr.ip = butil::my_ip();
+    addr.port = FLAGS_db_port;
+    _my_address = butil::endpoint2str(addr).c_str();
     _is_inited = true;
+    return 0;
+}
+
+int SchemaFactory::rolling_pick_db(int num, std::vector<std::string>& addresses) {
+    DoublBufferedDBAddresses::ScopedPtr scoped_ptr;
+    if (_doubly_valiable_addresses.Read(&scoped_ptr) != 0) {
+        DB_WARNING("read _doubly_valiable_addresses error.");
+        return -1;
+    }
+
+    const auto& valiable_addresses = scoped_ptr->addresses;
+    if (valiable_addresses.empty()) {
+        DB_FATAL("no valiable addresses");
+        return -1;
+    }
+    addresses.clear();
+    size_t size = valiable_addresses.size();
+    if (size == 1 && valiable_addresses[0] == _my_address) {
+        DB_FATAL("no valiable addresses");
+        return -1;
+    }
+    srand(time(0));  // 使用当前时间作为种子
+    int next_db_idx = rand() % valiable_addresses.size();
+    for (int i = 0 ; i < num;) {
+        next_db_idx = (next_db_idx + 1) % valiable_addresses.size();
+        if (valiable_addresses[next_db_idx] == _my_address) {
+            continue;
+        }
+        addresses.emplace_back(valiable_addresses[next_db_idx]);
+        ++i;
+    }
     return 0;
 }
 
@@ -105,6 +149,7 @@ int SchemaFactory::update_instance_internal(IdcMapping& idc_mapping, const std::
     // }
     pb::Status old_s = idc_mapping.instance_info_mapping[addr].status;
     if (old_s == s) {
+        idc_mapping.instance_info_mapping[addr].normal_count = 0;
         return 0;
     }
     if (s == pb::NORMAL) {
@@ -203,6 +248,7 @@ int SchemaFactory::update_idc_internal(IdcMapping& idc_mapping, const pb::IdcInf
         }
         tmp_map[address].logical_room = iter->second;
         tmp_map[address].resource_tag = instance.resource_tag();
+        tmp_map[address].meta_id = meta_id;
         idc_mapping.instance_info_mapping[address] = tmp_map[address];
         idc_mapping.meta_store_mapping[meta_id].emplace(address);
     }
@@ -273,6 +319,69 @@ void SchemaFactory::update_schema_conf(const std::string& table_name,
                                        const pb::SchemaConf &schema_conf, 
                                        pb::SchemaConf& mem_conf) {
     update_schema_conf_common(table_name, schema_conf, &mem_conf);
+}
+
+void SchemaFactory::update_valiable_addresses(const std::vector<pb::BaikalStatus>& baikal_status_vec) {
+    std::function<int(BaikalAddresses&, const std::vector<pb::BaikalStatus>&)> update_func = 
+        std::bind(&SchemaFactory::update_valiable_addresses_internal, this, std::placeholders::_1, std::placeholders::_2);
+    _doubly_valiable_addresses.Modify(update_func, baikal_status_vec);
+}
+
+void SchemaFactory::set_db_unavailable(const std::string& db_address) {
+    DB_WARNING("set db_address: %s unavailable", db_address.c_str());
+    std::vector<pb::BaikalStatus> baikal_status_vec;
+    pb::BaikalStatus faulty_db;
+    faulty_db.set_address(db_address);
+    faulty_db.set_status(pb::FAULTY);
+    baikal_status_vec.emplace_back(faulty_db);
+    std::function<int(BaikalAddresses&, const std::vector<pb::BaikalStatus>&)> update_func = 
+        std::bind(&SchemaFactory::update_valiable_addresses_internal, this, std::placeholders::_1, std::placeholders::_2);
+    _doubly_valiable_addresses.Modify(update_func, baikal_status_vec);
+}
+
+int SchemaFactory::update_valiable_addresses_internal(BaikalAddresses& db_addresses, const std::vector<pb::BaikalStatus>& baikal_status_vec) {
+    std::vector<std::string>& addresses = db_addresses.addresses;
+    std::unordered_map<std::string, int64_t>& update_timestamp_map = db_addresses.last_update_timestamp;
+    int ret = 0;
+    // meta没有给出明确状态信息的机器暂不处理
+    // meta的leader宕机后新leader短时间可能没有完整baikal instance状态信息
+    for (const auto& it: baikal_status_vec) {
+        // 删除返回状态为FAULTY的baikal实例，其余更新last_updated_timestamp
+        if (it.status() == pb::FAULTY) {
+            if (0 != update_timestamp_map.count(it.address())){
+                update_timestamp_map.erase(it.address());
+                auto address_iter_to_remove = std::find(addresses.begin(), addresses.end(), it.address());
+                if (address_iter_to_remove != addresses.end()) {
+                    addresses.erase(address_iter_to_remove);
+                }
+            }
+            ret = 1;
+        } else if (it.status() == pb::NORMAL && it.has_last_heartbeat_timestamp()) {
+            if (0 == update_timestamp_map.count(it.address())){
+                addresses.emplace_back(it.address());
+            }
+            update_timestamp_map[it.address()] = it.last_heartbeat_timestamp();
+            ret = 1;
+        }
+    }
+
+    // 处理没有任何返回信息但是在 _valiable_addresses 已经存在的实例，超时没更新则删除
+    for (auto it = update_timestamp_map.begin(); it != update_timestamp_map.end(); ) {
+        // 
+        if (butil::gettimeofday_us() - it->second > 
+                    FLAGS_baikal_heartbeat_interval_us * FLAGS_baikal_faulty_interval_times) {
+            auto address_iter_to_remove = std::find(addresses.begin(), addresses.end(), it->first);
+            if (address_iter_to_remove != addresses.end()) {
+                addresses.erase(address_iter_to_remove);
+            }
+            it = update_timestamp_map.erase(it);
+            ret = 1;
+        } else {
+            ++it;
+        }
+    }
+    // 正常情况始终需要更新
+    return ret;
 }
 
 void SchemaFactory::update_meta_map(const std::string& meta_name) {
@@ -575,7 +684,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         //FieldDescriptorProto::Type proto_type;
         int proto_type = primitive_to_proto_type(field.mysql_type());
         if (proto_type == -1) {
-            DB_FATAL("mysql_type %d not supported.", field.mysql_type());
+            DB_FATAL("field_name: %s, mysql_type %d not supported.", field.field_name().c_str(), field.mysql_type());
             return -1;
         }
         field_proto->set_type((FieldDescriptorProto::Type)proto_type);
@@ -721,16 +830,18 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
 
     if (table.engine() == pb::DBLINK) {
         tbl_info.dblink_info = table.dblink_info();
-        const std::string& meta_name = tbl_info.dblink_info.meta_name();
-        int64_t meta_id = -1;
-        if (get_meta_id(meta_name, meta_id) != 0) {
-            update_meta_map(meta_name);
+        if (table.dblink_info().type() == pb::LT_BAIKALDB) {
+            const std::string& meta_name = tbl_info.dblink_info.meta_name();
+            int64_t meta_id = -1;
             if (get_meta_id(meta_name, meta_id) != 0) {
-                DB_FATAL("Fail to get_meta_id, meta_name:%s", meta_name.c_str());
-                return -1;
+                update_meta_map(meta_name);
+                if (get_meta_id(meta_name, meta_id) != 0) {
+                    DB_FATAL("Fail to get_meta_id, meta_name:%s", meta_name.c_str());
+                    return -1;
+                }
             }
+            tbl_info.dblink_info.set_meta_id(meta_id);
         }
-        tbl_info.dblink_info.set_meta_id(meta_id);
     }
 
     if (pb_need_update) {
@@ -794,7 +905,10 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         int64_t index_id = cur.index_id();
         DB_WARNING("schema_factory_update_index: %ld", index_id);
         last_indics.erase(index_id);
-        update_index(tbl_info, cur, pk_index, background);
+        int ret = update_index(tbl_info, cur, pk_index, background);
+        if (ret < 0) {
+            continue;
+        }
         if (cur.index_type() == pb::I_PRIMARY
                 || cur.is_global() == true) {
             if (cur.is_global() && cur.state() != pb::IS_NONE && cur.hint_status() != pb::IHS_VIRTUAL) {
@@ -864,7 +978,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
 }
 
 //TODO, string index type
-void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& index, 
+int SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& index, 
         const pb::IndexInfo* pk_index, SchemaMapping& background) {
 
     DB_NOTICE("double_buffer_write index_info [%s]", index.ShortDebugString().c_str());
@@ -965,7 +1079,7 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
         if (info == nullptr) {
             DB_FATAL("table %ld index %ld field %d not exist", 
                     table_info.id, idx_info.id, index.field_ids(idx));
-            return;
+            return -1;
         }
         idx_info.fields.push_back(*info);
 
@@ -980,7 +1094,8 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
         } else if (idx_info.length != -1) {
             idx_info.length += info->size;
         }
-        if (idx_info.type == pb::I_FULLTEXT) {
+        if (idx_info.type == pb::I_FULLTEXT && idx_info.state == pb::IS_PUBLIC &&
+            idx_info.index_hint_status == pb::IHS_NORMAL) {
             DB_NOTICE("table %ld:%s index %ld insert reverse field %d, type:%s", 
                     table_info.id, table_info.name.c_str(), idx_info.id, info->id,
                     StorageType_Name(idx_info.storage_type).c_str());
@@ -988,6 +1103,12 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
                 table_info.reverse_fields[info->id] = idx_info.id;
             } else {
                 table_info.arrow_reverse_fields[info->id] = idx_info.id;
+            }
+        }
+        if (idx_info.type == pb::I_VECTOR) {
+            // userid前缀向量索引，第一个字段不需要放到vector_fields中
+            if (idx == field_cnt - 1) {
+                table_info.vector_fields.insert(info->id);
             }
         }
     }
@@ -1009,7 +1130,7 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
             if (info == nullptr) {
             DB_FATAL("table %ld index %ld pk field %d not exist", 
                     table_info.id, idx_info.id, field_id);
-                return ;
+                return -1 ;
             }
             if (info->size == -1) {
                 pk_length = -1;
@@ -1066,6 +1187,7 @@ void SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& ind
     fullname = table_info.namespace_ + "."  + idx_info.name;
     DB_WARNING("index full name:%s, %ld, %d", fullname.c_str(), idx_info.id, idx_info.overlap);
     index_name_id_mapping[fullname] = idx_info.id;
+    return 0;
 }
 
 void SchemaFactory::update_regions(
@@ -1403,7 +1525,7 @@ void SchemaFactory::update_user(const pb::UserPrivilege& user) {
                 last_auth_ip_set = iter->second->auth_ip_set;
             }
             if (user.has_use_read_index()) {
-                iter->second->use_read_index = user.use_read_index();
+                iter->second->use_read_index_opt = user.use_read_index();
             }
             if (user.has_enable_plan_cache()) {
                 iter->second->enable_plan_cache = user.enable_plan_cache();
@@ -1430,7 +1552,7 @@ void SchemaFactory::update_user(const pb::UserPrivilege& user) {
         user_info->ddl_permission = user.ddl_permission();
     }
     if (user.has_use_read_index()) {
-        user_info->use_read_index = user.use_read_index();
+        user_info->use_read_index_opt = user.use_read_index();
     }
     if (user.has_enable_plan_cache()) {
         user_info->enable_plan_cache = user.enable_plan_cache();
@@ -1689,6 +1811,25 @@ double SchemaFactory::get_histogram_ratio(int64_t table_id, int field_id, const 
         return iter->second->get_histogram_ratio(field_id, lower, upper);
     }
 
+    return 1.0;
+}
+
+double SchemaFactory::get_eq_field_ratio(int64_t table_id, int field_id, const ExprValue& value) {
+    DoubleBufferedTable::ScopedPtr table_ptr;
+    if (_double_buffer_table.Read(&table_ptr) != 0) {
+        DB_WARNING("read double_buffer_table error.");
+        return 1.0; 
+    }
+
+    auto& table_statistics_mapping = table_ptr->table_statistics_mapping;
+    auto iter = table_statistics_mapping.find(table_id);
+    if (iter != table_statistics_mapping.end()) {
+        if (iter->second->is_cms_exist()) {
+            return iter->second->get_cmsketch_ratio(field_id, value);
+        } else {
+            return iter->second->get_hll_ratio(field_id);
+        }
+    }
     return 1.0;
 }
 
@@ -1975,6 +2116,54 @@ std::shared_ptr<SqlStatistics> SchemaFactory::create_sql_stat(int64_t sign) {
     _double_buffer_sql_stat.Modify(call_func, info);
     auto sql_info_update = get_sql_stat(sign);
     return sql_info_update;
+}
+
+int SchemaFactory::get_mpp_signs_stat(std::vector<uint64_t>& signs, 
+                                      std::vector<int64_t>& rows99, 
+                                      std::vector<int64_t>& bytes99, 
+                                      std::vector<int64_t>& cnt,
+                                      std::vector<int64_t>& last_query_time) {
+    DoubleBufferedSql::ScopedPtr ptr;
+    if (_double_buffer_sql_stat.Read(&ptr) != 0) {
+        DB_WARNING("read _double_buffer_sql_staterror.");
+        return -1; 
+    }
+    for (auto& [sign, sql_info_ptr] : *ptr) {
+        int64_t db_handle_rows = 0;
+        int64_t db_handle_bytes = 0;
+        int64_t sql_cnt = 0;
+        if (sql_info_ptr == nullptr) {
+            continue;
+        }
+        sql_info_ptr->get_db_handle_stats(db_handle_rows, db_handle_bytes, sql_cnt);
+        if (db_handle_rows > FLAGS_mpp_min_statistics_rows
+            || db_handle_bytes > FLAGS_mpp_min_statistics_bytes) {
+            signs.emplace_back(sign);
+            rows99.emplace_back(db_handle_rows);
+            bytes99.emplace_back(db_handle_bytes);
+            cnt.emplace_back(sql_cnt);
+            last_query_time.emplace_back(sql_info_ptr->last_query_time);
+        }
+    }
+    return 0;
+}
+
+void SchemaFactory::add_mpp_signs_stats(std::vector<uint64_t>& signs, 
+                                       std::vector<int64_t>& rows99, 
+                                       std::vector<int64_t>& bytes99) {
+    auto call_func = [&signs, &rows99, &bytes99](SqlStatMap& mapping) {
+        for (size_t idx = 0; idx < signs.size(); ++idx) {
+            if (mapping.count(signs[idx]) == 0) {
+                std::shared_ptr<SqlStatistics> info(new (std::nothrow)SqlStatistics);
+                info->db_handle_bytes_99 = bytes99[idx];
+                info->db_handle_rows_99 = rows99[idx];
+                mapping[signs[idx]] = info;
+            }
+        }
+        return 1;
+    };
+    _double_buffer_sql_stat.Modify(call_func);
+    return;
 }
 
 std::vector<std::string> SchemaFactory::get_db_list(const std::shared_ptr<UserInfo>& user_info) {
@@ -2310,7 +2499,8 @@ void SchemaFactory::get_schema_conf_open(const std::string& conf_name, std::vect
         if (!has_field) {
             continue;
         }
-        if (conf_name == "pk_prefix_balance" || conf_name == "tail_split_num" || conf_name == "tail_split_step" || conf_name == "binlog_backup_days") {
+        if (conf_name == "pk_prefix_balance" || conf_name == "tail_split_num" || conf_name == "tail_split_step" || conf_name == "binlog_backup_days"
+            || conf_name == "olap_pre_split_cnt") {
             auto value = reflection->GetInt32(pb_conf, field);
             database_table.emplace_back(table.second->namespace_ + "." + table.second->name + "." + std::to_string(value));
         } else if (conf_name == "backup_table") {
@@ -2399,10 +2589,20 @@ void SchemaFactory::get_table_by_filter(std::vector<std::string>& database_table
                 learner_tags.pop_back();
             }
             if (table.second->engine == pb::DBLINK) {
-                dblink_info = table.second->dblink_info.meta_name() + "/" +
+                if (table.second->dblink_info.type() == pb::LT_BAIKALDB) {
+                    dblink_info = table.second->dblink_info.meta_name() + "/" +
                                     table.second->dblink_info.namespace_name() + "." +
                                     table.second->dblink_info.database_name() + "." +
                                     table.second->dblink_info.table_name();
+                } else if (table.second->dblink_info.type() == pb::LT_MYSQL) {
+                    dblink_info = table.second->dblink_info.mysql_info().addr() + "/" +
+                                  table.second->dblink_info.mysql_info().database_name() + "." +
+                                  table.second->dblink_info.mysql_info().table_name();
+                } else {
+                    DB_WARNING("Invalid dblink type: %d, table: %s", 
+                                table.second->dblink_info.type(), table.second->name.c_str());
+                    continue;
+                }
             }
             auto iter = table.second->binlog_ids.begin();
             while (iter != table.second->binlog_ids.end()) {
@@ -2683,7 +2883,7 @@ int SchemaFactory::get_all_region_by_table_id(int64_t table_id,
     }
     return 0;
 }
-int SchemaFactory::get_all_partition_regions(int64_t table_id, 
+int SchemaFactory::get_all_partition_regions(int64_t table_id,
         std::map<int64_t, pb::RegionInfo>* region_infos) {
     DoubleBufferedTableRegionInfo::ScopedPtr table_region_mapping_ptr;
     if (_table_region_mapping.Read(&table_region_mapping_ptr) != 0) {
@@ -2708,6 +2908,35 @@ int SchemaFactory::get_all_partition_regions(int64_t table_id,
     return 0;
 }
 
+int SchemaFactory::get_partition_regions(int64_t table_id, const std::vector<int64_t>& partition_ids,  
+                                    std::map<int64_t, pb::RegionInfo>& region_infos) {
+    region_infos.clear();
+    DoubleBufferedTableRegionInfo::ScopedPtr table_region_mapping_ptr;
+    if (_table_region_mapping.Read(&table_region_mapping_ptr) != 0) {
+        DB_WARNING("DoubleBufferedTableRegion read scoped ptr error."); 
+        return -1; 
+    }
+
+    auto it = table_region_mapping_ptr->find(table_id);
+    if (it == table_region_mapping_ptr->end()) {
+        DB_WARNING("index id[%ld] not in table_region_mapping", table_id);
+        return -1;
+    }
+    auto frontground = it->second;
+    auto& key_region_mapping = frontground->key_region_mapping;
+    for (auto partition : partition_ids) {
+        auto iter = key_region_mapping.find(partition);
+        if (iter == key_region_mapping.end()) {
+            return -1;
+        }
+        for (const auto& pair : iter->second) {
+            int64_t region_id = pair.second;
+            frontground->get_region_info(region_id, region_infos[region_id]);
+        }
+    }
+    
+    return 0;
+}
 // 检测table下region范围是否连续没有空洞
 int SchemaFactory::check_region_ranges_consecutive(int64_t table_id) {
     DoubleBufferedTableRegionInfo::ScopedPtr table_region_mapping_ptr;

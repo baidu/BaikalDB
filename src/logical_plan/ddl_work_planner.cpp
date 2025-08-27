@@ -194,7 +194,7 @@ std::unique_ptr<ScanNode> DDLWorkPlanner::create_scan_node() {
     int ret = 0;
     // 设置 limit
     _ctx->plan.mutable_nodes(0)->set_limit(_limit);
-    std::unique_ptr<ScanNode> scan_node(ScanNode::create_scan_node(_ctx->plan.nodes(0))); 
+    std::unique_ptr<ScanNode> scan_node(ScanNode::create_scan_node(_ctx->plan.nodes(0), CreateExecOptions())); 
     if (scan_node == nullptr) {
         return scan_node;
     }

@@ -25,6 +25,9 @@
 #include <cctype>
 #include <cmath>
 #include <algorithm>
+#include <re2/re2.h>
+#include <boost/algorithm/string.hpp>
+#include <boost/regex.hpp>
 
 namespace baikaldb {
 #ifdef BAIKALDB_REVISION
@@ -1085,6 +1088,178 @@ ExprValue json_valid(const std::vector<ExprValue>& input) {
     return ExprValue::True();
 }
 
+// 返回找到了第几个，如果找到了第n个还会把对应位置替换
+int64_t ReplaceNthMatch(std::string& text, const re2::RE2& pattern, const std::string& rewrite, int64_t n) {
+    re2::StringPiece input(text);  // Wrap the text in a StringPiece
+    std::string output;
+    std::string match;
+    int count = 0;
+
+    size_t pos_ahead = 0;
+    // ^ 或者$ 这种， 防止FindAndConsume 死循环
+    bool special_pattern = false;
+
+    while (count < n - 1 && RE2::FindAndConsume(&input, pattern)) {
+        count++;
+        pos_ahead = text.size() - input.size();
+        if (pos_ahead == 0 || pos_ahead == text.size()) {
+            special_pattern = true;
+            break;
+        }
+    }
+
+    if (!special_pattern && count == n - 1) {
+        std::string to_replace(input.data(), input.size());
+        if (RE2::Replace(&to_replace, pattern, rewrite)) {
+            text = text.substr(0, pos_ahead) + to_replace;
+            return n;
+        }
+    }
+
+    return count;
+}
+
+// https://dev.mysql.com/doc/refman/8.0/en/regexp.html#function_regexp-replace
+// 第六个参数 match_type是个字符串
+// c: Case-sensitive matching.
+// i: Case-insensitive matching.
+// m: Multiple-line mode. Recognize line terminators within the string. The default behavior is to match line terminators only at the start and end of the string expression.
+// n: The . character matches line terminators. The default is for . matching to stop at the end of a line.
+// u（不支持）: Unix-only line endings. Only the newline character is recognized as a line ending by the ., ^, and $ match operators.
+ExprValue regexp_replace(const std::vector<ExprValue>& input) {
+
+    int64_t pos = 1;
+    int64_t occurrence = 0;
+    bool is_case_sensitive = true;
+    bool is_multi_line_mode = false;
+    bool dot_match_newline = false;
+
+    switch (input.size()) {
+        case 6:{
+            const std::string& match_type = input[5].get_string();
+            if (std::string::npos != match_type.find('i')) {
+                is_case_sensitive = false;
+            }
+            if (std::string::npos != match_type.find('c')) {
+                is_case_sensitive = true;
+            }
+            if (std::string::npos != match_type.find('m')) {
+                is_multi_line_mode = true;
+            }
+            if (std::string::npos != match_type.find('n')) {
+                dot_match_newline = true;
+            }
+        }
+        case 5:
+            if (!input[4].is_int()) {
+                return ExprValue::Null();
+            }
+            occurrence = input[4].get_numberic<int64_t>();
+        case 4:
+            if (!input[3].is_int()) {
+                return ExprValue::Null();
+            }
+            pos = input[3].get_numberic<int64_t>();
+            if (pos < 1) {
+                return ExprValue::Null();
+            }
+        case 3:
+            if (input[0].type != pb::PrimitiveType::STRING
+                || input[1].type != pb::PrimitiveType::STRING
+                || input[2].type != pb::PrimitiveType::STRING) {
+                return ExprValue::Null();
+            }
+            break;
+        default:
+            return ExprValue::Null();
+    }
+
+    // (?i) 表示大小写不敏感
+    std::string pattern_str = input[1].get_string();
+    if (!is_case_sensitive) {
+        pattern_str = "(?i)" + pattern_str;
+    }
+    if (dot_match_newline) {
+        RE2::GlobalReplace(&pattern_str, re2::RE2("\\."), "[\\\\.\\\\s\\\\S]");
+    }
+    re2::RE2 pattern(pattern_str);
+    if (!pattern.ok()) {
+        return ExprValue::Null();
+    }
+
+    std::string expr = input[0].get_string();
+    std::string repl = input[2].get_string();
+
+    // 数字前的奇数个\变成偶数个\ (mysql的行为看起来是这样的 偶数个反斜杠是\的转义，\1等于1)
+    std::string new_repl = repl;
+    re2::StringPiece match;
+    re2::StringPiece repl_view(repl);
+    std::string::size_type offset = 0;
+    // 前面全是\且不以$或则\结尾的串
+    while (RE2::FindAndConsume(&repl_view, "((\\\\)*[^$\\\\])", &match)) {
+        std::size_t match_length = match.length();
+        if (match_length % 2 == 0) {
+            auto position = repl.size() - repl_view.size();
+            new_repl.erase(position - offset - 2, 1);
+            offset += 1;
+        }
+    }
+    repl = new_repl;
+
+    repl_view = repl;
+    new_repl = repl;
+    // 前面全是\且以$结尾的串
+    while (RE2::FindAndConsume(&repl_view, "((\\\\)*\\$)", &match)) {
+        std::size_t match_length = match.length();
+        auto position = repl.size() - repl_view.size();
+        if (match_length % 2 == 0) {
+            // 转义的$
+            new_repl.erase(position - offset - 2, 1);
+            offset += 1;
+        } else {
+            // 占位符，需要替换为 \; 此时后面应当是数字
+            new_repl[position - offset - 1] = '\\';
+            if (new_repl.size() < position - offset + 1
+                    || new_repl[position - offset] < '0'
+                    || new_repl[position - offset] > '9') {
+                return ExprValue::Null();
+            }
+        }
+    }
+    repl = new_repl;
+
+    std::string match_str = expr.substr(pos - 1, expr.size() - pos + 1);
+    if (is_multi_line_mode) {
+        std::vector<std::string> lines;
+        boost::split(lines, match_str, boost::is_any_of("\n"));
+        std::string new_match_str;
+        if (occurrence == 0) {
+            for (auto& line: lines) {
+                RE2::GlobalReplace(&line, pattern, repl);
+                new_match_str += (line + '\n');
+            }
+        } else {
+            int meet = 0;
+            for (auto& line: lines) {
+                if (meet < occurrence) {
+                    int count = ReplaceNthMatch(line, pattern, repl, occurrence - meet);
+                    meet += count;
+                }
+                new_match_str += (line + '\n');
+            }
+        }
+        // 删除尾部多余的\n
+        match_str = new_match_str.substr(0, new_match_str.size() - 1);
+    } else {
+        if (occurrence == 0) {
+            RE2::GlobalReplace(&match_str, pattern, repl);
+        } else {
+            ReplaceNthMatch(match_str, pattern, repl, occurrence);
+        }
+    }
+    return ExprValue(pb::PrimitiveType::STRING, expr.substr(0, pos - 1) + match_str);
+}
+
 ExprValue substring_index(const std::vector<ExprValue>& input) {
     if (input.size() != 3) {
         return ExprValue::Null();
@@ -1780,12 +1955,7 @@ inline int days_in_year(int year) {
     }
     return 365;
 }
-int calc_week(const std::vector<ExprValue>& input, bool is_yearweek, int& year, int& weeks) {
-    if (input.size() == 0 || input[0].is_null()) {
-        return -1;
-    }
-    ExprValue one = input[0];
-    uint64_t dt = one.cast_to(pb::DATETIME)._u.uint64_val;
+int calc_week(const uint64_t dt, int32_t mode, bool is_yearweek, int& year, int& weeks) {
     year = datetime_to_year(dt);
     int32_t month = datetime_to_month(dt);
     int32_t day = datetime_to_day(dt);
@@ -1808,9 +1978,7 @@ int calc_week(const std::vector<ExprValue>& input, bool is_yearweek, int& year, 
     // 0-53 or 1-53
     bool zero_range = true;
     bool with_4_days = false;
-    if (input.size() > 1) {
-        ExprValue two = input[1];
-        uint32_t mode = input[1].get_numberic<uint32_t>() % 8;
+    if (mode >= 0) {
         calc_mode(mode, is_monday_first, zero_range, with_4_days); 
     }
     if (is_monday_first) {
@@ -1857,9 +2025,20 @@ int calc_week(const std::vector<ExprValue>& input, bool is_yearweek, int& year, 
     return 0;
 }
 ExprValue yearweek(const std::vector<ExprValue>& input) {
+    if (input.size() == 0 || input[0].is_null()) {
+        return ExprValue::Null();
+    }
     int year = 0;
     int weeks = 0;
-    int ret = calc_week(input, true, year, weeks);
+    ExprValue one = input[0];
+    uint64_t dt = one.cast_to(pb::DATETIME)._u.uint64_val;
+
+    int32_t mode = -1;
+    if (input.size() > 1) {
+        mode = input[1].get_numberic<uint32_t>() % 8;
+    }
+
+    int ret = calc_week(dt, mode, true, year, weeks);
     if (ret != 0) {
         return ExprValue::Null();
     }
@@ -1868,9 +2047,20 @@ ExprValue yearweek(const std::vector<ExprValue>& input) {
     return tmp;
 }
 ExprValue week(const std::vector<ExprValue>& input) {
+    if (input.size() == 0 || input[0].is_null()) {
+        return ExprValue::Null();
+    }
     int year = 0;
     int weeks = 0;
-    int ret = calc_week(input, false, year, weeks);
+    ExprValue one = input[0];
+    uint64_t dt = one.cast_to(pb::DATETIME)._u.uint64_val;
+
+    int32_t mode = -1;
+    if (input.size() > 1) {
+        mode = input[1].get_numberic<uint32_t>() % 8;
+    }
+
+    int ret = calc_week(dt, mode, false, year, weeks);
     if (ret != 0) {
         return ExprValue::Null();
     }
@@ -3213,6 +3403,657 @@ ExprValue soundex(const std::vector<ExprValue>& input) {
     }
     ExprValue res(pb::STRING);
     res.str_val = code;
+    return res;
+}
+
+// to_sql
+#define TO_SQL_FUNC_DEFINE(FUNC_NAME)                               \
+    std::string FUNC_NAME(const std::vector<std::string>& input) {  \
+        std::string res;                                            \
+        res = #FUNC_NAME;                                           \
+        res += "(";                                                 \
+        for (int i = 0; i < input.size(); ++i) {                    \
+            res += input[i];                                        \
+            if (i < input.size() - 1) {                             \
+                res += ", ";                                        \
+            }                                                       \
+        }                                                           \
+        res += ")";                                                 \
+        return res;                                                 \
+    }
+
+//number functions
+TO_SQL_FUNC_DEFINE(round)
+TO_SQL_FUNC_DEFINE(floor)
+TO_SQL_FUNC_DEFINE(ceil)
+TO_SQL_FUNC_DEFINE(abs)
+TO_SQL_FUNC_DEFINE(sqrt)
+TO_SQL_FUNC_DEFINE(rand)
+TO_SQL_FUNC_DEFINE(sign)
+TO_SQL_FUNC_DEFINE(sin)
+TO_SQL_FUNC_DEFINE(asin)
+TO_SQL_FUNC_DEFINE(cos)
+TO_SQL_FUNC_DEFINE(acos)
+TO_SQL_FUNC_DEFINE(tan)
+TO_SQL_FUNC_DEFINE(cot)
+TO_SQL_FUNC_DEFINE(atan)
+TO_SQL_FUNC_DEFINE(ln)
+TO_SQL_FUNC_DEFINE(log)
+TO_SQL_FUNC_DEFINE(pi)
+TO_SQL_FUNC_DEFINE(greatest)
+TO_SQL_FUNC_DEFINE(least)
+TO_SQL_FUNC_DEFINE(pow)
+//string functions
+TO_SQL_FUNC_DEFINE(length)
+TO_SQL_FUNC_DEFINE(bit_length)
+TO_SQL_FUNC_DEFINE(lower)
+TO_SQL_FUNC_DEFINE(upper)
+TO_SQL_FUNC_DEFINE(concat)
+TO_SQL_FUNC_DEFINE(substr)
+TO_SQL_FUNC_DEFINE(left)
+TO_SQL_FUNC_DEFINE(right)
+TO_SQL_FUNC_DEFINE(trim)
+TO_SQL_FUNC_DEFINE(ltrim)
+TO_SQL_FUNC_DEFINE(rtrim)
+TO_SQL_FUNC_DEFINE(concat_ws)
+TO_SQL_FUNC_DEFINE(ascii)
+TO_SQL_FUNC_DEFINE(strcmp)
+TO_SQL_FUNC_DEFINE(insert)
+TO_SQL_FUNC_DEFINE(replace)
+TO_SQL_FUNC_DEFINE(repeat)
+TO_SQL_FUNC_DEFINE(reverse)
+TO_SQL_FUNC_DEFINE(locate)
+TO_SQL_FUNC_DEFINE(substring_index)
+TO_SQL_FUNC_DEFINE(lpad)
+TO_SQL_FUNC_DEFINE(rpad)
+TO_SQL_FUNC_DEFINE(instr)
+TO_SQL_FUNC_DEFINE(json_extract)
+TO_SQL_FUNC_DEFINE(regexp_replace)
+TO_SQL_FUNC_DEFINE(export_set)
+TO_SQL_FUNC_DEFINE(make_set)
+TO_SQL_FUNC_DEFINE(oct)
+TO_SQL_FUNC_DEFINE(hex)
+TO_SQL_FUNC_DEFINE(unhex)
+TO_SQL_FUNC_DEFINE(bin)
+TO_SQL_FUNC_DEFINE(space)
+TO_SQL_FUNC_DEFINE(elt)
+TO_SQL_FUNC_DEFINE(char_length)
+TO_SQL_FUNC_DEFINE(format)
+TO_SQL_FUNC_DEFINE(field)
+TO_SQL_FUNC_DEFINE(quote)
+TO_SQL_FUNC_DEFINE(soundex)
+// datetime functions
+TO_SQL_FUNC_DEFINE(unix_timestamp)
+TO_SQL_FUNC_DEFINE(from_unixtime)
+TO_SQL_FUNC_DEFINE(now)
+TO_SQL_FUNC_DEFINE(utc_timestamp)
+TO_SQL_FUNC_DEFINE(utc_date)
+TO_SQL_FUNC_DEFINE(utc_time)
+TO_SQL_FUNC_DEFINE(minute)
+TO_SQL_FUNC_DEFINE(second)
+TO_SQL_FUNC_DEFINE(microsecond)
+TO_SQL_FUNC_DEFINE(period_diff)
+TO_SQL_FUNC_DEFINE(period_add)
+TO_SQL_FUNC_DEFINE(date_format)
+TO_SQL_FUNC_DEFINE(str_to_date)
+TO_SQL_FUNC_DEFINE(time_format)
+TO_SQL_FUNC_DEFINE(convert_tz)
+TO_SQL_FUNC_DEFINE(timediff)
+TO_SQL_FUNC_DEFINE(curdate)
+TO_SQL_FUNC_DEFINE(current_date)
+TO_SQL_FUNC_DEFINE(curtime)
+TO_SQL_FUNC_DEFINE(current_time)
+TO_SQL_FUNC_DEFINE(current_timestamp)
+TO_SQL_FUNC_DEFINE(timestamp)
+TO_SQL_FUNC_DEFINE(date)
+TO_SQL_FUNC_DEFINE(hour)
+TO_SQL_FUNC_DEFINE(day)
+TO_SQL_FUNC_DEFINE(dayname)
+TO_SQL_FUNC_DEFINE(dayofweek)
+TO_SQL_FUNC_DEFINE(dayofmonth)
+TO_SQL_FUNC_DEFINE(dayofyear)
+TO_SQL_FUNC_DEFINE(month)
+TO_SQL_FUNC_DEFINE(monthname)
+TO_SQL_FUNC_DEFINE(year)
+TO_SQL_FUNC_DEFINE(yearweek)
+TO_SQL_FUNC_DEFINE(week)
+TO_SQL_FUNC_DEFINE(weekofyear)
+TO_SQL_FUNC_DEFINE(time_to_sec)
+TO_SQL_FUNC_DEFINE(sec_to_time)
+TO_SQL_FUNC_DEFINE(datediff)
+TO_SQL_FUNC_DEFINE(weekday)
+TO_SQL_FUNC_DEFINE(to_days)
+TO_SQL_FUNC_DEFINE(to_seconds)
+TO_SQL_FUNC_DEFINE(addtime)
+TO_SQL_FUNC_DEFINE(subtime)
+// case when functions
+TO_SQL_FUNC_DEFINE(ifnull)
+TO_SQL_FUNC_DEFINE(isnull)
+TO_SQL_FUNC_DEFINE(nullif)
+// Encryption and Compression Functions
+TO_SQL_FUNC_DEFINE(md5)
+TO_SQL_FUNC_DEFINE(sha1)
+TO_SQL_FUNC_DEFINE(sha)
+TO_SQL_FUNC_DEFINE(from_base64)
+TO_SQL_FUNC_DEFINE(to_base64)
+// other
+TO_SQL_FUNC_DEFINE(version)
+// TO_SQL_FUNC_DEFINE(last_insert_id)
+TO_SQL_FUNC_DEFINE(find_in_set)
+
+#undef TO_SQL_FUNC_DEFINE
+
+static std::string remove_quotation_marks(const std::string& str) {
+    if (str.size() < 2) {
+        return str;
+    }
+    if (str[0] == '\"' && str[str.size() - 1] == '\"') {
+        return str.substr(1, str.size() - 2);
+    }
+    return str;
+}
+
+// 特殊函数
+std::string if_(const std::vector<std::string>& input) {
+    std::string res;
+    res = "if(";
+    for (int i = 0; i < input.size(); ++i) {
+        res += input[i];
+        if (i < input.size() - 1) {
+            res += ", ";
+        }
+    }
+    res += ")";
+    return res;
+}
+
+std::string func_char(const std::vector<std::string>& input) {
+    std::string res;
+    res = "char(";
+    for (int i = 0; i < input.size(); ++i) {
+        res += input[i];
+        if (i < input.size() - 1) {
+            res += ", ";
+        }
+    }
+    res += ")";
+    return res;
+}
+
+std::string func_time(const std::vector<std::string>& input) {
+    std::string res;
+    res = "time(";
+    for (int i = 0; i < input.size(); ++i) {
+        res += input[i];
+        if (i < input.size() - 1) {
+            res += ", ";
+        }
+    }
+    res += ")";
+    return res;
+}
+
+std::string func_quarter(const std::vector<std::string>& input) {
+    std::string res;
+    res = "quarter(";
+    for (int i = 0; i < input.size(); ++i) {
+        res += input[i];
+        if (i < input.size() - 1) {
+            res += ", ";
+        }
+    }
+    res += ")";
+    return res;
+}
+
+// ~ -
+std::string bit_not(const std::vector<std::string>& input) {
+    if (input.size() == 0) {
+        return "";
+    }
+    std::string res;
+    res += "(";
+    res += "~";
+    res += input[0];
+    res += ")";
+    return res;
+}
+
+std::string uminus(const std::vector<std::string>& input) {
+    if (input.size() == 0) {
+        return "";
+    }
+    std::string res;
+    res += "(";
+    res += "-";
+    res += input[0];
+    res += ")";
+    return res;
+}
+
+// + - * /
+std::string add(const std::vector<std::string>& input) {
+    if (input.size() < 2) {
+        return "";
+    }
+    std::string res;
+    res += "(";
+    res += input[0];
+    res += " + ";
+    res += input[1];
+    res += ")";
+    return res;
+}
+
+std::string minus(const std::vector<std::string>& input) {
+    if (input.size() < 2) {
+        return "";
+    }
+    std::string res;
+    res += "(";
+    res += input[0];
+    res += " - ";
+    res += input[1];
+    res += ")";
+    return res;
+}
+
+std::string multiplies(const std::vector<std::string>& input) {
+    if (input.size() < 2) {
+        return "";
+    }
+    std::string res;
+    res += "(";
+    res += input[0];
+    res += " * ";
+    res += input[1];
+    res += ")";
+    return res;
+}
+
+std::string divides(const std::vector<std::string>& input) {
+    if (input.size() < 2) {
+        return "";
+    }
+    std::string res;
+    res += "(";
+    res += input[0];
+    res += " / ";
+    res += input[1];
+    res += ")";
+    return res;
+}
+
+// % << >> & | ^ 
+std::string mod(const std::vector<std::string>& input) {
+    if (input.size() < 2) {
+        return "";
+    }
+    std::string res;
+    res += "(";
+    res += input[0];
+    res += " % ";
+    res += input[1];
+    res += ")";
+    return res;
+}
+
+std::string left_shift(const std::vector<std::string>& input) {
+    if (input.size() < 2) {
+        return "";
+    }
+    std::string res;
+    res += "(";
+    res += input[0];
+    res += " << ";
+    res += input[1];
+    res += ")";
+    return res;
+}
+
+std::string right_shift(const std::vector<std::string>& input) {
+    if (input.size() < 2) {
+        return "";
+    }
+    std::string res;
+    res += "(";
+    res += input[0];
+    res += " >> ";
+    res += input[1];
+    res += ")";
+    return res;
+}
+
+std::string bit_and(const std::vector<std::string>& input) {
+    if (input.size() < 2) {
+        return "";
+    }
+    std::string res;
+    res += "(";
+    res += input[0];
+    res += " & ";
+    res += input[1];
+    res += ")";
+    return res;
+}
+
+std::string bit_or(const std::vector<std::string>& input) {
+    if (input.size() < 2) {
+        return "";
+    }
+    std::string res;
+    res += "(";
+    res += input[0];
+    res += " | ";
+    res += input[1];
+    res += ")";
+    return res;
+}
+
+std::string bit_xor(const std::vector<std::string>& input) {
+    if (input.size() < 2) {
+        return "";
+    }
+    std::string res;
+    res += "(";
+    res += input[0];
+    res += " ^ ";
+    res += input[1];
+    res += ")";
+    return res;
+}
+
+// == != > >= < <=
+std::string eq(const std::vector<std::string>& input) {
+    if (input.size() < 2) {
+        return "";
+    }
+    std::string res;
+    res += "(";
+    res += input[0];
+    res += " = ";
+    res += input[1];
+    res += ")";
+    return res;
+}
+
+std::string ne(const std::vector<std::string>& input) {
+    if (input.size() < 2) {
+        return "";
+    }
+    std::string res;
+    res += "(";
+    res += input[0];
+    res += " != ";
+    res += input[1];
+    res += ")";
+    return res;
+}
+
+std::string gt(const std::vector<std::string>& input) {
+    if (input.size() < 2) {
+        return "";
+    }
+    std::string res;
+    res += "(";
+    res += input[0];
+    res += " > ";
+    res += input[1];
+    res += ")";
+    return res;
+}
+
+std::string ge(const std::vector<std::string>& input) {
+    if (input.size() < 2) {
+        return "";
+    }
+    std::string res;
+    res += "(";
+    res += input[0];
+    res += " >= ";
+    res += input[1];
+    res += ")";
+    return res;
+}
+
+std::string lt(const std::vector<std::string>& input) {
+    if (input.size() < 2) {
+        return "";
+    }
+    std::string res;
+    res += "(";
+    res += input[0];
+    res += " < ";
+    res += input[1];
+    res += ")";
+    return res;
+}
+
+std::string le(const std::vector<std::string>& input) {
+    if (input.size() < 2) {
+        return "";
+    }
+    std::string res;
+    res += "(";
+    res += input[0];
+    res += " <= ";
+    res += input[1];
+    res += ")";
+    return res;
+}
+
+// 目前不支持多字段全文索引，有需求可以升级
+std::string match_against(const std::vector<std::string>& input) {
+    if (input.size() < 3) {
+        return "";
+    }
+    // input[0]是ROW表达式，因此MATCH后面不需要再添加括号
+    std::string res;
+    res += "MATCH ";
+    res += input[0];
+    res += " AGAINST ( ";
+    res += input[1];
+    res += " ";
+    res += remove_quotation_marks(input[2]);
+    res += ")";
+    return res;
+}
+
+std::string case_when(const std::vector<std::string>& input) {
+    std::string res;
+    res += "(";
+    res += "CASE ";
+    for (int i = 0; i < input.size() / 2; ++i) {
+        res += " WHEN ";
+        res += input[i * 2];
+        res += " THEN ";
+        res += input[i * 2 + 1];
+    }
+    if (input.size() % 2 != 0) {
+        res += " ELSE ";
+        res += input[input.size() - 1];
+    }
+    res += " END";
+    res += ")";
+    return res;
+}
+
+std::string case_expr_when(const std::vector<std::string>& input) {
+    if (input.size() == 0) {
+        return "";
+    }
+    std::string res;
+    res += "(";
+    res += "CASE ";
+    res += input[0];
+    for (int i = 0; i < (input.size()-1) / 2; ++i) {
+        res += " WHEN ";
+        res += input[i * 2 + 1];
+        res += " THEN ";
+        res += input[i * 2 + 2];
+    }
+    if ((input.size() - 1) % 2 != 0) {
+        res += " ELSE ";
+        res += input[input.size() - 1];
+    }
+    res += " END";
+    res += ")";
+    return res;
+}
+
+// 时间函数
+std::string timestampadd(const std::vector<std::string>& input) {
+    if (input.size() < 3) {
+        return "";
+    }
+    std::string res;
+    res += "TIMESTAMPADD(";
+    res += remove_quotation_marks(input[0]);
+    res += ", ";
+    res += input[1];
+    res += ", ";
+    res += input[2];
+    res += ")";
+    return res;
+}
+
+std::string timestampdiff(const std::vector<std::string>& input) {
+    if (input.size() < 3) {
+        return "";
+    }
+    std::string res;
+    res += "TIMESTAMPDIFF(";
+    res += remove_quotation_marks(input[0]);
+    res += ", ";
+    res += input[1];
+    res += ", ";
+    res += input[2];
+    res += ")";
+    return res;
+}
+
+std::string date_add(const std::vector<std::string>& input) {
+    if (input.size() < 3) {
+        return "";
+    }
+    std::string res;
+    res += "DATE_ADD(";
+    res += input[0];
+    res += ", INTERVAL ";
+    res += input[1];
+    res += " ";
+    res += remove_quotation_marks(input[2]);
+    res += ")";
+    return res;
+}
+
+std::string date_sub(const std::vector<std::string>& input) {
+    if (input.size() < 3) {
+        return "";
+    }
+    std::string res;
+    res += "DATE_SUB(";
+    res += input[0];
+    res += ", INTERVAL ";
+    res += input[1];
+    res += " ";
+    res += remove_quotation_marks(input[2]);
+    res += ")";
+    return res;
+}
+
+std::string extract(const std::vector<std::string>& input) {
+    if (input.size() < 2) {
+        return "";
+    }
+    std::string res;
+    res += "EXTRACT(";
+    res += remove_quotation_marks(input[0]);
+    res += " FROM ";
+    res += input[1];
+    res += ")";
+    return res;
+}
+
+// cast函数
+std::string cast_to_date(const std::vector<std::string>& input) {
+    if (input.size() < 1) {
+        return "";
+    }
+    std::string res;
+    res += "CAST(";
+    res += input[0];
+    res += " AS DATE)";
+    return res;
+}
+
+std::string cast_to_time(const std::vector<std::string>& input) {
+    if (input.size() < 1) {
+        return "";
+    }
+    std::string res;
+    res += "CAST(";
+    res += input[0];
+    res += " AS TIME)";
+    return res;
+}
+
+std::string cast_to_datetime(const std::vector<std::string>& input) {
+    if (input.size() < 1) {
+        return "";
+    }
+    std::string res;
+    res += "CAST(";
+    res += input[0];
+    res += " AS DATETIME)";
+    return res;
+}
+
+std::string cast_to_signed(const std::vector<std::string>& input) {
+    if (input.size() < 1) {
+        return "";
+    }
+    std::string res;
+    res += "CAST(";
+    res += input[0];
+    res += " AS SIGNED INTEGER)";
+    return res;
+}
+
+std::string cast_to_unsigned(const std::vector<std::string>& input) {
+    if (input.size() < 1) {
+        return "";
+    }
+    std::string res;
+    res += "CAST(";
+    res += input[0];
+    res += " AS UNSIGNED INTEGER)";
+    return res;
+}
+
+std::string cast_to_string(const std::vector<std::string>& input) {
+    if (input.size() < 1) {
+        return "";
+    }
+    std::string res;
+    res += "CAST(";
+    res += input[0];
+    res += " AS BINARY)";
+    return res;
+}
+
+std::string cast_to_double(const std::vector<std::string>& input) {
+    if (input.size() < 1) {
+        return "";
+    }
+    std::string res;
+    res += "CAST(";
+    res += input[0];
+    res += " AS DECIMAL(65,15))"; // 65: 总位数，15: 小数位数；保证大多数情况够用
+    // 如果存在精度问题，可以尝试以下隐式转换的方式
+    // res = "("
+    // res += input[0];
+    // res += " + 0.0)";
     return res;
 }
 

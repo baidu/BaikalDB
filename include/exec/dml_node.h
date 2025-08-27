@@ -113,7 +113,7 @@ protected:
     std::vector<SmartIndex>     _all_indexes; 
     std::vector<SmartIndex>     _affected_indexes; 
     std::vector<SmartIndex>*    _indexes_ptr = &_all_indexes;
-    std::vector<SmartIndex>     _reverse_or_vector_indexes; 
+    std::vector<SmartIndex>     _reverse_indexes; 
     std::unordered_set<int64_t> _ignore_index_ids;
 
     SmartIndex        _global_index_info; 

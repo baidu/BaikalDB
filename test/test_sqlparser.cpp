@@ -20,7 +20,6 @@
 #include <cstdlib>
 #include <ctime>
 #include "baikal_client.h"
-#include "common.h"
 #include "parser.h"
 
 int main(int argc, char* argv[])
@@ -29,9 +28,6 @@ int main(int argc, char* argv[])
     return RUN_ALL_TESTS();
 }
 #include "uconv.h"
-namespace baikaldb {
-    DEFINE_int32(first_batch_size_for_vector, 1024, "first_batch_size_for_vector, default: 1024, max: 1024");
-}
 namespace parser {
 
 TEST(test_parser, case_all) {

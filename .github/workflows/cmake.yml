@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     steps:
     - uses: actions/checkout@v3
     - name: Cache cmake modules
@@ -17,4 +17,4 @@ jobs:
     - name: Install Dependencies
       run: sudo apt-get update && sudo apt-get install -y flex bison libssl-dev autoconf g++ libtool make cmake libz-dev locate gfortran
     - name: Build
-      run: mkdir -p buildenv && cd buildenv && cmake -DWITH_BAIKAL_CLIENT=OFF .. && make -j2
+      run: mkdir -p buildenv && cd buildenv && cmake -DWITH_BAIKAL_CLIENT=OFF .. && make -j4

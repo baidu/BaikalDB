@@ -35,6 +35,7 @@ public:
     virtual int init(const pb::PlanNode& node) override;
     virtual int open(RuntimeState* state) override;
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
+    virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
     virtual void close(RuntimeState* state) {
         ExecNode::close(state);
         for (auto expr : _slot_order_exprs) {
@@ -47,12 +48,19 @@ public:
         return _union_tuple_id;
     }
 
-    // 向量化
-    virtual bool can_use_arrow_vector();
-    virtual int build_arrow_declaration(RuntimeState* state);
-
     // 谓词下推
     virtual int predicate_pushdown(std::vector<ExprNode*>& input_exprs) override;
+
+    // 聚合下推
+    virtual int agg_pushdown(QueryContext* ctx, ExecNode* agg_node) override;
+
+    // 向量化
+    virtual bool can_use_arrow_vector(RuntimeState* state);
+    virtual int build_arrow_declaration(RuntimeState* state);
+    // mpp
+    virtual int set_partition_property_and_schema(QueryContext* ctx);
+
+    virtual int show_explain(QueryContext* ctx, std::vector<std::map<std::string, std::string>>& output, int& next_id, int display_id);
 
 private:
     std::vector<ExprNode*> _slot_order_exprs;

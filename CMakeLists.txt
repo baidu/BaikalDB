@@ -94,6 +94,7 @@ if (WITH_SYSTEM_LIBS)
     ADD_LIBRARY(boost SHARED IMPORTED GLOBAL)
 else ()
     include(boost)
+    include_directories(SYSTEM ${BOOST_INSTALL_DIR}/include)
 endif ()
 message(boost: ${Boost_VERSION}, ${Boost_LIB_VERSION}, DIRS: ${Boost_INCLUDE_DIRS}, LIBS: ${Boost_LIBRARIES})
 
@@ -231,6 +232,7 @@ if (WITH_SYSTEM_LIBS)
     ADD_LIBRARY(rocksdb SHARED IMPORTED GLOBAL)
 else ()
     include(rocksdb)
+    include_directories(SYSTEM ${ROCKSDB_INSTALL_DIR}/include)
 endif ()
 
 #brpc
@@ -293,6 +295,7 @@ if (WITH_GPERF)
     else ()
         message("GPERFTOOLS NOT FOUND, downloading and compiling")
         include(gperftools)
+        include_directories(SYSTEM ${GPERF_INSTALL_DIR}/include)
     endif ()
 endif ()
 
@@ -306,6 +309,7 @@ if (WITH_SYSTEM_LIBS)
     ADD_LIBRARY(arrow SHARED IMPORTED GLOBAL)
 else ()
     include(arrow)
+    include_directories(SYSTEM ${ARROW_INSTALL_DIR}/include)
 endif ()
 
 message(CUR_DIR : ${CMAKE_CURRENT_BINARY_DIR}, SRC_DIR : ${CMAKE_SOURCE_DIR})
@@ -435,8 +439,8 @@ if (NOT DEBUG)
     SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DNDEBUG")
 endif ()
 
-SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 ${DEBUG_SYMBOL} -O2 -pipe -m64 -fopenmp -Wall -W -fPIC -Wno-unused-parameter -Wno-strict-aliasing -Wno-parentheses -fno-omit-frame-pointer ")
-SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c99 ${DEBUG_SYMBOL} -O2 -pipe -m64 -fopenmp -Wall -W -fPIC -Wno-unused-parameter -Wno-strict-aliasing -Wno-parentheses -fno-omit-frame-pointer")
+SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 ${DEBUG_SYMBOL} -O2 -pipe -m64 -fopenmp -Wall -W -fPIC -Wno-unused-parameter -Wno-strict-aliasing -Wno-parentheses -fno-omit-frame-pointer -Wno-unused-result")
+SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c99 ${DEBUG_SYMBOL} -O2 -pipe -m64 -fopenmp -Wall -W -fPIC -Wno-unused-parameter -Wno-strict-aliasing -Wno-parentheses -fno-omit-frame-pointer -Wno-unused-result")
 
 add_definitions(
         -D_GNU_SOURCE
@@ -444,9 +448,12 @@ add_definitions(
         -D__STDC_LIMIT_MACROS
         -D__STDC_CONSTANT_MACROS
         -DBRPC_WITH_GLOG=1
+        -DFASTFLOAT_ALLOWS_LEADING_PLUS 
+        -DFASTFLOAT_SKIP_WHITE_SPACE
 )
 
 file(GLOB ENGINE src/engine/*.cpp)
+file(GLOB COLUMN src/column/*.cpp)
 file(GLOB EXEC src/exec/*.cpp)
 file(GLOB EXPR src/expr/*.cpp)
 file(GLOB LOGICAL_PLAN src/logical_plan/*.cpp)
@@ -470,6 +477,7 @@ set(COMMON_INC
         ${CMAKE_CURRENT_BINARY_DIR}/sqlparser
         include/common
         include/engine
+        include/column
         include/exec
         include/expr
         include/logical_plan
@@ -490,6 +498,7 @@ file(GLOB COMMON
         ${CMAKE_CURRENT_BINARY_DIR}/proto/*.pb.*
         src/common/*.cpp
         ${ENGINE}
+        ${COLUMN}
         ${EXEC}
         ${EXPR}
         ${LOGICAL_PLAN}

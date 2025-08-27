@@ -104,6 +104,7 @@ void RocksdbReaderAdaptor::context_reset() {
         read_options.prefix_same_as_start = true;
         read_options.total_order_seek = false;
         read_options.fill_cache = false;
+        read_options.iterate_upper_bound = &iter_context->upper_bound_slice;
         rocksdb::ColumnFamilyHandle* column_family = RocksWrapper::get_instance()->get_meta_info_handle();
         iter_context->iter.reset(RocksWrapper::get_instance()->new_iterator(read_options, column_family));
         iter_context->iter->Seek(iter_context->prefix);
@@ -177,8 +178,8 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
     _region_ptr->reset_timecost();
     
     while (count < size) {
-        if (!_context->iter->Valid()
-                || !_context->iter->key().starts_with(_context->prefix)) {
+        // upper bound
+        if (!_context->iter->Valid()) {
             _context->done = true;
             //portal->append((void*)iter_context->offset, sizeof(size_t));
             DB_WARNING("region_id: %ld snapshot read over, total size: %ld", _region_id, _context->offset);
@@ -656,6 +657,9 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
         }
     } else {
         prefix = MetaWriter::get_instance()->meta_info_prefix(_region_id);
+        MutTableKey key(prefix, true);
+        key.append_u64(UINT64_MAX);
+        upper_bound = key.data();
     }
 
     bool is_meta_reader = false;
@@ -714,11 +718,14 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
             iter_context->prefix = prefix;
             iter_context->is_meta_sst = true;
             iter_context->sc = sc.get();
+            iter_context->upper_bound = upper_bound;
+            iter_context->upper_bound_slice = iter_context->upper_bound;
             rocksdb::ReadOptions read_options;
             read_options.snapshot = sc->snapshot;
             read_options.prefix_same_as_start = true;
             read_options.total_order_seek = false;
             read_options.fill_cache = false;
+            read_options.iterate_upper_bound = &iter_context->upper_bound_slice;
             rocksdb::ColumnFamilyHandle* column_family = RocksWrapper::get_instance()->get_meta_info_handle();
             iter_context->iter.reset(RocksWrapper::get_instance()->new_iterator(read_options, column_family));
             iter_context->iter->Seek(prefix);
@@ -826,7 +833,7 @@ void RocksdbFileSystemAdaptor::close_snapshot(const std::string& path) {
         _snapshots[path].count--;
         if (_snapshots[path].count == 0) {
             _snapshots.erase(iter);
-            _mutil_snapshot_cond.decrease_broadcast();
+            _mutil_snapshot_cond.decrease_signal();
             DB_WARNING("region_id: %ld close snapshot path: %s relase", _region_id, path.c_str());
         }
     }

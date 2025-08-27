@@ -99,6 +99,11 @@ private:
                                           uint64_t log_id,
                                           pb::PrimitiveType partition_col_type);
 
+    // DBLink Mysql
+    int pre_process_for_dblink_mysql(const pb::MetaManagerRequest* request,
+                                     pb::MetaManagerResponse* response,
+                                     uint64_t log_id);
+
     MetaStateMachine* _meta_state_machine;
 }; //class
 

@@ -17,6 +17,7 @@
 #include "proto/meta.interface.pb.h"
 #include "cmsketch.h"
 #include "histogram.h"
+#include "hll_statistics.h"
 
 namespace baikaldb {
 class Statistics {
@@ -24,8 +25,17 @@ public:
     Statistics(const pb::Statistics& statistics) {
         _table_id = statistics.table_id();
         _version = statistics.version();
-        init_histogram(statistics.histogram());
-        init_cmsketch(statistics.cmsketch());
+        _total_rows = statistics.total_rows();
+        if (statistics.has_histogram()) {
+            init_histogram(statistics.histogram());
+            _total_rows = statistics.histogram().total_rows();
+        }
+        if (statistics.has_cmsketch()) {
+            init_cmsketch(statistics.cmsketch());
+        }
+        if (statistics.has_hll()) {
+            init_hll(statistics.hll()); 
+        }
     }
 
     int64_t table_id() {
@@ -57,6 +67,17 @@ public:
         }
         auto iter = _field_histogram.find(field_id);
         if (iter != _field_histogram.end()) {
+            return iter->second;
+        }
+        return nullptr;
+    }
+
+    std::shared_ptr<HyperLogLogColumn> get_hllcolumn_ptr(int field_id) {
+        if (field_id <= 0) {
+            return nullptr;
+        }
+        auto iter = _field_hll.find(field_id);
+        if (iter != _field_hll.end()) {
             return iter->second;
         }
         return nullptr;
@@ -97,6 +118,16 @@ public:
 
         int64_t count = iter->second->get_count(value);
         return count;
+    }
+
+    // get_hll_selectivity
+    double get_hll_ratio(const int field_id) {
+        auto it = _field_hll.find(field_id);
+        if (it == _field_hll.end()) {
+            // 列统计信息不全的索引会被cbo打压
+            return 1.0;
+        }
+        return 1.0 / it->second->estimate();
     }
 
     //get_histogram_count返-2时说明超出取值范围时，根据need_mapping标记判断是否映射到已存在的范围，默认进行映射
@@ -163,10 +194,13 @@ public:
         return iter->second->get_distinct_cnt();
     }
 
+    bool is_cms_exist() {
+        return !_field_cmsketch.empty();
+    }
+
 private:
     void init_histogram(const pb::Histogram& histogram) {
         _sample_rows = histogram.sample_rows();
-        _total_rows = histogram.total_rows();
         for (auto& column : histogram.column_infos()) {
             auto ptr = std::make_shared<Histogram>(column.col_type(), column.field_id(), column.distinct_cnt(), column.null_value_cnt());
             ptr->add_proto(column);
@@ -186,6 +220,14 @@ private:
             }
         }
     }
+
+    void init_hll(const pb::HyperLogLog& pb_hll) {
+        for (auto& column : pb_hll.hllcolumns()) {
+            auto ptr = std::make_shared<HyperLogLogColumn>(column);
+            _field_hll[column.field_id()] = ptr;
+        }
+    }
+
 private:
     int64_t _table_id = 0;
     int64_t _version = 0;
@@ -193,6 +235,7 @@ private:
     int64_t _total_rows = 0;
     std::map<int, std::shared_ptr<Histogram>> _field_histogram;
     std::map<int, std::shared_ptr<CMsketchColumn>> _field_cmsketch;
+    std::map<int, std::shared_ptr<HyperLogLogColumn>> _field_hll;
 };
 
 typedef std::shared_ptr<Statistics> SmartStatistics;

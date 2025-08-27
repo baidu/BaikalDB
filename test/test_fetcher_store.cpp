@@ -104,7 +104,7 @@ TEST_F(FetcherStoreTest, test_not_select) {
     FetcherStore fetcher_store;
     RuntimeState state;
     ExecNode store_request;
-    OnRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_INSERT);
+    OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_INSERT, false);
     {
         FLAGS_fetcher_follower_read = false;
         FLAGS_fetcher_learner_read = false;
@@ -180,7 +180,7 @@ TEST_F(FetcherStoreTest, test_normal_follower_select) {
         FetcherStore fetcher_store;
         RuntimeState state;
         ExecNode store_request;
-        OnRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT);
+        OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
         done.select_addr();
         ASSERT_TRUE("127.0.0.1:pap-bj1" == done._addr || "127.0.0.1:watt-bj1" == done._addr);
     }
@@ -190,7 +190,7 @@ TEST_F(FetcherStoreTest, test_normal_follower_select) {
         FetcherStore fetcher_store;
         RuntimeState state;
         ExecNode store_request;
-        OnRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT);
+        OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
         done.select_addr();
         ASSERT_TRUE("127.0.0.1:watt-bj2" == done._addr); 
     }
@@ -199,7 +199,7 @@ TEST_F(FetcherStoreTest, test_normal_follower_select) {
         FetcherStore fetcher_store;
         RuntimeState state;
         ExecNode store_request;
-        OnRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT);
+        OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
         done.select_addr();
         ASSERT_TRUE("127.0.0.1:watt-bj2" == done._addr); 
         done._response_ptr->set_errcode(pb::LEARNER_NOT_READY);
@@ -215,7 +215,7 @@ TEST_F(FetcherStoreTest, test_normal_follower_select) {
         FetcherStore fetcher_store;
         RuntimeState state;
         ExecNode store_request;
-        OnRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT);
+        OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
         done.select_addr();
         ASSERT_TRUE("127.0.0.1:watt-bj2" == done._addr); 
         done._response_ptr->set_errcode(pb::LEARNER_NOT_READY);
@@ -246,7 +246,7 @@ TEST_F(FetcherStoreTest, test_resource_insulate_read_without_learner) {
         FetcherStore fetcher_store;
         RuntimeState state;
         ExecNode store_request;
-        OnRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT);
+        OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
         for (int i = 0; i < 5; ++i) {
             done.select_addr();
             done.retry_times_inc();
@@ -258,7 +258,7 @@ TEST_F(FetcherStoreTest, test_resource_insulate_read_without_learner) {
         FetcherStore fetcher_store;
         RuntimeState state;
         ExecNode store_request;
-        OnRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT);
+        OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
         done.select_addr();
         ASSERT_TRUE("127.0.0.1:watt-bj1" == done._addr);
         schema_factory->update_instance("127.0.0.1:watt-bj1", pb::FAULTY, false, false);
@@ -280,7 +280,7 @@ TEST_F(FetcherStoreTest, test_resource_insulate_read_without_learner) {
         FetcherStore fetcher_store;
         RuntimeState state;
         ExecNode store_request;
-        OnRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT);
+        OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
         done.select_addr();
         ASSERT_TRUE("127.0.0.1:watt-bj1" == done._addr);
         // watt-bj1 异常
@@ -322,7 +322,7 @@ TEST_F(FetcherStoreTest, test_resource_insulate_read_with_learner) {
         FetcherStore fetcher_store;
         RuntimeState state;
         ExecNode store_request;
-        OnRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT);
+        OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
         for (int i = 0; i < 5; ++i) {
             done.select_addr();
             done.retry_times_inc();
@@ -336,7 +336,7 @@ TEST_F(FetcherStoreTest, test_resource_insulate_read_with_learner) {
         FetcherStore fetcher_store;
         RuntimeState state;
         ExecNode store_request;
-        OnRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT);
+        OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
         done.select_addr();
         ASSERT_TRUE("127.0.0.1:watt-bj2" == done._addr);
         schema_factory->update_instance("127.0.0.1:watt-bj2", pb::FAULTY, false, false);
@@ -359,7 +359,7 @@ TEST_F(FetcherStoreTest, test_resource_insulate_read_with_learner) {
         FetcherStore fetcher_store;
         RuntimeState state;
         ExecNode store_request;
-        OnRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT);
+        OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
         done.select_addr();
         ASSERT_TRUE("127.0.0.1:watt-bj2" == done._addr);
         // watt-bj2 异常
@@ -399,7 +399,7 @@ TEST_F(FetcherStoreTest, test_resource_perfer_read) {
         FetcherStore fetcher_store;
         RuntimeState state;
         ExecNode store_request;
-        OnRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT);
+        OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
         done.select_addr();
         ASSERT_TRUE("127.0.0.1:pap-bj1" == done._addr);
         done._response_ptr->set_errcode(pb::NOT_LEADER);
@@ -415,7 +415,7 @@ TEST_F(FetcherStoreTest, test_resource_perfer_read) {
         FetcherStore fetcher_store;
         RuntimeState state;
         ExecNode store_request;
-        OnRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT);
+        OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
         done.select_addr();
         ASSERT_TRUE("127.0.0.1:offline-bj2" == done._addr);
         done._response_ptr->set_errcode(pb::LEARNER_NOT_READY);
@@ -445,7 +445,7 @@ TEST_F(FetcherStoreTest, test_GBT_LEARNER_read) {
         FetcherStore fetcher_store;
         RuntimeState state;
         ExecNode store_request;
-        OnRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT);
+        OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
         fetcher_store.global_backup_type = GBT_LEARNER;
         done.select_addr();
         ASSERT_TRUE("127.0.0.1:offline-bd2" == done._addr);
@@ -460,7 +460,7 @@ TEST_F(FetcherStoreTest, test_GBT_LEARNER_read) {
         FetcherStore fetcher_store;
         RuntimeState state;
         ExecNode store_request;
-        OnRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT);
+        OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
         fetcher_store.global_backup_type = GBT_LEARNER;
         done.select_addr();
         ASSERT_TRUE("127.0.0.1:offline-bd2" == done._addr);
@@ -489,7 +489,7 @@ TEST_F(FetcherStoreTest, test_retry_later_choose_other_peer_read1) {
         FetcherStore fetcher_store;
         RuntimeState state;
         ExecNode store_request;
-        OnRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT);
+        OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
         done.select_addr();
         // 不支持读从, 访问leader, retry_later重试也访问leader
         ASSERT_TRUE("127.0.0.1:pap-bd1" == done._addr);
@@ -514,7 +514,7 @@ TEST_F(FetcherStoreTest, test_retry_later_choose_other_peer_read1) {
         FetcherStore fetcher_store;
         RuntimeState state;
         ExecNode store_request;
-        OnRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT);
+        OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
         done.select_addr();
         // 支持读从, 默认访问同机房, retry_later能访问其他peer
         ASSERT_TRUE("127.0.0.1:pap-bj1" == done._addr);
@@ -553,7 +553,7 @@ TEST_F(FetcherStoreTest, test_retry_later_choose_other_peer_read2) {
         FetcherStore fetcher_store;
         RuntimeState state;
         ExecNode store_request;
-        OnRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT);
+        OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
         done.select_addr();
         // 默认访问pap-bj同机房
         ASSERT_TRUE("127.0.0.1:pap-bj1" == done._addr);
@@ -581,7 +581,7 @@ TEST_F(FetcherStoreTest, test_retry_later_choose_other_peer_read2) {
         FetcherStore fetcher_store;
         RuntimeState state;
         ExecNode store_request;
-        OnRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT);
+        OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
         done.select_addr();
         ASSERT_TRUE("127.0.0.1:watt-bj1" == done._addr);
         done._response_ptr->set_errcode(pb::RETRY_LATER);

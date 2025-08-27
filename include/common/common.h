@@ -73,8 +73,16 @@ namespace braft = raft;
 #endif
 
 namespace baikaldb {
-DECLARE_bool(use_cond_decrease_signal);
 DECLARE_int32(first_batch_size_for_vector);
+DECLARE_int32(db_request_timeout);
+DECLARE_int32(db_connect_timeout);
+DECLARE_int32(db_port);
+DECLARE_int32(remote_compaction_request_timeout);
+DECLARE_int32(remote_compaction_connect_timeout);
+DECLARE_int32(remote_compaction_request_file_timeout);
+DECLARE_int32(store_port);
+DECLARE_string(secondary_db_path);
+DECLARE_string(compaction_db_path);
 
 #define BAIKALDB_LIKELY(x)   __builtin_expect(!!(x), 1)
 #define BAIKALDB_UNLIKELY(x) __builtin_expect(!!(x), 0)
@@ -144,7 +152,9 @@ enum ExplainType {
     SHOW_TRACE2             = 6,
     EXPLAIN_SHOW_COST       = 7,
     SHOW_SIGN               = 8,
-    SHOW_KEYPOINT           = 9
+    SHOW_KEYPOINT           = 9,
+    SAMPLE_KEYPOINT         = 10,
+    SHOW_HLL                = 11
 };
 
 const size_t ROW_BATCH_CAPACITY = std::min(FLAGS_first_batch_size_for_vector, 1024);
@@ -157,7 +167,9 @@ enum SignExecType {
     SIGN_EXEC_NOT_SET                   = 0,
     SIGN_EXEC_ROW                       = 1,
     SIGN_EXEC_ARROW_ACERO               = 2,
-    SIGN_EXEC_ARROW_FORCE_NO_INDEX_JOIN = 3
+    SIGN_EXEC_ARROW_FORCE_NO_INDEX_JOIN = 3,
+    SIGN_EXEC_MPP                       = 4,
+    SIGN_EXEC_MPP_FORCE_NO_INDEX_JOIN   = 5
 };
 
 inline SignExecType to_sign_exec_type(uint64_t id) {
@@ -168,8 +180,16 @@ inline SignExecType to_sign_exec_type(uint64_t id) {
             return SIGN_EXEC_ARROW_ACERO;
         case 3:
             return SIGN_EXEC_ARROW_FORCE_NO_INDEX_JOIN;
+        case 4:
+            return SIGN_EXEC_MPP;
+        case 5:
+            return SIGN_EXEC_MPP_FORCE_NO_INDEX_JOIN;
     }
     return SIGN_EXEC_NOT_SET;
+}
+
+inline bool is_vectorized_exec_type(SignExecType type) {
+    return (type != SIGN_EXEC_NOT_SET && type != SIGN_EXEC_ROW);
 }
 
 inline std::string explain_type_to_str(uint64_t type) {
@@ -180,6 +200,10 @@ inline std::string explain_type_to_str(uint64_t type) {
             return "SIGN_EXEC_ARROW_ACERO";
         case 3:
             return "SIGN_EXEC_ARROW_FORCE_NO_INDEX_JOIN";
+        case 4:
+            return "SIGN_EXEC_MPP";
+        case 5:
+            return "SIGN_EXEC_MPP_FORCE_NO_INDEX_JOIN";
     }
     return "SIGN_EXEC_NOT_SET";
 }
@@ -200,6 +224,9 @@ public:
         return butil::gettimeofday_us() - _start;
     }
 
+    int64_t get_start_time() const {
+        return _start;
+    }
 private:
     int64_t _start;
 };
@@ -281,11 +308,7 @@ public:
     void decrease_broadcast() {
         bthread_mutex_lock(&_mutex);
         --_count;
-        if (!FLAGS_use_cond_decrease_signal) {
-            bthread_cond_broadcast(&_cond);
-        } else {
-            bthread_cond_signal(&_cond);
-        }
+        bthread_cond_broadcast(&_cond);
         bthread_mutex_unlock(&_mutex);
     }
     
@@ -1381,16 +1404,25 @@ public:
     Heap(size_t size) {
         _heap.resize(size);
     }
+    Heap(size_t size, const T& default_value) {
+        _heap.resize(size, default_value);
+    }
     T top() const {
         if (!_heap.empty()) {
             return _heap[0];
         }
         return T();
     }
-    void replace_top(const T&v) {
+    void replace_top(T v) {
         if (!_heap.empty()) {
-            _heap[0] = v;
+            _heap[0] = std::move(v);
             shiftdown(0);
+        }
+    }
+
+    void swap_top(T& v) {
+        if (!_heap.empty()) {
+            v.swap(_heap[0]);
         }
     }
     void clear() {
@@ -1399,12 +1431,28 @@ public:
     void resize(size_t size) {
         _heap.resize(size);
     }
+    void resize(size_t size, const T& default_value) {
+        _heap.resize(size, default_value);
+    }
+    void reserve(size_t size) {
+        _heap.reserve(size);
+    }
     size_t size() const {
         return _heap.size();
     }
     bool empty() const {
         return _heap.empty();
     }
+    void push(T v) {
+        _heap.push_back(std::move(v));
+    }
+
+    void make_heap() {
+        for (int i = static_cast<int>(_heap.size()) / 2 - 1; i >= 0; i--) {
+            shiftdown(i);
+        }
+    }
+
 private:
     void shiftdown(size_t index) {
         size_t left_index = index * 2 + 1;
@@ -1478,6 +1526,8 @@ extern void update_schema_conf_common(const std::string& table_name, const pb::S
 extern void update_op_version(pb::SchemaConf* p_conf, const std::string& desc);
 extern int primitive_to_proto_type(pb::PrimitiveType type);
 extern int primitive_type_bytes_len(pb::PrimitiveType type);
+extern int primitive_to_arrow_type(pb::PrimitiveType type);
+extern pb::PrimitiveType mysql_type_to_primitive_type(const std::string& mysql_type_str);
 extern int get_physical_room(const std::string& ip_and_port_str, std::string& host);
 extern int get_instance_from_bns(int* ret,
                           const std::string& bns_name, 
@@ -1524,6 +1574,18 @@ inline uint64_t make_sign(const std::string& key) {
     uint64_t out[2];
     butil::MurmurHash3_x64_128(key.c_str(), key.size(), 1234, out);
     return out[0];
+}
+
+inline uint64_t make_sign(const std::string_view& key) {
+    uint64_t out[2];
+    butil::MurmurHash3_x64_128(key.data(), key.length(), 1234, out);
+    return out[0];
+}
+
+inline uint64_t make_sign32(const std::string& key) {
+    uint32_t out;
+    butil::MurmurHash3_x86_32(key.c_str(), key.size(), 1234, &out);
+    return out;
 }
 
 inline bool float_equal(double value, double compare, double epsilon = 1e-9) {
@@ -1696,5 +1758,8 @@ inline int iconv_convert(std::string& dst, const std::string& src) {
 
 extern int convert_charset(const pb::Charset& from_charset, const std::string& from_str,
                            const pb::Charset& to_charset, std::string& to_str);
+
+extern bool is_valid_ip(const std::string& ip);
+
 } // namespace baikaldb
 

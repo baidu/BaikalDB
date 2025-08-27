@@ -25,6 +25,7 @@
 #include "meta_util.h"
 #include "table_key.h"
 #include "ddl_manager.h"
+#include "mysql_interact.h"
 #ifdef BAIDU_INTERNAL
 #include <raft/repeated_timer_task.h>
 #else
@@ -35,7 +36,7 @@ namespace baikaldb {
 DECLARE_int64(table_tombstone_gc_time_s);
 DECLARE_int64(store_heart_beat_interval_us);
 DECLARE_int32(pre_split_threashold);
-
+DECLARE_int32(baikal_heartbeat_interval_us);
 
 enum MergeStatus {
     MERGE_IDLE   = 0, //空闲
@@ -131,7 +132,6 @@ struct TableSchedulingInfo {
 };
 using DoubleBufferedTableSchedulingInfo = butil::DoublyBufferedData<TableSchedulingInfo>;
 
-
 class TableTimer : public braft::RepeatedTimerTask {
 public:
     TableTimer() {}
@@ -146,6 +146,15 @@ private:
     std::atomic<bool> _is_last_dynamic_change_done = true;
 };
 
+class DBLinkMysqlTableTimer : public braft::RepeatedTimerTask {
+public:
+    DBLinkMysqlTableTimer() {}
+    virtual ~DBLinkMysqlTableTimer() {}
+    virtual void run();
+protected:
+    virtual void on_destroy() {}
+};
+
 using VirtualIndexInfo = std::unordered_map<std::string, std::set<std::pair<std::string,std::string>>>;
 
 class TableManager {
@@ -155,6 +164,8 @@ public:
         bthread_mutex_destroy(&_load_virtual_to_memory_mutex);
         _table_timer.stop();
         _table_timer.destroy();
+        _dblink_mysql_table_timer.stop();
+        _dblink_mysql_table_timer.destroy();
     }
     static TableManager* get_instance()  {
         static TableManager instance;
@@ -1559,15 +1570,19 @@ public:
     void get_change_partition_schemas(std::vector<pb::SchemaInfo>& add_partition_schemas, 
                                       std::vector<pb::SchemaInfo>& del_partition_schemas,
                                       std::vector<pb::SchemaInfo>& cold_partition_schemas);
-    
     void get_change_partition_schema(const pb::SchemaInfo& schema, 
                                      pb::SchemaInfo& add_partition_schema, 
                                      pb::SchemaInfo& del_partition_schema,
                                      pb::SchemaInfo& cold_partition_schema);
-
     // 判断副本所在分区是否存在
     void check_partition_exist_for_peer(
             const pb::StoreHeartBeatRequest* request, pb::StoreHeartBeatResponse* response);
+
+    // DBLink Mysql
+    // 获取DBLink Mysql的表
+    void get_dblink_mysql_schemas(std::vector<pb::SchemaInfo>& schemas);
+    // 获取DBLink Mysql的表字段
+    int get_fields_from_mysql(const pb::MysqlInfo& mysql_info, std::vector<pb::FieldInfo>& fields);
 
     // 获取主表id
     void get_table_ids(std::set<int64_t>& table_ids) {
@@ -1671,6 +1686,7 @@ private:
         bthread_mutex_init(&_table_mutex, NULL);
         bthread_mutex_init(&_load_virtual_to_memory_mutex, NULL);
         _table_timer.init(3600 * 1000); // 1h
+        _dblink_mysql_table_timer.init(FLAGS_baikal_heartbeat_interval_us / 1000);
     }
     int write_schema_for_not_level(TableMem& table_mem,
                                     braft::Closure* done,
@@ -1816,6 +1832,7 @@ private:
     std::set<int64_t>                          _just_add_virtual_index_info;
     IncrementalUpdate<std::vector<pb::SchemaInfo>> _incremental_schemainfo;
     TableTimer _table_timer;
+    DBLinkMysqlTableTimer _dblink_mysql_table_timer;
 
     DoubleBufferedTableSchedulingInfo             _table_scheduling_infos;
 }; //class

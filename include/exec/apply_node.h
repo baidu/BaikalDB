@@ -45,6 +45,8 @@ public:
 
     void get_slot_ref_sign_set(RuntimeState* state, std::set<int64_t>& sign_set);
 
+    virtual int show_explain(QueryContext* ctx, std::vector<std::map<std::string, std::string>>& output, int& next_id, int display_id);
+    
 private:
     void extract_eq_inner_slots(ExprNode* expr_node);
     int hash_apply(RuntimeState* state);
@@ -63,8 +65,6 @@ private:
     }
 private:
     bool    _max_one_row = false;
-    bool    _has_matched = false;
-    bool    _all_matched = true;
     bool    _is_select_field = false;
     std::map<int64_t, std::vector<ExprNode*>> _literal_maps;
     std::set<int64_t> _slot_ref_sign_set;

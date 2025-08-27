@@ -25,9 +25,13 @@
 #include "schema_factory.h"
 #include "range.h"
 #include "agg_node.h"
+#include "window_node.h"
 
 namespace baikaldb {
-
+struct IndexSelectorOptions {
+    ExprNode* join_on_conditions = nullptr;
+    pb::ExecuteType execute_type = pb::EXEC_ROW;
+};
 class IndexSelector {
 public:
     IndexSelector() {}
@@ -36,6 +40,7 @@ public:
      * 对每个索引字段都去表达式中寻找是否能命中
      */
     int analyze(QueryContext* ctx);
+    void analyze_join_index(QueryContext* ctx, ScanNode* scan_node, ExprNode* in_condition);
     // -2 表示always false
     int64_t index_selector(const std::vector<pb::TupleDescriptor>& tuple_descs,
                         ScanNode* scan_node,
@@ -45,10 +50,11 @@ public:
                         PacketNode* packet_node,
                         AggNode* agg_node,
                         FilterNode* having_filter_node,
+                        WindowNode* window_node,
                         bool* index_has_null,
                         std::map<int32_t, int>& field_range_type,
                         const std::string& sample_sql,
-                        std::vector<ExprNode*>* join_on_conditions = nullptr);
+                        const IndexSelectorOptions& options);
 private:
     void hit_row_field_range(ExprNode* expr, std::map<int32_t, range::FieldRange>& field_range_map, bool* index_predicate_is_null);
     void hit_match_against_field_range(ExprNode* expr, 
@@ -64,21 +70,35 @@ private:
                                 PacketNode* packet_node, 
                                 AggNode* agg_node,
                                 FilterNode* having_filter_node,
+                                WindowNode* window_node,
                                 std::map<int32_t, range::FieldRange>& field_range_map);
     bool check_date_range_valid_for_rollup(SmartTable& table_info,                                     
                                             const IndexInfo& index_info,
                                             FilterNode* filter_node, 
                                             std::map<int32_t, range::FieldRange>& field_range_map);
 
-    bool is_field_has_arrow_reverse_index(int64_t table_id, int64_t field_id, int64_t* index_id_ptr) {
+    bool is_field_has_reverse_index(int64_t table_id, int64_t field_id, int64_t* index_id_ptr) {
         auto table_ptr = _factory->get_table_info_ptr(table_id);
         if (table_ptr != nullptr) {
+            // 优先选择arrow格式
             auto iter = table_ptr->arrow_reverse_fields.find(field_id);
             if (iter != table_ptr->arrow_reverse_fields.end()) {
                 *index_id_ptr = iter->second;
                 auto index_ptr = _factory->get_index_info_ptr(*index_id_ptr);
-                if (index_ptr != nullptr) {
-                    return index_ptr->state == pb::IS_PUBLIC;   
+                if (index_ptr != nullptr
+                        && index_ptr->state == pb::IS_PUBLIC
+                        && index_ptr->index_hint_status == pb::IHS_NORMAL) {
+                    return true;
+                }
+            }
+            iter = table_ptr->reverse_fields.find(field_id);
+            if (iter != table_ptr->reverse_fields.end()) {
+                *index_id_ptr = iter->second;
+                auto index_ptr = _factory->get_index_info_ptr(*index_id_ptr);
+                if (index_ptr != nullptr
+                        && index_ptr->state == pb::IS_PUBLIC
+                        && index_ptr->index_hint_status == pb::IHS_NORMAL) {
+                    return true;
                 }
             }
         }

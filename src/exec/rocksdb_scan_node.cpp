@@ -20,7 +20,6 @@
 #include "scalar_fn_call.h"
 #include "slot_ref.h"
 #include "runtime_state.h"
-#include "parser.h"
 #include "qos.h"
 #include <arrow/acero/options.h>
 #include "arrow_io_excutor.h"
@@ -29,9 +28,8 @@
 namespace baikaldb {
 
 DEFINE_bool(reverse_seek_first_level, false, "reverse index seek first level, default(false)");
-DEFINE_bool(scan_use_multi_get, true, "use MultiGet API, default(true)");
+// DEFINE_bool(scan_use_multi_get, true, "use MultiGet API, default(true)");
 DEFINE_int32(in_predicate_check_threshold, 4096, "in predicate threshold to check memory, default(4096)");
-DEFINE_bool(auto_ajust_topk, true, "auto_ajust_topk");
 DECLARE_int64(print_time_us);
 DECLARE_int32(chunk_size);
 
@@ -116,19 +114,19 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
             }
         }
     }
-    for (auto& slot : _tuple_desc->slots()) {
-        if (_index_slot_field_map.count(slot.slot_id()) == 0) {
-            _is_covering_index = false;
-            break;
-        }
-    }
     // 以baikaldb的判断为准
-    if (pos_index.is_covering_index() && !_is_covering_index) {
-        DB_WARNING("covering_index conflict, index_id = [%ld]", _index_id);
-        _is_covering_index = true;
-    }
+    _is_covering_index = pos_index.is_covering_index();
+
     if (use_vector) {
+        index_condition_pushdown();
         for (auto expr : _scan_conjuncts) {
+            ret = expr->open();
+            if (ret < 0) {
+                DB_WARNING_STATE(state, "Expr::open fail:%d", ret);
+                return ret;
+            }
+        }
+        for (auto expr : _vector_filter_conjuncts) {
             ret = expr->open();
             if (ret < 0) {
                 DB_WARNING_STATE(state, "Expr::open fail:%d", ret);
@@ -146,8 +144,18 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
             }
             for (auto& range : pos_index.ranges()) {
                 _vector_word = range.left_key();
-                _topk = std::max(range.topk(), _topk);
+                int topk = range.topk();
+                if (topk < 0) {
+                    // 兼容没有order by的场景
+                    // select * from tbl where match(vec) against ('' in vector mode) limit 100;
+                    // select * from tbl where match(vec) against ('' in vector mode) and id > 0 limit 100;
+                    if (_parent != nullptr) {
+                        topk = _parent->get_limit();
+                    }
+                }
+                _topk = std::max(topk, _topk);
                 _separate_value = range.separate_value();
+                _efsearch = std::max(range.efsearch(), _efsearch);
             }
         }
         _vector_index = state->vector_index_map()[_index_id];
@@ -352,8 +360,9 @@ bool RocksdbScanNode::need_pushdown(ExprNode* expr) {
     if (_use_get || (index_type == pb::I_PRIMARY && !is_cstore_table_seek)) {
         return false;
     }
-    if (index_type == pb::I_KEY || index_type == pb::I_UNIQ) {
+    if (index_type == pb::I_KEY || index_type == pb::I_UNIQ || index_type == pb::I_FULLTEXT) {
         // 普通索引只要全包含slot id就可以下推
+        // 对于倒排 _index_slot_field_map 里只有pk和 __weight和 __querywords
         std::unordered_set<int32_t> slot_ids;
         expr->get_all_slot_ids(slot_ids);
         for (auto slot_id : slot_ids) {
@@ -412,16 +421,50 @@ int RocksdbScanNode::index_condition_pushdown() {
             _scan_conjuncts.emplace_back(*iter);
             iter = parent_conditions->erase(iter);
         } else {
-            ++iter;
+            if (_index_info->type == pb::I_VECTOR) {
+                // 向量索引需要将过滤条件下推，用于前过滤
+                _vector_filter_conjuncts.emplace_back(*iter);
+                iter = parent_conditions->erase(iter);
+            } else {
+                ++iter;
+            }
         }
     }
     return 0;
 }
 
+int RocksdbScanNode::index_condition_pullup() {
+    if (_parent == NULL) {
+        return 0;
+    }
+    if (_parent->node_type() != pb::WHERE_FILTER_NODE &&
+            _parent->node_type() != pb::TABLE_FILTER_NODE) {
+        return 0;
+    }
+    std::vector<ExprNode*>* parent_conditions = _parent->mutable_conjuncts();
+    if (parent_conditions == nullptr) {
+        DB_WARNING("parent_conditions is nullptr");
+        return -1;
+    }
+    for (auto* conjunct : _vector_filter_conjuncts) {
+        parent_conditions->emplace_back(conjunct);
+    }
+    _vector_filter_conjuncts.clear();
+    return 0;
+}
+
 int RocksdbScanNode::build_arrow_declaration(RuntimeState* state) {
-    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
+    START_LOCAL_TRACE_WITH_PARTITION_PROPERTY(get_trace(), state->get_trace_cost(), &_partition_property, OPEN_TRACE, nullptr);
     for (auto c : _children) {
         if (c->build_arrow_declaration(state) != 0) {
+            return -1;
+        }
+    }
+    // MPP场景下，_arrow_vectorized_reader为nullptr
+    if (_arrow_vectorized_reader == nullptr) {
+        _arrow_vectorized_reader = std::make_shared<RocksdbVectorizedReader>();
+        if (_arrow_vectorized_reader->init(this, state) != 0) {
+            DB_WARNING("Fail to init arrow vectorized reader");
             return -1;
         }
     }
@@ -430,13 +473,20 @@ int RocksdbScanNode::build_arrow_declaration(RuntimeState* state) {
         arrow::Iterator<std::shared_ptr<arrow::RecordBatch>> batch_it = arrow::MakeIteratorFromReader(_arrow_vectorized_reader);
         return batch_it;
     };
-    arrow::acero::Declaration dec{"record_batch_source",
+
+    if (state->vectorlized_parallel_execution == false) {
+        arrow::acero::Declaration dec{"record_batch_source",
             arrow::acero::RecordBatchSourceNodeOptions{state->arrow_input_schemas[_tuple_id], std::move(iter_maker)}}; 
-    //auto io_executor = BthreadArrowExecutor::Make(1);
-    //arrow::acero::Declaration dec{"record_batch_reader_source",
-    //        arrow::acero::RecordBatchReaderSourceNodeOptions{vectorized_reader, /*io_executor*/(*io_executor).get()}};
-    LOCAL_TRACE_ARROW_PLAN_WITH_SCHEMA(dec, state->arrow_input_schemas[_tuple_id], nullptr);
-    state->append_acero_declaration(dec);
+        LOCAL_TRACE_ARROW_PLAN_WITH_SCHEMA(dec, state->arrow_input_schemas[_tuple_id], nullptr);
+        state->append_acero_declaration(dec);
+    } else {
+        auto executor = BthreadArrowExecutor::Make(1);
+        _arrow_io_executor = *executor;
+        arrow::acero::Declaration dec{"record_batch_source",
+            arrow::acero::RecordBatchSourceNodeOptions{state->arrow_input_schemas[_tuple_id], std::move(iter_maker), _arrow_io_executor.get()}}; 
+        LOCAL_TRACE_ARROW_PLAN_WITH_SCHEMA(dec, state->arrow_input_schemas[_tuple_id], nullptr);
+        state->append_acero_declaration(dec);
+    }
 
     std::vector<arrow::compute::Expression> sub_exprs;
     // append scan index filter
@@ -507,7 +557,6 @@ int RocksdbScanNode::open(RuntimeState* state) {
         }
         local_node.append_description() << " index_id:" << _index_id;
     }));
- 
     int ret = 0;
     ret = ScanNode::open(state);
     if (ret < 0) {
@@ -519,29 +568,18 @@ int RocksdbScanNode::open(RuntimeState* state) {
     if (_is_explain) {
         return 0;
     }
-    ret = choose_index(state);
-    if (ret < 0) {
-        DB_WARNING_STATE(state, "calc index fail:%d", ret);
-        return ret;
-    }
     if (_table_info == nullptr) {
         DB_WARNING_STATE(state, "table null:%d", ret);
         return -1;
-    }
-    if (_index_info == nullptr) {
-        DB_WARNING_STATE(state, "index null:%d", ret);
-        return -1;
-    }
-    if (_sort_use_index) {
-        state->set_sort_use_index();
     }
     std::set<int32_t> pri_field_ids;
     for (auto& field_info : _pri_info->fields) {
         pri_field_ids.insert(field_info.id);
     }
-    _region_id = state->region_id();
     // 用数组映射slot，提升性能
     _field_slot.resize(_table_info->fields.back().id + 1);
+    std::vector<int32_t> virtual_cols;
+    virtual_cols.reserve(2);
     for (auto& slot : _tuple_desc->slots()) {
         if (slot.field_id() > _field_slot.size() - 1) {
             DB_WARNING("vector out of range, region_id: %ld, field_id: %d", _region_id, slot.field_id());
@@ -554,13 +592,14 @@ int RocksdbScanNode::open(RuntimeState* state) {
                 DB_WARNING("field not found region_id: %ld, field_id: %d", _region_id, slot.field_id());
                 return -1;
             }
+
+            _field_ids[slot.field_id()] = field;
             // 这两个倒排的特殊字段
-            if (field->short_name != "__weight" &&
-                field->short_name != "__querywords") {
-                _field_ids[slot.field_id()] = field;
-            } else {
+            if (field->short_name == "__weight" ||
+                field->short_name == "__querywords") {
                 _has__weight = true;
                 // 倒排__weight也能index过滤
+                virtual_cols.emplace_back(slot.field_id());
                 _index_slot_field_map[slot.slot_id()] = field->id;
             }
         }
@@ -576,12 +615,32 @@ int RocksdbScanNode::open(RuntimeState* state) {
             }
         }
     }
+    ret = choose_index(state);
+    if (ret < 0) {
+        DB_WARNING_STATE(state, "calc index fail:%d", ret);
+        return ret;
+    }
+    if (_index_info == nullptr) {
+        DB_WARNING_STATE(state, "index null:%d", ret);
+        return -1;
+    }
+    if (_index_info->type != pb::I_FULLTEXT && _index_info->type != pb::I_VECTOR) {
+        // 不命中全文或者向量索引的情况不需要这两个字段
+        for (auto it: virtual_cols) {
+            _field_ids.erase(it);
+        }
+    }
+    if (_sort_use_index) {
+        state->set_sort_use_index();
+    }
+    _region_id = state->region_id();
     //DB_WARNING_STATE(state, "use_index: %ld table_id: %ld region_id: %ld", _index_id, _table_id, _region_id);
     _region_info = &(state->resource()->region_info);
     if (_region_info->has_main_table_id()
         && _region_info->main_table_id() != _region_info->table_id()) {
         _is_global_index = true;
     }
+
     auto txn = state->txn();
     auto reverse_index_map = state->reverse_index_map();
     //DB_WARNING_STATE(state, "_is_covering_index:%d", _is_covering_index);
@@ -591,13 +650,21 @@ int RocksdbScanNode::open(RuntimeState* state) {
                                                _pri_info, 
                                                _table_info, 
                                                _vector_word, 
-                                               _topk, 
+                                               _topk,
+                                               _efsearch,
                                                _left_records, 
-                                               _vector_retry++, 
-                                               _vector_eos);
+                                               _vector_filter_conjuncts,
+                                               _scan_conjuncts,
+                                               _pre_filter_conjuncts);
         if (ret < 0) {
-            DB_FATAL("vector_index search fail, index:%ld, table:%ld", _index_info->id, _table_info->id);
+            DB_FATAL("vector_index fail search, index:%ld, table:%ld", _index_info->id, _table_info->id);
             return -1;
+        }
+        if (!_vector_filter_conjuncts.empty()) {
+            if (index_condition_pullup() != 0) {
+                DB_WARNING("Fail to put conjuncts back to parent");
+                return -1;
+            }
         }
         DB_WARNING("vector_index search, index:%ld, table:%ld, size:%lu", _index_info->id, _table_info->id, _left_records.size());
     } else if (_reverse_infos.size() > 1) {
@@ -617,42 +684,26 @@ int RocksdbScanNode::open(RuntimeState* state) {
                 return -1;
             }
 
-            if (_storage_type == pb::ST_PROTOBUF_OR_FORMAT1) {
-                _m_index.search(txn->get_txn(), _pri_info, _table_info, 
+            if (_storage_type == pb::ST_PROTOBUF_OR_FORMAT1 || _storage_type == pb::ST_ARROW) {
+                _m_index.search(txn->get_txn(), _pri_info, _table_info,
                     reverse_index_map, !FLAGS_reverse_seek_first_level, 
                     _pb_node.derive_node().scan_node().fulltext_index());
-            } else if (_storage_type == pb::ST_ARROW) {
-                _m_arrow_index.search(txn->get_txn(), _pri_info, _table_info, 
-                    reverse_index_map, !FLAGS_reverse_seek_first_level, 
-                    _pb_node.derive_node().scan_node().fulltext_index());
+                //DB_FATAL("fulltext: %s", _pb_node.derive_node().scan_node().fulltext_index().DebugString().c_str());
             } else {
                 DB_FATAL("fulltext storage type error");
                 return -1;
             }
         } else {
+            // 应该不会再走这了
             // 为了性能,多索引倒排查找不seek
-
             if (_factory->get_index_storage_type(_index_id, _storage_type) == -1) {
                 DB_FATAL("get index storage type error.");
                 return -1;
             }
 
-            if (_storage_type == pb::ST_PROTOBUF_OR_FORMAT1) {
-                std::vector<ReverseIndex<CommonSchema>*> common_reverse_indexes;
-                common_reverse_indexes.reserve(4);
-                for (auto index_ptr : _reverse_indexes) {
-                    common_reverse_indexes.emplace_back(static_cast<ReverseIndex<CommonSchema>*>(index_ptr));
-                }
+            if (_storage_type == pb::ST_PROTOBUF_OR_FORMAT1 || _storage_type == pb::ST_ARROW) {
                 _m_index.search(txn->get_txn(), _pri_info, _table_info, 
-                    common_reverse_indexes, _query_words, _match_modes, !FLAGS_reverse_seek_first_level, !_bool_and);
-            } else if (_storage_type == pb::ST_ARROW) {
-                std::vector<ReverseIndex<ArrowSchema>*> arrow_reverse_indexes;
-                arrow_reverse_indexes.reserve(4);
-                for (auto index_ptr : _reverse_indexes) {
-                    arrow_reverse_indexes.emplace_back(static_cast<ReverseIndex<ArrowSchema>*>(index_ptr));
-                }
-                _m_arrow_index.search(txn->get_txn(), _pri_info, _table_info, 
-                    arrow_reverse_indexes, _query_words, _match_modes, !FLAGS_reverse_seek_first_level, !_bool_and);
+                    _reverse_indexes, _query_words, _match_modes, !FLAGS_reverse_seek_first_level, !_bool_and);
             } else {
                 DB_FATAL("fulltext storage type error");
                 return -1;
@@ -708,7 +759,11 @@ int RocksdbScanNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         DB_WARNING_STATE(state, "sql exec reach timeout");
         return -1;
     }
-    if (state->execute_type == pb::EXEC_ARROW_ACERO && batch->use_memrow() && _arrow_vectorized_reader != nullptr) {
+    if (state->execute_type == pb::EXEC_ARROW_ACERO 
+            && batch->use_memrow() 
+            && _arrow_vectorized_reader != nullptr 
+            && _scan_rows >= ROW_BATCH_CAPACITY) {
+        // 扫描量超过1024才转列执行
         set_node_exec_type(pb::EXEC_ARROW_ACERO);
         return 0;
     }
@@ -728,15 +783,15 @@ int RocksdbScanNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
     int ret = 0;
     if (_index_id == _table_id || _index_info->type == pb::I_ROLLUP) {
         if (_use_get) {
-            ret =  get_next_by_table_get(state, batch, eos);
+            ret = get_next_by_table_get(state, batch, eos);
         } else {
-            ret =  get_next_by_table_seek(state, batch, eos);
+            ret = get_next_by_table_seek(state, batch, eos);
         }
     } else {
         if (_use_get) {
-            ret =  get_next_by_index_get(state, batch, eos);
+            ret = get_next_by_index_get(state, batch, eos);
         } else {
-            ret =  get_next_by_index_seek(state, batch, eos);
+            ret = get_next_by_index_seek(state, batch, eos);
         }
     }
     // 更新qos统计信息
@@ -744,21 +799,21 @@ int RocksdbScanNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
     if (ret < 0) {
         return ret;
     }
-
     if (state->execute_type == pb::EXEC_ROW 
             && 0 != state->memory_limit_exceeded(_scan_rows, batch->used_bytes_size())) {
         // [ARROW TODO] 列存不感知上面filter和agg, 先不支持memory_limit
         return -1;
     }
-    if (state->execute_type == pb::EXEC_ARROW_ACERO && _arrow_vectorized_reader == nullptr) {
-        // 处理第一个rowbatch
+    if (state->execute_type == pb::EXEC_ARROW_ACERO && batch->use_memrow()) {
         // [ARROW TODO] filter+limit ; 第一个batch的eos=false, 可能会在这里多转一次列存但是不使用
         if (*eos == false || state->force_vectorize) {
-            // 将第一个rowbatch转chunk arrow
-            _arrow_vectorized_reader = std::make_shared<RocksdbVectorizedReader>();
-            ret = _arrow_vectorized_reader->init(this, state);
-            if (ret != 0) {
-                return -1;
+            // 行数据转列recordbatch
+            if (_arrow_vectorized_reader == nullptr) {
+                _arrow_vectorized_reader = std::make_shared<RocksdbVectorizedReader>();
+                ret = _arrow_vectorized_reader->init(this, state);
+                if (ret != 0) {
+                    return -1;
+                }
             }
             ret = _arrow_vectorized_reader->add_first_row_batch(batch);
             if (ret != 0) {
@@ -777,10 +832,14 @@ void RocksdbScanNode::close(RuntimeState* state) {
     for (auto expr : _scan_conjuncts) {
         expr->close();
     }
+    for (auto expr : _vector_filter_conjuncts) {
+        expr->close();
+    }
+    for (auto expr : _pre_filter_conjuncts) {
+        expr->close();
+    }
     _idx = 0;
     _topk = 10;
-    _vector_retry = 0;
-    _vector_eos = false;
     _reverse_infos.clear();
     _query_words.clear();
     _match_modes.clear();
@@ -852,11 +911,16 @@ int RocksdbScanNode::get_next_by_table_get(RuntimeState* state, RowBatch* batch,
         if (batch->is_full()) {
             return 0;
         }
+
+        if (batch->chunk_exceed_max_size()) {
+            return 0;
+        }
         if (_scan_range_keys.is_traverse_over()) {
+
             *eos = true;
             return 0;
         }
-        if (!FLAGS_scan_use_multi_get || _get_mode != GET_ONLY) {
+        if (_get_mode != GET_ONLY) {
             ++_scan_rows;
             auto key_pair = _scan_range_keys.get_next();
             int ret = txn->get_update_primary(_region_id, *_pri_info, key_pair->left_key(), record,
@@ -938,11 +1002,15 @@ int RocksdbScanNode::get_next_by_index_get(RuntimeState* state, RowBatch* batch,
         if (batch->is_full()) {
             return 0;
         }
+
+        if (batch->chunk_exceed_max_size()) {
+            return 0;
+        }
         if (_scan_range_keys.is_traverse_over()) {
             *eos = true;
             return 0;
         }
-        if (!FLAGS_scan_use_multi_get || _get_mode != GET_ONLY) {
+        if (_get_mode != GET_ONLY) {
             ++_scan_rows;
             auto key_pair = _scan_range_keys.get_next();
             int ret = txn->get_update_secondary(_region_id, *_pri_info, *_index_info, key_pair->left_key(), record,
@@ -1160,13 +1228,13 @@ int RocksdbScanNode::index_ddl_work(RuntimeState* state, MemRow* row) {
         }
         return 0;
     }
-    for (auto& pair: _field_ids) {
-        int32_t field_id = pair.first;
-        int32_t slot_id = _field_slot[field_id];
-        row->set_value(_tuple_id, slot_id, record->get_value(record->get_field_by_idx(pair.second->pb_idx)));
-    }
-    SmartRecord exist_record = record->clone();
     if (_ddl_index_info->type != pb::I_ROLLUP) {
+        for (auto& pair: _field_ids) {
+            int32_t field_id = pair.first;
+            int32_t slot_id = _field_slot[field_id];
+            row->set_value(_tuple_id, slot_id, record->get_value(record->get_field_by_idx(pair.second->pb_idx)));
+        }
+        SmartRecord exist_record = record->clone();
         ret = txn->get_update_secondary(_region_id, *_pri_info, *_ddl_index_info, exist_record, GET_LOCK, true);
         if (ret == 0) {
             MutTableKey key;
@@ -1260,6 +1328,9 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
             return 0;
         }
         if (batch->is_full()) {
+            return 0;
+        }
+        if (batch->chunk_exceed_max_size()) {
             return 0;
         }
 
@@ -1552,6 +1623,9 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
         if (batch->is_full()) {
             return 0;
         }
+        if (batch->chunk_exceed_max_size()) {
+            return 0;
+        }
         if (multiget_last_records) {
             if (need_multiget_primary) {
                 filter_cnt = vectorize_filter(state, index_data_chunk);
@@ -1576,26 +1650,7 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
         }
         if (_vector_index != nullptr) {
             if (_idx >= _left_records.size()) {
-                if (FLAGS_auto_ajust_topk && !_vector_eos) {
-                    _left_records.clear();
-                    _topk *= 10;
-                    int ret = _vector_index->search_vector(txn->get_txn(), 
-                                                           _separate_value, 
-                                                           _pri_info, 
-                                                           _table_info, 
-                                                           _vector_word, 
-                                                           _topk, 
-                                                           _left_records, 
-                                                           _vector_retry++, 
-                                                           _vector_eos);
-                    if (ret < 0) {
-                        DB_FATAL("vector_index search fail, index:%ld, table:%ld", _index_info->id, _table_info->id);
-                        return -1;
-                    }
-                    DB_WARNING("vector_index search, index:%ld, table:%ld, size:%lu", _index_info->id, _table_info->id, _left_records.size());
-                } else {
-                    multiget_last_records = true;
-                }
+                multiget_last_records = true;
                 continue;
             }
         } else if (_reverse_indexes.size() > 0) {
@@ -1605,7 +1660,7 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
             }
         } else if (_reverse_index != nullptr) {
             if (!_reverse_index->valid()) {
-               multiget_last_records = true;
+                multiget_last_records = true;
                 continue;
             }
         } else {
@@ -1701,8 +1756,7 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
             ++index_filter_cnt;
             continue;
         }
-
-        if (use_record && use_chunk && !_has__weight) {
+        if (use_record && use_chunk && _get_mode == GET_ONLY) {
             if (need_multiget_primary) {
                 // 列式执行, 需要反查主表
                 // 攒一批进行列式filter
@@ -1727,7 +1781,7 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
         }
         //DB_NOTICE("get index: %ld", cost.get_time());
         //cost.reset();
-        if (!FLAGS_scan_use_multi_get || _has__weight || _get_mode != GET_ONLY) {
+        if (_get_mode != GET_ONLY) {
             if (need_multiget_primary) {
                 ++get_primary_cnt;
                 // todo: 反查直接用encode_key
@@ -1857,7 +1911,7 @@ int RocksdbScanNode::get_key_points(RuntimeState* state, RowBatch* batch, bool* 
         return -1;
     }
     if (_index_id != _pri_info->id) {
-        DB_FATAL("get_key_points only support usding primary index");
+        DB_FATAL("get_key_points only support using primary index");
         return -1;
     }
     std::string region_start_key = _region_info->start_key();
@@ -1881,61 +1935,21 @@ int RocksdbScanNode::get_key_points(RuntimeState* state, RowBatch* batch, bool* 
 
     rocksdb::TablePropertiesCollection props;
     if (state->txn()->use_cold_db()) {
-        db->get_cold_key_points(rocksdb_start_key.data(), rocksdb_end_key.data(), props);
+        db->get_cold_sst_properties(rocksdb_start_key.data(), rocksdb_end_key.data(), props);
     } else {
-        db->get_key_points(rocksdb_start_key.data(), rocksdb_end_key.data(), props);
+        db->get_sst_properties(rocksdb_start_key.data(), rocksdb_end_key.data(), props);
     }
+    std::vector<rocksdb::Slice> keys;
+    db->decode_key_points(region_start_key, region_end_key, rocksdb_start_key.data().substr(0, 16), props, keys);
+    _scan_rows += keys.size();
     uint32_t num = 0;
-    uint32_t sst_num = 0;
-    for (const auto& item : props) {
-        if (item.second == nullptr) {
+    for (const auto& key : keys) {
+        if (decode_key_points(state, batch, key) != 0) {
             continue;
         }
-        auto& user_collected = item.second->user_collected_properties;
-        if (user_collected.find("key_point_lens") == user_collected.end() 
-            || user_collected.find("key_points") == user_collected.end()) {
-            continue;
-        }
-        rocksdb::Slice key_lens(user_collected.at("key_point_lens"));
-        rocksdb::Slice keys(user_collected.at("key_points"));
-        uint64_t len_pos = 0;
-        uint64_t key_pos = 0;
-        uint64_t key_len = 0;
-        rocksdb::Slice key;
-        while (len_pos + sizeof(key_len) - 1 < key_lens.size() && key_pos < keys.size()) {
-            _scan_rows++;
-            char* c = const_cast<char*>(key_lens.data_ + len_pos);
-            key_len = KeyEncoder::to_endian_u64(*reinterpret_cast<uint64_t*>(c));
-            if (key_pos + key_len - 1 >= keys.size()) {
-                break;
-            } 
-
-            key = rocksdb::Slice(keys.data_ + key_pos, key_len);
-            len_pos += sizeof(key_len);
-            key_pos += key_len;
-
-            if (!key.starts_with(rocksdb_start_key.data().substr(0, 16))) {
-                continue;
-            }
-            key.remove_prefix(2 * sizeof(int64_t));
-
-            // 检查keypoint是否在region范围内
-            if (!region_start_key.empty() && key.compare(region_start_key) < 0) {
-                continue;
-            }
-            if (!region_end_key.empty() && key.compare(region_end_key) >= 0) {
-                continue;
-            }
-            // 解析keypoint
-            if (decode_key_points(state, batch, key) != 0) {
-                continue;
-            }
-            ++num;
-        }
-        sst_num++;
-        DB_DEBUG("GetPropertiesOfTablesInRange return sst_num: %d, num: %d, size_len: %ld, value_len: %ld", 
-            sst_num, num, key_lens.size(), keys.size());
+        ++num;
     }
+    
     *eos = true;
     return num;
 }
@@ -1961,7 +1975,7 @@ int RocksdbVectorizedReader::add_first_row_batch(RowBatch* first_batch) {
     }
     _first_batch_need_handle = true;
     if (first_batch->size() > 0) {
-        _batch.set_capacity(first_batch->size());
+        _batch.set_capacity(_batch.size());
     }
     return 0;
 }
@@ -1980,6 +1994,7 @@ arrow::Status RocksdbVectorizedReader::ReadNext(std::shared_ptr<arrow::RecordBat
         local_node.add_index_filter_rows(index_filter_cnt);
         local_node.add_where_filter_rows(where_filter_cnt);
     }));
+    
     while (1) {
         if (_eos) {
             out->reset();
@@ -1993,7 +2008,7 @@ arrow::Status RocksdbVectorizedReader::ReadNext(std::shared_ptr<arrow::RecordBat
             _batch.set_capacity(std::min(FLAGS_chunk_size, 2 * (int32_t)_batch.capacity()));
             ret = _scan_node->get_next(_state, &_batch, &_eos);
             if (ret < 0) {
-                DB_FATAL("rocksdb scan node get_next fail in arrow mode");
+                DB_FATAL("rocksdb scan node get_next fail in vectorize mode");
                 return arrow::Status::IOError("RocksdbVectorizedReader read fail");
             }
         }

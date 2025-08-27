@@ -433,6 +433,7 @@ int Region::binlog_reset_on_snapshot_load_restart() {
     //重新读取check point
     _binlog_param.check_point_ts = _meta_writer->read_binlog_check_point(_region_id);
     _binlog_param.oldest_ts      = _meta_writer->read_binlog_oldest_ts(_region_id);
+    _binlog_param.data_cf_oldest_ts = _meta_writer->read_binlog_data_cf_oldest_ts(_region_id);
     _binlog_param.ts_binlog_map.clear();
     if (_binlog_param.check_point_ts > 0) {
         int ret = binlog_scan_when_restart();
@@ -446,6 +447,12 @@ int Region::binlog_reset_on_snapshot_load_restart() {
         _meta_writer->write_binlog_oldest_ts(_region_id, _binlog_param.check_point_ts);
         _binlog_param.oldest_ts = _binlog_param.check_point_ts;
     }
+    // 缺数据先设置为check_point_ts 防止启动过慢，等ttl更新rocksdb
+    if (_binlog_param.data_cf_oldest_ts < -1) {
+//        int64_t ts = read_data_cf_oldest_ts();
+        _meta_writer->write_binlog_data_cf_oldest_ts(_region_id, _binlog_param.check_point_ts);
+        _binlog_param.data_cf_oldest_ts = _binlog_param.check_point_ts;
+    }
     DB_WARNING("region_id: %ld, check_point_ts: [%ld, %s], oldest_ts: [%ld, %s]", _region_id, 
         _binlog_param.check_point_ts, ts_to_datetime_str(_binlog_param.check_point_ts).c_str(), 
         _binlog_param.oldest_ts, ts_to_datetime_str(_binlog_param.oldest_ts).c_str());
@@ -458,6 +465,7 @@ int Region::binlog_reset_on_snapshot_load() {
     TimeCost time;
     _binlog_param.check_point_ts = _meta_writer->read_binlog_check_point(_region_id);
     _binlog_param.oldest_ts      = _meta_writer->read_binlog_oldest_ts(_region_id);
+    _binlog_param.data_cf_oldest_ts = _meta_writer->read_binlog_data_cf_oldest_ts(_region_id);
     _binlog_param.ts_binlog_map.clear();
     if (_binlog_param.check_point_ts > 0) {
         int ret = binlog_scan_when_restart();
@@ -473,6 +481,12 @@ int Region::binlog_reset_on_snapshot_load() {
             return -1;
         }
         _binlog_param.oldest_ts = _binlog_param.max_ts_applied;
+        ret = _meta_writer->write_binlog_data_cf_oldest_ts(_region_id, _binlog_param.max_ts_applied);
+        if (ret != 0) {
+            DB_FATAL("region_id: %ld, snapshot load failed write ts failed", _region_id);
+            return -1;
+        }
+        _binlog_param.data_cf_oldest_ts = _binlog_param.max_ts_applied;
     } else {
         DB_FATAL("region_id: %ld, snapshot load check point %ld invaild", _region_id, _binlog_param.check_point_ts);
         return -1;
@@ -652,6 +666,7 @@ int Region::binlog_update_map_when_apply(const std::map<std::string, ExprValue>&
             }
             _binlog_param.check_point_ts = ts;
             _binlog_param.oldest_ts      = ts;
+            _binlog_param.data_cf_oldest_ts = ts;
             _binlog_param.max_ts_applied  = std::max(_binlog_param.max_ts_applied, ts);
             DB_WARNING("region_id: %ld, ts: %ld, %s, FAKE BINLOG reset check point and oldest ts", _region_id, ts, ts_to_datetime_str(ts).c_str());
         } else {
@@ -943,12 +958,22 @@ BinlogReadMgr::BinlogReadMgr(int64_t region_id, int64_t begin_ts, const std::str
     if (_oldest_ts_in_binlog_cf <= 0 || FLAGS_binlog_force_get) {
         _mode = GET;
     }
+    _mem_tracker = baikaldb::MemTrackerPool::get_instance()->get_mem_tracker(_region_id);
 }
 // for test only
 BinlogReadMgr::BinlogReadMgr(int64_t region_id, GetMode mode) : _region_id(region_id), _mode(mode) {
     _rocksdb = RocksWrapper::get_instance();
     _oldest_ts_in_binlog_cf = _rocksdb->get_oldest_ts_in_binlog_cf();
     _bacth_size = _mode == SEEK ? FLAGS_binlog_seek_batch : FLAGS_binlog_multiget_batch;
+    _mem_tracker = baikaldb::MemTrackerPool::get_instance()->get_mem_tracker(_region_id);
+}
+
+int64_t BinlogReadMgr::_SMALL_REQUEST = 10 * 1024 * 1024;
+
+BinlogReadMgr::~BinlogReadMgr() {
+    if (_total_binlog_size > _SMALL_REQUEST) {
+        _mem_tracker->release(_total_binlog_size);
+    }
 }
 
 int BinlogReadMgr::binlog_add_to_response(int64_t commit_ts, const std::string& binlog_value, pb::StoreRes* response) {
@@ -957,6 +982,17 @@ int BinlogReadMgr::binlog_add_to_response(int64_t commit_ts, const std::string& 
             || _is_first_binlog) {
         _is_first_binlog = false;
         _total_binlog_size += binlog_value.size();
+        if (_total_binlog_size > _SMALL_REQUEST) {
+            if (!_incremental_update) {
+                _mem_tracker->consume(_total_binlog_size);
+                _incremental_update = true;
+            } else {
+                _mem_tracker->consume(binlog_value.size());
+            }
+        }
+        if (_total_binlog_size > _SMALL_REQUEST && _mem_tracker->any_limit_exceeded()) {
+            return -1;
+        }
         (*response->add_binlogs()) = binlog_value;
         response->add_commit_ts(commit_ts);
         if (_first_commit_ts == -1) {
@@ -1267,7 +1303,7 @@ void BinlogReadMgr::print_log() {
                 _binlog_num, _binlog_total_row_cnts, _first_commit_ts,                   
                 ts_to_datetime_str(_first_commit_ts).c_str(), _last_commit_ts,                              
                 ts_to_datetime_str(_last_commit_ts).c_str(), _time.get_time(), 
-                _capture_ip.c_str(), _log_id);                     
+                _capture_ip.c_str(), _log_id);
     }
 }
 
@@ -1458,6 +1494,12 @@ void Region::read_binlog(const pb::StoreReq* request,
             return;
         }
     } else {
+        if (!_rocksdb->has_init_cold_rocksdb()) {
+            DB_FATAL("region_id: %ld, cold binlog rocksdb not init", _region_id);
+            response->set_errcode(pb::GET_VALUE_FAIL); 
+            response->set_errmsg("cold binlog rocksdb not init");
+            return;
+        }
         BAIDU_SCOPED_LOCK(_offline_binlog_param_mutex);
         if (0 == _offline_binlog_param.oldest_ts || 0 == _offline_binlog_param.newest_ts) {
             DB_FATAL("region_id: %ld, begin_ts: %ld, store has no offline binlog: [%ld, %ld]", 
@@ -1670,22 +1712,22 @@ void Region::query_binlog_ts(const pb::StoreReq* request,
                    pb::StoreRes* response) {
     int64_t check_point_ts = 0;
     int64_t oldest_ts = 0;
+    int64_t data_cf_oldest_ts = 0;
     {
         // 获取check point时应加锁，避免被修改
         std::unique_lock<bthread::Mutex> lck(_binlog_param_mutex);
         check_point_ts = _binlog_param.check_point_ts;
         oldest_ts = _binlog_param.oldest_ts;
+        data_cf_oldest_ts = _binlog_param.data_cf_oldest_ts;
     }
 
     int64_t begin_ts = 0;
-    int64_t region_oldest_ts = _meta_writer->read_binlog_oldest_ts(_region_id);
     int64_t binlog_cf_oldest_ts = RocksWrapper::get_instance()->get_oldest_ts_in_binlog_cf();
-    int64_t data_cf_oldest_ts = read_data_cf_oldest_ts();
     auto binlog_info = response->mutable_binlog_info();
     binlog_info->set_region_id(request->region_id());
     binlog_info->set_check_point_ts(check_point_ts);
-    binlog_info->set_oldest_ts(std::max(std::max(oldest_ts, binlog_cf_oldest_ts), region_oldest_ts));
-    binlog_info->set_region_oldest_ts(region_oldest_ts);
+    binlog_info->set_oldest_ts(std::max(std::max(oldest_ts, binlog_cf_oldest_ts), data_cf_oldest_ts));
+    binlog_info->set_region_oldest_ts(oldest_ts);
     binlog_info->set_binlog_cf_oldest_ts(binlog_cf_oldest_ts);
     binlog_info->set_data_cf_oldest_ts(data_cf_oldest_ts);
     response->set_errcode(pb::SUCCESS);
@@ -1722,7 +1764,15 @@ void Region::query_binlog(google::protobuf::RpcController* controller,
     }
 
     response->set_leader(butil::endpoint2str(_node.leader_id().addr).c_str()); // 每次都返回leader
-    if (validate_version(request, response) == false) {
+    bool is_valid_version = false;
+    if (validate_version(request, response, is_valid_version) != 0) {
+        response->set_errcode(pb::INTERNAL_ERROR);
+        response->set_errmsg("Fail to validate_version");
+        DB_WARNING("Fail to validate_version, region_id: %ld, log_id:%lu, remote_side:%s",
+                    _region_id, log_id, remote_side);
+        return;
+    }
+    if (is_valid_version == false) {
         DB_WARNING("region version too old, region_id: %ld, log_id:%lu,"
                    " request_version:%ld, region_version:%ld optype:%s remote_side:%s",
                     _region_id, log_id, request->region_version(), _region_info.version(),
@@ -1743,6 +1793,19 @@ void Region::query_binlog(google::protobuf::RpcController* controller,
 
     switch (request->op_type()) {
         case pb::OP_READ_BINLOG: {
+            SmartMemTracker mem_tracker =
+                    baikaldb::MemTrackerPool::get_instance()->get_mem_tracker(_region_id);
+            // 内存超限拒绝请求
+            if (mem_tracker->limit_exceeded()) {
+                response->set_errcode(pb::INTERNAL_ERROR);
+                response->set_leader(butil::endpoint2str(_node.leader_id().addr).c_str());
+                response->set_errmsg("query binlog exceeded mem_limit.");
+                DB_FATAL("query binlog exceeded mem_limit=[%ld], total_mem_limit=[%ld], "
+                         "current mem used=[%ld]. region_id: %ld, log_id:%lu, remote_side:%s",
+                         mem_tracker->bytes_limit(), mem_tracker->get_parent()->bytes_limit(),
+                         mem_tracker->bytes_consumed(), _region_id, log_id, remote_side);
+                return;
+            }
             read_binlog(request, response, std::string(remote_side), log_id);
             break;
         }

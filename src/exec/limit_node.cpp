@@ -15,7 +15,8 @@
 #include "limit_node.h"
 #include "runtime_state.h"
 #include "query_context.h"
- 
+#include "arrow_exec_node_manager.h"
+
 namespace baikaldb {
 int LimitNode::init(const pb::PlanNode& node) {
     int ret = 0;
@@ -178,11 +179,15 @@ int LimitNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
 }
  
 int LimitNode::build_arrow_declaration(RuntimeState* state) {
+    START_LOCAL_TRACE_WITH_PARTITION_PROPERTY(get_trace(), state->get_trace_cost(), &_partition_property, OPEN_TRACE, nullptr);
     for (auto c : _children) {
         if (c->build_arrow_declaration(state) != 0) {
             return -1;
         }
     }
+    arrow::acero::Declaration dec{"limit", UnorderedFetchNodeOptions{_offset - _num_rows_skipped, _limit}};
+    LOCAL_TRACE_ARROW_PLAN(dec);
+    state->append_acero_declaration(dec);
     return 0;
 }
 }

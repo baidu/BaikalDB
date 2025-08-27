@@ -50,7 +50,12 @@ public:
             return nullptr;
         }
         const google::protobuf::Descriptor* descriptor = tuple->GetDescriptor();
-        return descriptor->field(slot_id - 1);
+        int32_t slot_idx = get_slot_idx(tuple_id, slot_id);
+        if (slot_idx < 0 || slot_idx >= descriptor->field_count()) {
+            DB_WARNING("Invalid slot_idx: %d, field_count: %d", slot_idx, descriptor->field_count());
+            return nullptr;
+        }
+        return descriptor->field(slot_idx);
     }
 
     void from_string(int32_t tuple_id, const std::string& in) {
@@ -85,8 +90,12 @@ public:
             return ExprValue::Null();
         }
         const google::protobuf::Descriptor* descriptor = tuple->GetDescriptor();
-        // logical plan保证下标肯定是slot-1
-        auto field = descriptor->field(slot_id - 1);
+        int32_t slot_idx = get_slot_idx(tuple_id, slot_id);
+        if (slot_idx < 0 || slot_idx >= descriptor->field_count()) {
+            DB_WARNING("Invalid slot_idx: %d, field_count: %d", slot_idx, descriptor->field_count());
+            return ExprValue::Null();
+        }
+        auto field = descriptor->field(slot_idx);
         return MessageHelper::get_value(field, tuple);
     }
 
@@ -97,7 +106,12 @@ public:
         }
         _used_size += value.size();
         const google::protobuf::Descriptor* descriptor = tuple->GetDescriptor();
-        auto field = descriptor->field(slot_id - 1);
+        int32_t slot_idx = get_slot_idx(tuple_id, slot_id);
+        if (slot_idx < 0 || slot_idx >= descriptor->field_count()) {
+            DB_WARNING("Invalid slot_idx: %d, field_count: %d", slot_idx, descriptor->field_count());
+            return -1;
+        }
+        auto field = descriptor->field(slot_idx);
         return MessageHelper::set_value(field, tuple, value);
     }
 
@@ -111,6 +125,7 @@ public:
                 _tuples[tuple_id]->CopyFrom(*(mem_row->_tuples[tuple_id]));
                 _tuples_assignd[tuple_id] = true;
             }
+            set_slot_idxes_mapping(mem_row->_slot_idxes_mapping);
         }
         return 0;
     }
@@ -127,7 +142,12 @@ public:
             return -1;
         }
         auto descriptor = tuple->GetDescriptor();
-        auto field = descriptor->field(slot_id - 1);
+        int32_t slot_idx = get_slot_idx(tuple_id, slot_id);
+        if (slot_idx < 0 || slot_idx >= descriptor->field_count()) {
+            DB_WARNING("Invalid slot_idx: %d, field_count: %d", slot_idx, descriptor->field_count());
+            return -1;
+        }
+        auto field = descriptor->field(slot_idx);
         if (field == nullptr) {
             DB_WARNING("invalid field: %d", slot_id);
             return -1;
@@ -162,11 +182,36 @@ public:
         return _partition_id;
     }
 
+    void set_slot_idxes_mapping(std::shared_ptr<std::vector<std::vector<int32_t>>> slot_idxes_mapping) {
+        _slot_idxes_mapping = slot_idxes_mapping;
+    }
+
+    int32_t get_slot_idx(int32_t tuple_id, int32_t slot_id) {
+        if (_slot_idxes_mapping == nullptr) {
+            return -1;
+        }
+        if (tuple_id < 0 || tuple_id >= _slot_idxes_mapping->size()) {
+            DB_WARNING("invalid tuple id: %d, slot_idxes_mapping size: %lu", tuple_id, _slot_idxes_mapping->size());
+            return -1;
+        }
+        const auto& slot_idxes = (*_slot_idxes_mapping)[tuple_id];
+        if (slot_idxes.empty()) {
+            // 兼容db未赋值slot_idxes场景，agg/window/order tuple
+            return slot_id - 1;
+        }
+        if (slot_id - 1 < 0 || slot_id - 1 >= slot_idxes.size()) {
+            DB_WARNING("invalid slot id: %d, slot_idxes size: %lu", slot_id, slot_idxes.size());
+            return -1;
+        }
+        return slot_idxes[slot_id - 1];
+    }
+
 private:
     std::vector<google::protobuf::Message*> _tuples;
     std::vector<bool> _tuples_assignd;
     int64_t _partition_id = -1;
     int64_t _used_size;
+    std::shared_ptr<std::vector<std::vector<int32_t>>> _slot_idxes_mapping;
 };
 }
 

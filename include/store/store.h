@@ -83,7 +83,10 @@ public:
                        const pb::StoreReq* request,
                        pb::StoreRes* response,
                        google::protobuf::Closure* done);
-
+    virtual void query_batch(google::protobuf::RpcController* controller,
+                  const pb::BatchRegionStoreReq* request,
+                  pb::BatchRegionStoreRes* batch_response,
+                  google::protobuf::Closure* done);
     void async_apply_log_entry(google::protobuf::RpcController* controller,
                               const pb::BatchStoreReq* request,
                               pb::BatchStoreRes* response,
@@ -129,6 +132,10 @@ public:
                                 const pb::RegionIds* request,
                                 pb::StoreRes* response,
                                 google::protobuf::Closure* done);
+    virtual void query_file_system(google::protobuf::RpcController* controller,
+                          const pb::CompactionFileRequest* request,
+                          pb::CompactionFileResponse* batch_response,
+                          google::protobuf::Closure* done);
     virtual void query_illegal_region(google::protobuf::RpcController* controller,
                                         const pb::RegionIds* request,
                                         pb::StoreRes* response,
@@ -177,6 +184,10 @@ public:
     void get_hot_region_size(std::map<int64_t, int64_t>& region_size_map);
     void olap_region_check_thread();
 
+    void column_minor_compact_thread();
+    void column_major_compact_thread();
+    void column_flush_thread();
+
     void binlog_region_backup_thread();
     void snapshot_thread();
     void txn_clear_thread();
@@ -186,6 +197,8 @@ public:
     void binlog_fake_thread();
 
     void whether_split_thread();
+
+    void compact_region_by_sst_delete_keys_thread();
 
     void process_merge_request(int64_t table_id, int64_t region_id);
     //发送请求到metasever, 分配region_id 和 instance
@@ -285,6 +298,8 @@ public:
         _compact_queue.stop();
         _transfer_leader_queue.stop();
         _shutdown = true;
+        _compact_region_by_total_sst_delete_keys.join();
+        DB_WARNING("_compact_region_by_total_sst_delete_keys join");
         _heart_beat_bth.join();
         DB_WARNING("heart beat bth join");
         _db_statistic_bth.join();
@@ -315,6 +330,10 @@ public:
         DB_WARNING("cold region flush bth join");
         _cold_region_check_bth.join();
         DB_WARNING("cold region check bth join");
+        _column_minor_compact_bth.join();
+        _column_major_compact_bth.join();
+        _column_flush_bth.join();
+        DB_WARNING("column bth join");
         _offline_binlog_backup_bth.join();
         DB_WARNING("offline binlog backup bth join");
         _snapshot_bth.join();
@@ -334,6 +353,9 @@ public:
         return _meta_server_interact;
     }
     int64_t get_region_estimate_lines(int64_t region_id, int64_t region_version);
+    bool is_init() {
+        return _is_init;
+    }
 private:
     Store(): _split_num(0),
              _disk_total("disk_total", 0),
@@ -376,18 +398,35 @@ private:
     
     int drop_region_from_store(int64_t drop_region_id, bool need_delay_drop);
 
-    void update_schema_info(const pb::SchemaInfo& table, std::map<int64_t, std::set<int64_t>>* reverse_index_map);
+    void update_schema_info(const pb::SchemaInfo& table, 
+                            std::map<int64_t, std::set<int64_t>>* reverse_index_map,
+                            std::unordered_set<int64_t>* vector_table_set = nullptr);
 
     //判断分裂在3600S内是否完成，不完成，则自动删除该region
     void check_region_legal_complete(int64_t region_id);
 
-    void construct_heart_beat_request(pb::StoreHeartBeatRequest& request);
+    void construct_heart_beat_request(pb::StoreHeartBeatRequest& request, const std::vector<pb::RegionInfo>* region_infos = nullptr);
     
     void process_heart_beat_response(const pb::StoreHeartBeatResponse& response);
 
     void monitor_memory();
     void print_properties(const std::string& name);
     void print_heartbeat_info(const pb::StoreHeartBeatRequest& request);
+
+    int read_file(const pb::CompactionFileRequest* request,
+                            pb::CompactionFileResponse* response);
+    int write_file(const pb::CompactionFileRequest* request,
+                            pb::CompactionFileResponse* response);
+    int read_dir(const pb::CompactionFileRequest* request,
+                            pb::CompactionFileResponse* response);
+    int create_dir(const pb::CompactionFileRequest* request,
+                            pb::CompactionFileResponse* response);
+    int path_exists(const pb::CompactionFileRequest* request,
+                            pb::CompactionFileResponse* response);
+    int get_file_info_list(const pb::CompactionFileRequest* request,
+                            pb::CompactionFileResponse* response);
+    int delete_path(const pb::CompactionFileRequest* request,
+                            pb::CompactionFileResponse* response);
 private:
     class RemoveQueueItem {
     public:
@@ -442,6 +481,11 @@ private:
     Bthread _cold_region_flush_bth;
     //定时检查cold region sst
     Bthread _cold_region_check_bth;
+    //列存minor compact线程
+    Bthread _column_minor_compact_bth;
+    //列存major compact线程
+    Bthread _column_major_compact_bth;
+    Bthread _column_flush_bth;
     //定时备份binlog
     Bthread _offline_binlog_backup_bth;
     //外部控制定时触发snapshot
@@ -456,6 +500,8 @@ private:
     Bthread _db_statistic_bth;
 
     Bthread _region_peer_delay_bth;
+
+    Bthread _compact_region_by_total_sst_delete_keys;
 
     std::atomic<int32_t> _split_num;    
     bool _shutdown = false;
@@ -514,5 +560,6 @@ public:
     TimeCost last_rocks_hang_check_ok;
     int64_t  last_rocks_hang_check_cost = 0;
     int rocks_hang_continues_cnt = 0;
+    bool _is_init = false;
 };
 }

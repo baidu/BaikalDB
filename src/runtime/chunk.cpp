@@ -24,6 +24,12 @@
 #include <arrow/api.h> 
 
 namespace baikaldb {
+DEFINE_int32(chunk_max_size_mb, 100, "chunk max size mb");
+
+bool Chunk::exceed_max_size() {
+    return (used_bytes_size() > FLAGS_chunk_max_size_mb * 1024 * 1024ULL);
+}
+
 int Chunk::init_tuple_info(const pb::TupleDescriptor* tuple) {
     int tuple_id = tuple->tuple_id();
     for (const auto& slot : tuple->slots()) {
@@ -89,12 +95,23 @@ int Chunk::init(const std::vector<const pb::TupleDescriptor*>& tuples) {
     // {<tuple2, filed 1...5> <tuple3, field 1...3>} -> offset: 0, 0, 0, 5
     // 外部保证tuples按照tuple_id从小到大排序
     for (auto& tuple : tuples) {
+        if (tuple == nullptr) {
+            continue;
+        }
+        if (!tuple->has_tuple_id()) {
+            continue;
+        }
         int last_field_pos = _tuple_offsets.empty() ? 0 : _tuple_offsets.back();
         while (_tuple_offsets.size() <= tuple->tuple_id()) {
             _tuple_offsets.emplace_back(last_field_pos);
         }
         _field_num += tuple->slots_size();
         _tuple_offsets.emplace_back(_field_num);
+        if (tuple->tuple_id() >= _slot_idxes_mapping.size()) {
+            _slot_idxes_mapping.resize(tuple->tuple_id() + 1);
+        }
+        std::vector<int32_t> slot_idxes(tuple->slot_idxes().begin(), tuple->slot_idxes().end());
+        _slot_idxes_mapping[tuple->tuple_id()] = slot_idxes;
     }
     _field_types.reserve(_field_num);
     _fields.reserve(_field_num);
@@ -106,6 +123,7 @@ int Chunk::init(const std::vector<const pb::TupleDescriptor*>& tuples) {
         }
     }
     _schema = std::make_shared<arrow::Schema>(_fields);
+    _init = true;
     return 0;
 }
 

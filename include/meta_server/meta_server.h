@@ -107,6 +107,8 @@ public:
 
     void flush_memtable_thread();
     void apply_region_thread();
+    void distribute_leader_thread();
+    int send_rpc_to_trans_leader(int type, std::string old_leader, std::map<std::string, int>& peer_leader_cnt);
 
     void shutdown_raft();
     bool have_data();
@@ -133,6 +135,8 @@ private:
     Bthread _flush_bth;
     //region区间修改等信息应用raft
     Bthread _apply_region_bth;
+    // 将leader分配给不同的机器
+    Bthread _distribute_leader_bth;
     bool _init_success = false;
     bool _shutdown = false;
 }; //class

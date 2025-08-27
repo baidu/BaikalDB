@@ -21,6 +21,8 @@ struct Property {
     std::vector<ExprNode*> slot_order_exprs;
     std::vector<bool> is_asc;
     int64_t expected_cnt = -1;
+    // 向量索引使用
+    int32_t efsearch = -1;
     Property() {
     }
     Property(const std::vector<ExprNode*>& slot_order_exprs_, 

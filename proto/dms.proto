@@ -41,6 +41,7 @@ enum DMSOpType {
 enum SqlStatus {
     SQL_SUCCESS = 0;
     SQL_FAILED  = 1;
+    SQL_DOING   = 2;
 };
 
 enum TaskStatus {

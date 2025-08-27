@@ -67,7 +67,7 @@ public:
     static const size_t LOG_META_KEY_SIZE = sizeof(int64_t) + 1;
     static const size_t LOG_DATA_KEY_SIZE = sizeof(int64_t) + 1 + sizeof(int64_t);
     static const uint8_t LOG_META_IDENTIFY = 0x01;                                      
-    static const uint8_t LOG_DATA_IDENTIFY = 0x02;    
+    static const uint8_t LOG_DATA_IDENTIFY = 0x02;
     const static size_t LOG_HEAD_SIZE = sizeof(int64_t) + sizeof(int);
     ~MyRaftLogStorage();
     MyRaftLogStorage():_db(NULL), _raftlog_handle(NULL), _binlog_handle(NULL) {

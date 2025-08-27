@@ -76,6 +76,17 @@ int32_t MemRowDescriptor::init(std::vector<pb::TupleDescriptor>& tuple_desc) {
         }
         _id_tuple_mapping.insert(std::make_pair(tuple, message));
     }
+    _slot_idxes_mapping.reset(new std::vector<std::vector<int32_t>>());
+    for (const auto& tuple : tuple_desc) {
+        if (!tuple.has_tuple_id()) {
+            continue;
+        }
+        if (tuple.tuple_id() >= _slot_idxes_mapping->size()) {
+            _slot_idxes_mapping->resize(tuple.tuple_id() + 1);
+        }
+        std::vector<int32_t> slot_idxes(tuple.slot_idxes().begin(), tuple.slot_idxes().end());
+        (*_slot_idxes_mapping)[tuple.tuple_id()] = slot_idxes;
+    }
     return 0;
 }
 
@@ -99,6 +110,7 @@ std::unique_ptr<MemRow> MemRowDescriptor::fetch_mem_row() {
         largest = _id_tuple_mapping.rbegin()->first;
     }
     std::unique_ptr<MemRow> tmp(new MemRow(largest + 1));
+    tmp->set_slot_idxes_mapping(_slot_idxes_mapping);
     for (auto& pair : _id_tuple_mapping) {
         tmp->_tuples[pair.first] = pair.second->New();
     }

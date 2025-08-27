@@ -23,8 +23,36 @@
 #include "proto/expr.pb.h"
 #include "proto/plan.pb.h"
 
+namespace baikal {
+namespace client {
+class MysqlShortConnection;
+}
+}
+
 namespace baikaldb {
 const int NOT_BOOL_ERRCODE = -100;
+
+struct ColumnInfo {
+    int tuple_id = -1;
+    int slot_id = -1;
+    pb::PrimitiveType pb_type = pb::INVALID_TYPE;
+    ColumnInfo(){};
+    ColumnInfo(int tuple_id, int slot_id) : tuple_id(tuple_id), slot_id(slot_id) {};
+    ColumnInfo(int tuple_id, int slot_id, pb::PrimitiveType type) : tuple_id(tuple_id), slot_id(slot_id), pb_type(type) {};
+    bool operator < (const ColumnInfo& other) const {
+        if (tuple_id != other.tuple_id) {
+            return tuple_id < other.tuple_id;
+        }
+        return slot_id < other.slot_id;
+    }
+    bool operator == (const ColumnInfo& other) const {
+        return (tuple_id == other.tuple_id) && (slot_id == other.slot_id);
+    }
+    std::string print() {
+        return std::to_string(tuple_id) + "_" + std::to_string(slot_id) + "(pb type: " + std::to_string(pb_type) + ")";
+    }
+};
+
 class ExprNode {
 public:
     ExprNode() {}
@@ -88,6 +116,18 @@ public:
         }
         return false;
     }
+    bool has_window() {
+        if (_node_type == pb::WINDOW_EXPR) {
+            return true;
+        }
+        for (auto c : _children) {
+            if (c->has_window()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     virtual bool is_place_holder() {
         return false;
     }
@@ -199,12 +239,25 @@ public:
 
     virtual int replace_slot_ref_to_expr(const int32_t tuple_id,
                                          const std::map<int32_t, int32_t>& slot_column_mapping,
-                                         const std::vector<ExprNode*>& derived_table_projections);
+                                         const std::vector<ExprNode*>& derived_table_projections,
+                                         ExprNode*& cur_expr_node);
 
-    // 判断表达式中的slot是否包含子查询中的agg projection；表达式中的slot需要在同一个tuple中                
-    virtual int has_agg_projection(const std::map<int32_t, int32_t>& slot_column_mapping,
-                                   const std::vector<bool>& derived_table_projections,
-                                   bool& has_agg);
+    // 判断表达式中的slot是否包含子查询中的agg/window projection；表达式中的slot需要在同一个tuple中                
+    int has_agg_or_window_projection(const std::map<int32_t, int32_t>& slot_column_mapping,
+                                     const std::vector<bool>& derived_table_projections_agg_or_window_vec,
+                                     bool& has_agg_or_window);
+
+    // 获取当前表达式在子查询涉及的tuple_id和slot_id
+    int get_all_subquery_tuple_slot_ids(const int32_t tuple_id,
+                                        const std::map<int32_t, int32_t>& slot_column_mapping,
+                                        const std::vector<ExprNode*>& derived_table_projections,
+                                        std::set<std::pair<int32_t, int32_t>>& tuple_slot_ids);
+
+    // 获取当前表达式涉及的tuple_id和slot_id
+    void get_all_tuple_slot_ids(std::set<std::pair<int32_t, int32_t>>& tuple_slot_ids);
+
+    // 重复出现的<tuple_id, slot_id>都会被记录
+    void get_all_tuple_slot_ids(std::vector<std::pair<int32_t, int32_t>>& tuple_slot_ids);
 
     ExprNode* get_slot_ref(int32_t tuple_id, int32_t slot_id);
     ExprNode* get_parent(ExprNode* child);
@@ -314,6 +367,9 @@ public:
     int32_t tuple_id() const {
         return _tuple_id;
     }
+    void set_tuple_id(int32_t tuple_id) {
+        _tuple_id = tuple_id;
+    }
 
     void set_slot_col_type(int32_t tuple_id, int32_t slot_id, pb::PrimitiveType col_type);
 
@@ -325,6 +381,30 @@ public:
 
     void disable_replace_agg_to_slot() {
         _replace_agg_to_slot = false;
+    }
+
+    void set_is_vector_index_use(bool is_vector_index_use) {
+        _is_vector_index_use = is_vector_index_use;
+        for (auto e : _children) {
+            e->set_is_vector_index_use(is_vector_index_use);
+        }
+    }
+
+    virtual bool contains_specified_fields(const std::unordered_set<int32_t>& fields) {
+        for (auto e : _children) {
+            if (e->contains_specified_fields(fields)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // @brief 将ExprNode转化成sql
+    // @param slotid_fieldname_map: slotid到fieldname映射，用于SlotRef生成字符串
+    // @param conn: 连接对象，用于mysql_real_escape_string
+    virtual std::string to_sql(const std::unordered_map<int32_t, std::string>& slotid_fieldname_map, 
+                               baikal::client::MysqlShortConnection* conn) {
+        return "";
     }
 
     void print_expr_info();
@@ -341,6 +421,7 @@ protected:
     int32_t _tuple_id = -1;
     int32_t _slot_id = -1;
     int32_t _float_precision_len = -1;
+    bool _is_vector_index_use = false;
     bool is_logical_and_or_not();
     arrow::compute::Expression _arrow_expr;
 public:

@@ -33,14 +33,16 @@
 #include "qos.h"
 #include "memory_profile.h"
 #include "arrow_function.h"
+#include "arrow_exec_node.h"
+#include "compaction_server.h"
 
 namespace baikaldb {
-DECLARE_int32(store_port);
 DECLARE_bool(use_fulltext_wordweight_segment);
 DECLARE_bool(use_fulltext_wordseg_wordrank_segment);
 DEFINE_string(wordrank_conf, "./config/drpc_client.xml", "wordrank conf path");
 } // namespace baikaldb
 DEFINE_bool(stop_server_before_core, true, "stop_server_before_core");
+DEFINE_int32(compaction_sst_cache_capacity, 200000, "compaction_sst_cache_capacity");
 
 brpc::Server server;
 // 内存过大时，coredump需要几分钟，这期间会丢请求
@@ -168,6 +170,15 @@ int main(int argc, char **argv) {
         DB_FATAL("ArrowFunctionManager init failed");
         return -1;
     }
+    if (baikaldb::ArrowExecNodeManager::RegisterAllArrowExecNode() != 0) {
+        DB_FATAL("RegisterAllArrowExecNode failed");
+        return -1;
+    }
+    if (baikaldb::GlobalArrowExecutor::init() != 0) {
+        DB_FATAL("GlobalArrowExecutor init failed");
+        return -1;
+    }
+    baikaldb::CompactionSstCache::get_instance()->init(FLAGS_compaction_sst_cache_capacity);
     //add service
     butil::EndPoint addr;
     addr.ip = butil::IP_ANY;
@@ -195,6 +206,11 @@ int main(int argc, char **argv) {
         return -1;
     } 
     if (0 != server.AddService(store, brpc::SERVER_DOESNT_OWN_SERVICE)) {
+        DB_FATAL("Fail to Add StoreService");
+        return -1;
+    }
+    baikaldb::CompactionServer* compaction_server = baikaldb::CompactionServer::get_instance();
+    if (0 != server.AddService(compaction_server, brpc::SERVER_DOESNT_OWN_SERVICE)) {
         DB_FATAL("Fail to Add StoreService");
         return -1;
     }

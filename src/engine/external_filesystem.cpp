@@ -17,6 +17,7 @@
 #include "store_interact.hpp"
 #include "schema_factory.h"
 #include "external_filesystem.h"
+#include "rocksdb_filesystem.h"
 
 namespace baikaldb {
 DECLARE_string(meta_server_bns);
@@ -26,8 +27,11 @@ DEFINE_bool(afs_open_reader_async_switch, true, "afs_open_reader_async_switch");
 DEFINE_int64(afs_gc_interval_s, 24 * 3600LL, "default 1 day");
 DEFINE_int64(afs_gc_count, 10, "afs_gc_count");
 DEFINE_int64(afs_gc_delay_days, 30, "afs_gc_delay_days");
+DEFINE_int64(afs_gc_allow_dead_store_count, 3, "afs_gc_allow_dead_store_count");
 DEFINE_bool(afs_gc_enable, false, "afs_gc_enable");
-DEFINE_string(afs_gc_hostname, "", "afs_gc_hostname");
+DEFINE_bool(need_ext_fs_gc, false, "need_ext_fs_gc");
+DEFINE_int64(compaction_sst_cache_max_block, 8192, "compaction_sst_cache_max_block");
+
 int get_size_by_external_file_name(uint64_t* size, uint64_t* lines, const std::string& external_file) {
     std::vector<std::string> split_vec;
     boost::split(split_vec, external_file, boost::is_any_of("/"));
@@ -67,6 +71,18 @@ int get_size_by_external_file_name(uint64_t* size, uint64_t* lines, const std::s
         if (lines != nullptr) {
             *lines = boost::lexical_cast<uint64_t>(vec[6]);
         }
+    } else if (vec.back() == "parquet") {
+        // parquet: regionID_tableID_startIndex_endIndex_Idx_size_lines.parquet
+        if (vec.size() != 8) {
+            DB_FATAL("split %s failed", external_file.c_str());
+            return -1;
+        }
+        if (size != nullptr) {
+            *size = boost::lexical_cast<uint64_t>(vec[5]);
+        }
+        if (lines != nullptr) {
+            *lines = boost::lexical_cast<uint64_t>(vec[6]);
+        }
     } else {
         DB_FATAL("external file: %s with abnormal file type: %s", external_file.c_str(), vec.back().c_str());
         return -1;
@@ -76,7 +92,7 @@ int get_size_by_external_file_name(uint64_t* size, uint64_t* lines, const std::s
 #ifdef BAIDU_INTERNAL
 
 // uri,user,password,conf_file,root_path     多组afs ugi使用英文分号分割用户名密码等信息使用英文逗号分割
-int get_afs_infos(std::vector<AfsFileSystem::AfsUgi>& ugi_infos) {
+int get_afs_infos(std::vector<AfsExtFileSystem::AfsUgi>& ugi_infos) {
     ugi_infos.clear();
     if (FLAGS_cold_rocksdb_afs_infos.empty()) {
         return 0;
@@ -89,7 +105,7 @@ int get_afs_infos(std::vector<AfsFileSystem::AfsUgi>& ugi_infos) {
     }
 
     for (const std::string& info : split_vec) {
-        AfsFileSystem::AfsUgi ugi;
+        AfsExtFileSystem::AfsUgi ugi;
         std::vector<std::string> vec;
         boost::split(vec, boost::trim_copy(info), boost::is_any_of(","));
         if (vec.size() != 5) {
@@ -115,7 +131,7 @@ int get_afs_infos(std::vector<AfsFileSystem::AfsUgi>& ugi_infos) {
 }
 
 
-void AfsFileReader::ReadCtrl::set_read_result(int64_t ret, char* buf) {
+void AfsExtFileReader::ReadCtrl::set_read_result(int64_t ret, char* buf) {
     {
         std::unique_lock<std::mutex> lck(_mutex);
         if (ret < 0) {
@@ -137,7 +153,7 @@ void AfsFileReader::ReadCtrl::set_read_result(int64_t ret, char* buf) {
     _cv.notify_one();
 }
 
-int AfsFileReader::ReadCtrl::read_wait_once() {
+int AfsExtFileReader::ReadCtrl::read_wait_once() {
     std::unique_lock<std::mutex> lck(_mutex);
     if (FLAGS_afs_double_read_interval_us > 0) {
         _cv.wait_for(lck, std::chrono::microseconds(FLAGS_afs_double_read_interval_us));
@@ -145,7 +161,7 @@ int AfsFileReader::ReadCtrl::read_wait_once() {
     return _successed ? 1 : 0;
 }
 
-int64_t AfsFileReader::ReadCtrl::read_wait_onesucc_or_allfail() {
+int64_t AfsExtFileReader::ReadCtrl::read_wait_onesucc_or_allfail() {
     std::unique_lock<std::mutex> lck(_mutex);
     while (true) {
         if (_successed) {
@@ -163,7 +179,7 @@ int64_t AfsFileReader::ReadCtrl::read_wait_onesucc_or_allfail() {
     return -1;
 }
 
-int64_t AfsFileReader::read(char* buf, uint32_t count, uint32_t offset, bool* eof) {
+int64_t AfsExtFileReader::read(char* buf, uint32_t count, uint32_t offset, bool* eof) {
     TimeCost time;
     std::vector<AfsRWInfo*> rw_infos = get_avaliable_reader_infos();
     // 随机打乱reader
@@ -205,7 +221,7 @@ int64_t AfsFileReader::read(char* buf, uint32_t count, uint32_t offset, bool* eo
     return ret;
 }
 
-bool AfsFileReader::close() {
+bool AfsExtFileReader::close() {
     // 等待所有异步请求结束
     TimeCost cost;
     while (_read_count.load() > 0) {
@@ -229,7 +245,7 @@ bool AfsFileReader::close() {
     return true;
 }
 
-void AfsFileReader::pread_callback(int64_t ret, void* ptr) {
+void AfsExtFileReader::pread_callback(int64_t ret, void* ptr) {
     ReadInfo* read_info = static_cast<ReadInfo*>(ptr);
     AfsRWInfo* rw_info = read_info->rw_info;
     if (ret < 0) {
@@ -248,7 +264,7 @@ void AfsFileReader::pread_callback(int64_t ret, void* ptr) {
     delete read_info;
 }
 
-std::vector<AfsRWInfo*> AfsFileReader::get_avaliable_reader_infos() {
+std::vector<AfsRWInfo*> AfsExtFileReader::get_avaliable_reader_infos() {
     std::unique_lock<std::mutex> lck(_mtx);
     std::vector<AfsRWInfo*> avaliable_readers;
     for (int i = 0; i < _afs_rw_infos.size(); ++i) {
@@ -259,7 +275,7 @@ std::vector<AfsRWInfo*> AfsFileReader::get_avaliable_reader_infos() {
     return avaliable_readers;
 }
 
-void AfsFileReader::add_reader(std::shared_ptr<AfsRWInfo> info) {
+void AfsExtFileReader::add_reader(std::shared_ptr<AfsRWInfo> info) {
     std::unique_lock<std::mutex> lck(_mtx);
     _afs_rw_infos.emplace_back(*info);
     if (_afs_rw_infos.back().statis == nullptr) {
@@ -268,7 +284,7 @@ void AfsFileReader::add_reader(std::shared_ptr<AfsRWInfo> info) {
     _afs_rw_infos.back().statis->reader_open_count << 1;
 }
 
-int64_t AfsFileWriter::append(const char* buf, uint32_t count) {
+int64_t AfsExtFileWriter::append(const char* buf, uint32_t count) {
     // 双afs写不要求性能，写串行即可
     for (auto& info : _afs_rw_infos) {
         int64_t ret = info.writer->Append(buf, count, nullptr, nullptr);
@@ -289,7 +305,7 @@ int64_t AfsFileWriter::append(const char* buf, uint32_t count) {
     return count;
 }
 
-int64_t AfsFileWriter::tell() {
+int64_t AfsExtFileWriter::tell() {
     int64_t len = _afs_rw_infos[0].writer->Tell();
     for (int i = 1; i < _afs_rw_infos.size(); i++) {
         int64_t tmp_len = _afs_rw_infos[i].writer->Tell();
@@ -302,7 +318,7 @@ int64_t AfsFileWriter::tell() {
     return len;
 }
 
-bool AfsFileWriter::sync() {
+bool AfsExtFileWriter::sync() {
     bool all_succ = true;
     for (auto& info : _afs_rw_infos) {
         int ret = info.writer->Sync(nullptr, nullptr);
@@ -316,7 +332,7 @@ bool AfsFileWriter::sync() {
     return all_succ ? true : false;
 }
 
-bool AfsFileWriter::close() {
+bool AfsExtFileWriter::close() {
     bool all_succ = true;
     for (auto& info : _afs_rw_infos) {
         if (info.writer != nullptr) {
@@ -332,7 +348,151 @@ bool AfsFileWriter::close() {
     return all_succ ? true : false;
 }
 
-AfsFileSystem::~AfsFileSystem() {
+#endif
+
+int64_t CompactionExtFileReader::read(char* buf, uint32_t count, uint32_t offset, bool* eof) {
+    if (!_is_open) {
+        DB_FATAL("File: %s is not open for reading", _file_name.c_str());
+        return -1;
+    }
+    TimeCost time;
+    if (_file_name.find(".log") != std::string::npos) {
+        *eof = true;
+        return 0;
+    }
+    std::shared_ptr<CompactionSstExtLinkerData> linker_data;
+    if (CompactionSstExtLinker::get_instance()->get_linker_data(_remote_compaction_id, linker_data) != 0 || linker_data == nullptr) {
+        DB_FATAL("remote compaction id: %s not found", _remote_compaction_id.c_str());
+        return -1;
+    }
+
+    std::string cache_key = _server_address + "_" + _file_name + "_" + std::to_string(offset) + "_" + std::to_string(count);
+    std::string cache_value;
+    if (_file_name.find(".sst") != std::string::npos && count < FLAGS_compaction_sst_cache_max_block 
+            && CompactionSstCache::get_instance()->find(cache_key, &cache_value) == 0) {
+        memcpy(buf, cache_value.c_str(), cache_value.size());
+        if (count != cache_value.size()) {
+            *eof = true;
+        }
+        linker_data->cache_size++;
+        linker_data->read_file_time += time.get_time();
+        // cache = true;
+        // DB_WARNING("cache remote_compaction_id: %s, cache_key:%s, time:%ld",
+        //         _remote_compaction_id.c_str(), cache_key.c_str(), time.get_time());
+        return cache_value.size();
+    }
+    linker_data->not_cache_size++;
+    // Prepare the request
+    pb::CompactionFileRequest request;
+    request.set_remote_compaction_id(_remote_compaction_id);
+    request.set_op_type(pb::OP_READ);
+    request.set_file_name(_file_name);
+    request.set_offset(offset);
+    request.set_count(count);
+
+    // Prepare the response and controller
+    pb::CompactionFileResponse response;
+    brpc::Controller cntl;
+
+    // Call the remote procedure
+    pb::StoreService_Stub stub(&_channel);
+    stub.query_file_system(&cntl, &request, &response, nullptr);
+
+    if (cntl.Failed()) {
+        DB_FATAL("connect with server: %s fail, error:%s, remote_compaction_id:%s, file_name: %s",
+                        _server_address.c_str(), cntl.ErrorText().c_str(), _remote_compaction_id.c_str(),
+                        _file_name.c_str());
+        return -1;
+    }
+
+    if (response.errcode() != pb::SUCCESS) {
+        DB_WARNING("send read request to %s fail, error:%s, remote_compaction_id:%s, file_name: %s",
+                        _server_address.c_str(), pb::ErrCode_Name(response.errcode()).c_str(), _remote_compaction_id.c_str(),
+                        _file_name.c_str());
+        *eof = true;
+        return 0;
+    }
+    
+    if (_file_name.find(".sst") != std::string::npos 
+            && linker_data->input_file_set.count(_file_name) == 0
+            && count < FLAGS_compaction_sst_cache_max_block) {
+        CompactionSstCache::get_instance()->add(cache_key, response.data());
+    }
+    // Copy the data to the buffer
+    memcpy(buf, response.data().c_str(), response.data().size());
+    if (count != response.data().size()) {
+        *eof = true;
+    }
+    linker_data->read_file_time += time.get_time();
+    // if (linker_data->input_file_set.count(_file_name) == 0) {
+    //     DB_WARNING("cache_not remote_compaction_id: %s, cache_key:%s, time:%ld",
+    //                 _remote_compaction_id.c_str(), cache_key.c_str(), time.get_time());
+    // }
+    return response.data().size();
+}
+
+int64_t CompactionExtFileReader::skip(uint32_t n, bool* eof) {
+    // TODO 实现skip功能
+    return n;
+}
+
+bool CompactionExtFileReader::close() {
+    _is_open = false;
+    return true;
+}
+
+int64_t CompactionExtFileWriter::append(const char* buf, uint32_t count) {
+    if (!_is_open) {
+        DB_FATAL("File: %s is not open for writing", _file_name.c_str());
+        return -1;
+    }
+    // Prepare the request
+    pb::CompactionFileRequest request;
+    request.set_op_type(pb::OP_WRITE);
+    request.set_file_name(_file_name);
+    request.set_data(std::string(buf, count));
+    request.set_remote_compaction_id(_remote_compaction_id);
+    request.set_offset(_offset);
+
+    // Prepare the response and controller
+    pb::CompactionFileResponse response;
+    brpc::Controller cntl;
+
+    // Call the remote procedure
+    pb::StoreService_Stub stub(&_channel);
+    stub.query_file_system(&cntl, &request, &response, nullptr);
+
+    if (cntl.Failed()) {
+        DB_FATAL("connect with server: %s fail, error:%s, remote_compaction_id:%s",
+                        _server_address.c_str(), cntl.ErrorText().c_str(), _remote_compaction_id.c_str());
+        return -1;
+    }
+    if (response.errcode() != pb::SUCCESS) {
+        DB_FATAL("send read request to %s fail, error:%s, remote_compaction_id:%s",
+                        _server_address.c_str(), pb::ErrCode_Name(response.errcode()).c_str(), _remote_compaction_id.c_str());
+        return -1;
+    }
+    _offset += count;
+    return count;
+}
+
+int64_t CompactionExtFileWriter::tell() {
+    // Assuming tell functionality is handled remotely
+    return _offset;
+}
+
+bool CompactionExtFileWriter::sync() {
+    return true;
+}
+
+bool CompactionExtFileWriter::close() {
+    _is_open = false;
+    return true;
+}
+
+#ifdef BAIDU_INTERNAL
+
+AfsExtFileSystem::~AfsExtFileSystem() {
     for (auto& info : _ugi_infos) {
         if (info.afs != nullptr) {
             info.afs->DisConnect();
@@ -340,10 +500,10 @@ AfsFileSystem::~AfsFileSystem() {
     }
 }
 
-std::shared_ptr<afs::AfsFileSystem> AfsFileSystem::init(const std::string& uri, const std::string& user, 
+std::shared_ptr<afs::AFSImpl> AfsExtFileSystem::init(const std::string& uri, const std::string& user, 
                                             const std::string& password, const std::string& conf_file) {
     TimeCost cost;
-    std::shared_ptr<afs::AfsFileSystem> fs(new afs::AfsFileSystem(uri.c_str(), user.c_str(), password.c_str(), conf_file.c_str()));
+    std::shared_ptr<afs::AFSImpl> fs(new afs::AFSImpl(uri.c_str(), user.c_str(), password.c_str(), conf_file.c_str()));
     if (fs == nullptr) {
         DB_FATAL("new afs filesystem failed, uri: %s, user: %s, password: %s, conf_file: %s", 
             uri.c_str(), user.c_str(), password.c_str(), conf_file.c_str());
@@ -356,7 +516,11 @@ std::shared_ptr<afs::AfsFileSystem> AfsFileSystem::init(const std::string& uri, 
             uri.c_str(), user.c_str(), password.c_str(), conf_file.c_str(), ds::Rc2Str(afs_res));
         return nullptr;
     }
-
+    // 连接集群后端
+    if (!fs->Start()) {
+        DB_WARNING("fail to start afs, errno:%d, errmsg:%s", ds::kFail, afs::Rc2Str(ds::kFail));
+        return nullptr;
+    }
     afs_res = fs->Connect();
     if (afs_res != ds::kOk) {
         DB_FATAL("Connect afs filesystem failed, uri: %s, user: %s, password: %s, conf_file: %s, error: %s", 
@@ -369,7 +533,7 @@ std::shared_ptr<afs::AfsFileSystem> AfsFileSystem::init(const std::string& uri, 
     return fs;
 }
 
-int AfsFileSystem::init() {
+int AfsExtFileSystem::init() {
     // 初始化如果失败直接跳过，后续使用afs时再次初始化，避免afs影响store重启
     for (AfsUgi& ugi_info : _ugi_infos) {
         // afs://yinglong.afs.baidu.com:9902中提取yinglong
@@ -386,7 +550,7 @@ int AfsFileSystem::init() {
     return 0;
 }
 
-std::vector<AfsRWInfo> AfsFileSystem::get_rw_infos_by_full_name(const std::string& full_name) {
+std::vector<AfsRWInfo> AfsExtFileSystem::get_rw_infos_by_full_name(const std::string& full_name) {
     std::string uri;
     std::string user_define_path;
     for (const AfsUgi& ugi_info : _ugi_infos) {
@@ -401,7 +565,7 @@ std::vector<AfsRWInfo> AfsFileSystem::get_rw_infos_by_full_name(const std::strin
     return get_rw_infos(user_define_path);
 }
 
-std::vector<AfsRWInfo> AfsFileSystem::get_rw_infos(const std::string& user_define_path) {
+std::vector<AfsRWInfo> AfsExtFileSystem::get_rw_infos(const std::string& user_define_path) {
     std::lock_guard<bthread::Mutex> l(_lock);
     std::vector<AfsRWInfo> afs_infos;
     if (user_define_path.empty()) {
@@ -425,7 +589,7 @@ std::vector<AfsRWInfo> AfsFileSystem::get_rw_infos(const std::string& user_defin
 }
 
 // 进程启动时不要求全部afs初始化成功，make_full_name时如果未初始化则再次初始化
-std::string AfsFileSystem::make_full_name(const std::string& cluster, bool force, const std::string& user_define_path) {
+std::string AfsExtFileSystem::make_full_name(const std::string& cluster, bool force, const std::string& user_define_path) {
     if (_ugi_infos.empty()) {
         return "";
     }
@@ -470,7 +634,7 @@ std::string AfsFileSystem::make_full_name(const std::string& cluster, bool force
     return full_name;
 }
 #ifdef ENABLE_OPEN_AFS_ASYNC
-void AfsFileSystem::AfsFileCtrl::action_finish(int64_t ret) {
+void AfsExtFileSystem::AfsFileCtrl::action_finish(int64_t ret) {
     {
         std::unique_lock<std::mutex> lck(_mutex);
         if (ret < 0) {
@@ -486,7 +650,7 @@ void AfsFileSystem::AfsFileCtrl::action_finish(int64_t ret) {
     _cv.notify_one();
 }
 
-int64_t AfsFileSystem::AfsFileCtrl::wait_onesucc_or_allfail() {
+int64_t AfsExtFileSystem::AfsFileCtrl::wait_onesucc_or_allfail() {
     std::unique_lock<std::mutex> lck(_mutex);
     while (true) {
         if (_succeeded) {
@@ -504,7 +668,7 @@ int64_t AfsFileSystem::AfsFileCtrl::wait_onesucc_or_allfail() {
     return -1;
 }
 
-void AfsFileSystem::open_reader_callback(int64_t ret, void* ptr) {
+void AfsExtFileSystem::open_reader_callback(int64_t ret, void* ptr) {
     OpenReaderInfo* open_reader_info = reinterpret_cast<OpenReaderInfo*>(ptr);
     std::shared_ptr<AfsFileCtrl> reader_ctrl = open_reader_info->reader_ctrl;
     ScopeGuard info_guard([open_reader_info](){delete open_reader_info;});
@@ -514,8 +678,13 @@ void AfsFileSystem::open_reader_callback(int64_t ret, void* ptr) {
         });
     std::shared_ptr<AfsRWInfo> afs_rw_info = open_reader_info->afs_rw_info;
     if (ret < 0) {
-        DB_FATAL("uri: %s, absolute_path: %s, afs open reader failed", 
-                    afs_rw_info->uri.c_str(), afs_rw_info->absolute_path.c_str());
+        if (ret == ds::kNoEntry) {
+            DB_WARNING("uri: %s, absolute_path: %s, afs open reader failed, errno:%ld, errmsg:%s", 
+                        afs_rw_info->uri.c_str(), afs_rw_info->absolute_path.c_str(), ret, ds::Rc2Str(ret));
+        } else {
+            DB_FATAL("uri: %s, absolute_path: %s, afs open reader failed, errno:%ld, errmsg:%s", 
+                        afs_rw_info->uri.c_str(), afs_rw_info->absolute_path.c_str(), ret, ds::Rc2Str(ret));
+        }
     } else {
         // 校验文件长度
         ret = -1;
@@ -524,13 +693,7 @@ void AfsFileSystem::open_reader_callback(int64_t ret, void* ptr) {
             DB_NOTICE("open afs file failed, file %s may not exist.", afs_rw_info->absolute_path.c_str());
             return;
         }
-        int64_t file_size = 0;
-        if (reader->FileSize(&file_size) < 0) {
-            DB_NOTICE("get afs file reader size failed, broken reader. uri: %s, absolute_path: %s", 
-                    afs_rw_info->uri.c_str(), afs_rw_info->absolute_path.c_str());
-            return;
-        }
-
+        int64_t file_size = reader->FileSize();
         if (file_size != open_reader_info->ext_file_size) {
             DB_FATAL("uri: %s, absolute_path: %s, size:%lu not equal to %lu", 
                     afs_rw_info->uri.c_str(), afs_rw_info->absolute_path.c_str(), 
@@ -549,7 +712,7 @@ void AfsFileSystem::open_reader_callback(int64_t ret, void* ptr) {
 }
 #endif
 
-int AfsFileSystem::open_reader(const std::string& full_name, std::shared_ptr<ExtFileReader>* reader) {
+int AfsExtFileSystem::open_reader(const std::string& full_name, std::shared_ptr<ExtFileReader>* reader) {
     reader->reset();
     uint64_t ext_file_size = 0;
     int ret = get_size_by_external_file_name(&ext_file_size, nullptr, full_name);
@@ -563,7 +726,7 @@ int AfsFileSystem::open_reader(const std::string& full_name, std::shared_ptr<Ext
 
 #ifdef ENABLE_OPEN_AFS_ASYNC
     std::shared_ptr<AfsFileCtrl> reader_ctrl = std::make_shared<AfsFileCtrl>(tmp_afs_infos.size());
-    std::shared_ptr<AfsFileReader> tmp_reader = std::make_shared<AfsFileReader>(tmp_afs_infos.size());
+    std::shared_ptr<AfsExtFileReader> tmp_reader = std::make_shared<AfsExtFileReader>(tmp_afs_infos.size());
     bool enable_async = FLAGS_afs_open_reader_async_switch;
 #endif
 
@@ -632,14 +795,14 @@ int AfsFileSystem::open_reader(const std::string& full_name, std::shared_ptr<Ext
             DB_FATAL("open reader failed, path: %s", full_name.c_str());
             return -1;
         }
-        reader->reset(new AfsFileReader(afs_infos));
+        reader->reset(new AfsExtFileReader(afs_infos));
 #ifdef ENABLE_OPEN_AFS_ASYNC
     }
 #endif
     return 0;
 }
 
-int AfsFileSystem::open_writer(const std::string& full_name, std::unique_ptr<ExtFileWriter>* writer) {
+int AfsExtFileSystem::open_writer(const std::string& full_name, std::unique_ptr<ExtFileWriter>* writer) {
     writer->reset();
     std::vector<AfsRWInfo> tmp_afs_infos = get_rw_infos_by_full_name(full_name);
     std::vector<AfsRWInfo> afs_infos;
@@ -649,7 +812,7 @@ int AfsFileSystem::open_writer(const std::string& full_name, std::unique_ptr<Ext
         if (ret != ds::kOk) {
             continue;
         }
-        info.writer = info.fs->OpenWriter(info.absolute_path.c_str(), afs::WriterOptions());
+        info.writer = info.fs->OpenWriter(info.absolute_path.c_str(), afs::WriterOptions(), false);
         if (info.writer == nullptr) {
             DB_FATAL("open writer failed, uri: %s, absolute_path: %s, error: %d", info.uri.c_str(), info.absolute_path.c_str(), errno);
             continue;
@@ -662,11 +825,11 @@ int AfsFileSystem::open_writer(const std::string& full_name, std::unique_ptr<Ext
         return -1;
     }
 
-    writer->reset(new AfsFileWriter(afs_infos));
+    writer->reset(new AfsExtFileWriter(afs_infos));
     return 0;
 }
 
-int AfsFileSystem::delete_path(const std::string& full_name, bool recursive) {
+int AfsExtFileSystem::delete_path(const std::string& full_name, bool recursive) {
     std::vector<AfsRWInfo> afs_infos = get_rw_infos_by_full_name(full_name);
     if (afs_infos.empty()) {
         DB_FATAL("get_rw_infos failed, path: %s", full_name.c_str());
@@ -694,7 +857,7 @@ int AfsFileSystem::delete_path(const std::string& full_name, bool recursive) {
     return fail ? -1 : 0;
 }
 
-int AfsFileSystem::create(const std::string& full_name) {
+int AfsExtFileSystem::create(const std::string& full_name) {
     std::vector<AfsRWInfo> afs_infos = get_rw_infos_by_full_name(full_name);
     int fail_cnt = 0;
     for (auto& info : afs_infos) {
@@ -715,7 +878,7 @@ int AfsFileSystem::create(const std::string& full_name) {
     return 0;
 }
 
-int AfsFileSystem::path_exists(const std::string& full_name) {
+int AfsExtFileSystem::path_exists(const std::string& full_name) {
     std::vector<AfsRWInfo> afs_infos = get_rw_infos_by_full_name(full_name);
     if (afs_infos.empty()) {
         DB_FATAL("get_rw_infos failed, path: %s", full_name.c_str());
@@ -735,7 +898,7 @@ int AfsFileSystem::path_exists(const std::string& full_name) {
     return 0;
 }
 
-int AfsFileSystem::readdir(const std::string& full_name, std::set<std::string>& sub_files) {
+int AfsExtFileSystem::readdir(const std::string& full_name, std::set<std::string>& sub_files) {
     std::vector<AfsRWInfo> afs_infos = get_rw_infos_by_full_name(full_name);
     for (auto& info : afs_infos) {
         int ret = info.fs->Exist(info.absolute_path.c_str());
@@ -762,33 +925,29 @@ int AfsFileSystem::readdir(const std::string& full_name, std::set<std::string>& 
 }
 
 
-int ExtFileSystemGC::external_filesystem_gc(bool* shutdown, const std::string& hostname) {
-    while(!(*shutdown)) {
-        bthread_usleep_fast_shutdown(FLAGS_afs_gc_interval_s * 1000 * 1000, *shutdown);
-        if (*shutdown) {
-            return 0;
-        }
+int ExtFileSystemGC::external_filesystem_gc() {
+    if (!FLAGS_need_ext_fs_gc) {
+        return 0;
+    }
 
-        if (FLAGS_afs_gc_hostname == hostname) {
-            TimeCost cost;
-            external_filesystem_gc_do();
-            DB_NOTICE("external filesystem gc do, hostname:%s, cost: %ld", FLAGS_afs_gc_hostname.c_str(), cost.get_time());
-        }
-
+    static TimeCost cost;
+    if (cost.get_time() > FLAGS_afs_gc_interval_s * 1000 * 1000LL) {
+        cost.reset();
+        external_filesystem_gc_do();
     }
     return 0;
 }
 
 int ExtFileSystemGC::external_filesystem_gc_do() {
-    std::vector<AfsFileSystem::AfsUgi> ugi_infos;
+    std::vector<AfsExtFileSystem::AfsUgi> ugi_infos;
     int ret = get_afs_infos(ugi_infos);
     if (ret < 0 || ugi_infos.empty()) {
         DB_FATAL("get afs infos failed");
         return -1;
     }
     static int64_t idx = 0;    
-    AfsFileSystem::AfsUgi& ugi = ugi_infos[idx++ % ugi_infos.size()];
-    std::shared_ptr<ExtFileSystem> ext_fs(new AfsFileSystem({ ugi }));
+    AfsExtFileSystem::AfsUgi& ugi = ugi_infos[idx++ % ugi_infos.size()];
+    std::shared_ptr<AfsExtFileSystem> ext_fs(new AfsExtFileSystem({ ugi }));
 
     ret = ext_fs->init();
     if (ret < 0) {
@@ -819,8 +978,13 @@ int ExtFileSystemGC::get_all_partitions_from_store(std::map<int64_t, std::map<st
     std::atomic<bool> success = {true};
     for (const auto& pair : instance_info_map) {
         std::string store_addr = pair.first;
+        if (pair.second.meta_id != 0) {
+            // 不处理外挂link表的store
+            continue;
+        }
         if (pair.second.status == pb::DEAD) {
-            if (++dead_count >= 3) {
+            DB_WARNING("store %s is dead", store_addr.c_str());
+            if (++dead_count >= FLAGS_afs_gc_allow_dead_store_count) {
                 // dead超过三个可能store有问题，暂停gc
                 success = false;
                 break;
@@ -838,6 +1002,7 @@ int ExtFileSystemGC::get_all_partitions_from_store(std::map<int64_t, std::map<st
             StoreInteract interact(store_addr);
             int ret = interact.send_request("query_region", req, res);
             if (ret < 0) {
+                DB_FATAL("send request to store %s failed", store_addr.c_str());
                 success = false;
                 return;
             }
@@ -964,6 +1129,7 @@ int ExtFileSystemGC::table_gc(std::shared_ptr<ExtFileSystem> ext_fs, const std::
                 continue;
             }
             partition_gc(ext_fs, vec[0], table_name, table_id, partitions, start_str);
+            column_partition_gc(ext_fs, vec[0], table_name, table_id, start_str);
         }
     }
 
@@ -1012,6 +1178,40 @@ int ExtFileSystemGC::partition_gc(std::shared_ptr<ExtFileSystem> ext_fs, const s
     return 0;
 }
 
+int ExtFileSystemGC::column_partition_gc(std::shared_ptr<ExtFileSystem> ext_fs, const std::string& database_name, const std::string& table_name_in_store, 
+            int64_t table_id, const std::string& start_str) {
+    std::string table_path = "baikal_column/" + FLAGS_meta_server_bns + "/" + database_name + "/" + table_name_in_store + "/" + std::to_string(table_id);
+    std::string full_name = ext_fs->make_full_name("", false, table_path);
+    if (full_name.empty()) {
+        DB_FATAL("local_file: %s make full path failed", table_path.c_str());
+        return -1;
+    }
+    if (ext_fs->path_exists(full_name) != 1) {
+        DB_WARNING("table path %s not exist", full_name.c_str());
+        return 0;
+    }
+
+    std::set<std::string> partitions_in_fs;
+    int ret = ext_fs->readdir(full_name, partitions_in_fs);
+    if (ret < 0) {
+        DB_FATAL("table path %s readdir failed", full_name.c_str());
+        return -1;
+    }
+
+    int delete_count = 0;
+    for (const std::string& p : partitions_in_fs) {
+        if (!need_delete_partition(p, start_str)) {
+            // 不需要删除的分区后续分区都不需要删除，直接跳出
+            break;
+        }
+        std::string partition_full_path = full_name + "/" + p;
+        ext_fs->delete_path(partition_full_path, true);
+        DB_NOTICE("table path %s gc", partition_full_path.c_str());
+    }
+
+    return 0;
+}
+
 bool ExtFileSystemGC::need_delete_partition(const std::string& partition, const std::string& start_str) {
     std::string partition_start_date;
     std::string partition_end_date;
@@ -1050,5 +1250,106 @@ int ExtFileSystemGC::check_partition(const std::string& partition, std::string* 
     return 0;
 }
 #endif
+
+int CompactionExtFileSystem::init() {
+    return 0;
+}
+
+int CompactionExtFileSystem::open_reader(const std::string& full_name, std::shared_ptr<ExtFileReader>* reader) {
+    reader->reset(new CompactionExtFileReader(full_name, _address, _remote_compaction_id));
+    return 0;
+}
+
+int CompactionExtFileSystem::open_writer(const std::string& full_name, std::unique_ptr<ExtFileWriter>* writer) {
+    writer->reset(new CompactionExtFileWriter(full_name, _address, _remote_compaction_id));
+    return 0;
+}
+
+// -1：失败；0：不存在；大于0：存在
+int CompactionExtFileSystem::path_exists(const std::string& full_name) {
+    pb::CompactionFileResponse response;
+    if (0 != external_send_request(pb::OP_PATH_EXISTS, full_name, false, response)) {
+        return -1;
+    }
+    return response.file_info_size();
+}
+
+int CompactionExtFileSystem::create(const std::string& full_name) {
+    pb::CompactionFileResponse response;
+    if (0 != external_send_request(pb::OP_CREATE_DIR, full_name, true, response)) {
+        return -1;
+    }
+    return 0;
+}
+
+int CompactionExtFileSystem::get_file_info_list(std::vector<pb::CompactionFileInfo>& file_info_list) {
+    pb::CompactionFileResponse response;
+    if (0 != external_send_request(pb::OP_GET_FILE_INFO_LIST, "", false, response)) {
+        return -1;
+    }
+    for (const auto& file : response.file_info()) {
+        file_info_list.push_back(file);
+    }
+    return 0;
+}
+
+int CompactionExtFileSystem::readdir(const std::string& full_name, std::set<std::string>& file_list) {
+    pb::CompactionFileResponse response;
+    if (0 != external_send_request(pb::OP_READ_DIR, full_name, false, response)) {
+        return -1;
+    }
+    for (auto& file : response.file_info()) {
+        file_list.insert(file.file_path());
+    }
+    return file_list.size();
+}
+
+int CompactionExtFileSystem::delete_remote_copy_file_path() {
+    pb::CompactionFileResponse response;
+    if (0 != external_send_request(pb::OP_DELETE_PATH, "", true, response)) {
+        return -1;
+    }
+    return 0;
+}
+
+int CompactionExtFileSystem::external_send_request(pb::CompactionOpType op_type, 
+                                            const std::string& full_name, 
+                                            bool recursive,
+                                            pb::CompactionFileResponse& response) {
+    pb::CompactionFileRequest request;
+    request.set_op_type(op_type);
+    request.set_remote_compaction_id(_remote_compaction_id);
+    request.set_file_name(full_name);
+    request.set_recursive(recursive);
+
+    brpc::Controller cntl;
+    pb::StoreService_Stub stub(&_channel);
+    stub.query_file_system(&cntl, &request, &response, nullptr);
+
+    if (cntl.Failed()) {
+        DB_FATAL("send store fail, error:%s, remote_compaction_id:%s, path:%s",
+                        cntl.ErrorText().c_str(), _remote_compaction_id.c_str(), full_name.c_str());
+        return -1;
+    }
+    if (response.errcode() == pb::COMPACTION_FILE_NOT_EXIST) {
+        // DB_WARNING("file not exist, remote_compaction_id:%s, path:%s",
+        //                 _remote_compaction_id.c_str(), full_name.c_str());
+        return -1;
+    } else if (response.errcode() != pb::SUCCESS) {
+        DB_FATAL("send store fail, error:%s, remote_compaction_id:%s, path:%s",
+                        pb::ErrCode_Name(response.errcode()).c_str(), _remote_compaction_id.c_str(), full_name.c_str());
+        return -1;
+    }
+    return 0;
+} 
+
+std::string CompactionExtFileSystem::make_full_name(const std::string& cluster, bool force, const std::string& user_define_path) {
+    return "";
+} 
+
+int CompactionExtFileSystem::rename_file(const std::string& src_file_name, const std::string& dst_file_name) {
+    DB_FATAL("rename_file not support src:%s, dst:%s", src_file_name.c_str(), dst_file_name.c_str());
+    return -1;
+}
 
 } // namespace baikaldb

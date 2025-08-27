@@ -30,6 +30,7 @@ const std::string SNAPSHOT_META_FILE = "region_meta_snapshot.sst";
 const std::string SNAPSHOT_DATA_FILE_WITH_SLASH = "/" + SNAPSHOT_DATA_FILE;
 const std::string SNAPSHOT_META_FILE_WITH_SLASH = "/" + SNAPSHOT_META_FILE;
 const size_t SST_FILE_LENGTH = 128 * 1024 * 1024;
+const std::string SNAPSHOT_PARQUET_META_FILE = "parquet_meta";
 
 class RocksdbFileSystemAdaptor;
 class Region;
@@ -58,7 +59,7 @@ struct SnapshotContext {
         : snapshot(RocksWrapper::get_instance()->get_snapshot()) {}
     ~SnapshotContext() {
         if (snapshot != nullptr) {
-            RocksWrapper::get_instance()->relase_snapshot(snapshot);
+            RocksWrapper::get_instance()->release_snapshot(snapshot);
         }
     }
     const rocksdb::Snapshot* snapshot = nullptr;

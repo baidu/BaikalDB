@@ -23,6 +23,7 @@
 #include "mem_row_descriptor.h"
 #include "data_buffer.h"
 #include "proto/store.interface.pb.h"
+#include "proto/db.interface.pb.h"
 #include "transaction_pool.h"
 #include "transaction.h"
 #include "reverse_index.h"
@@ -85,10 +86,7 @@ public:
     RuntimeState() {
         bthread_mutex_init(&_mem_lock, NULL);
     }
-    ~RuntimeState() {
-        memory_limit_release_all();
-        bthread_mutex_destroy(&_mem_lock);
-    }
+    ~RuntimeState();
 
     // baikalStore init
     int init(const pb::StoreReq& req,
@@ -96,9 +94,25 @@ public:
         const RepeatedPtrField<pb::TupleDescriptor>& tuples,
         TransactionPool* pool, StateOption option);
 
+    // MPP非主db init
+    int init(const pb::RuntimeState& pb_rs);
+
     // baikaldb init
     int init(QueryContext* ctx, DataBuffer* send_buf);
 
+    void to_proto(pb::RuntimeState* pb_rs);
+
+    void reset_vectorize_info() {
+        execute_type = pb::EXEC_ROW;
+        vectorlized_parallel_execution = false; 
+        acero_declarations.clear();
+        sign_exec_type = SignExecType::SIGN_EXEC_NOT_SET;
+        arrow_input_schemas.clear(); 
+        is_simple_select = true;
+        use_mpp = false;
+        subquery_result_table.reset();
+    }
+    
     // for prepared txn recovery in BaikalDB
     //int init(const pb::CachePlan& commit_plan);
 
@@ -122,7 +136,7 @@ public:
         return _is_cancelled;
     }
     pb::TupleDescriptor* get_tuple_desc(int tuple_id) {
-        if (tuple_id >= (int32_t)_tuple_descs.size()) {
+        if (tuple_id < 0 || tuple_id >= (int32_t)_tuple_descs.size()) {
             return nullptr;
         }
         return &_tuple_descs[tuple_id];
@@ -201,6 +215,10 @@ public:
         _num_affected_rows = num;
     }
 
+    void set_num_returned_rows(int64_t num) {
+        _num_returned_rows = num;
+    }
+
     void inc_num_returned_rows(int64_t num) {
         _num_returned_rows += num;
     }
@@ -249,6 +267,30 @@ public:
 
     int64_t num_filter_rows() {
         return _num_filter_rows;
+    }
+
+    int64_t db_handle_rows() {
+        return _db_handle_rows;
+    }
+
+    void inc_db_handle_rows(int64_t num) {
+        _db_handle_rows += num;
+    }
+
+    void set_db_handle_rows(int64_t num) {
+        _db_handle_rows = num;
+    }
+
+    int64_t db_handle_bytes() {
+        return _db_handle_bytes;
+    }
+
+    void inc_db_handle_bytes(int64_t bytes) {
+        _db_handle_bytes += bytes;
+    }
+
+    void set_db_handle_bytes(int64_t bytes) {
+        _db_handle_bytes = bytes;
     }
 
     void set_log_id(uint64_t logid) {
@@ -405,6 +447,12 @@ public:
         return _is_union_subquery;
     }
 
+    void set_from_subquery(bool is_from_subquery) {
+        _is_from_subquery = is_from_subquery;
+    }
+    void set_ctx(QueryContext* ctx) {
+        _ctx = ctx;
+    }
     QueryContext* ctx() {
         return _ctx;
     }
@@ -436,6 +484,9 @@ public:
     bool is_timeout() {
         return _sql_exec_timeout > 0 && time_cost.get_time()  > _sql_exec_timeout * 1000L;
     }
+    uint64_t get_query_time() {
+        return time_cost.get_start_time();
+    }
 
     bool is_ddl_work() {
         return _is_ddl_work;
@@ -464,7 +515,16 @@ public:
     pb::ErrCode       err_code = pb::SUCCESS;
     bool              is_explain = false;
     ExplainType       explain_type = EXPLAIN_NULL;
+    // -------- 此部分皆为收集统计信息相关 ---------------
     std::shared_ptr<CMsketch> cmsketch = nullptr;
+    std::shared_ptr<HyperLogLog> hll = nullptr;
+    // 需要收集哪些统计信息
+    std::shared_ptr<std::set<pb::StatisticType>> statistics_types;
+    // 表总行数
+    int64_t          table_rows = 0;
+    // 采样行数
+    int64_t          sample_rows = 0;
+    // -------- 此部分皆为收集统计信息相关 ----------------
     int64_t          last_insert_id = INT64_MIN; //存储baikalStore last_insert_id(expr)更新的字段
     pb::StoreRes*    response = nullptr;
 
@@ -487,6 +547,7 @@ public:
     // for re
     int                 keypoint_range = 100 * 10000;
     int                 partition_threshold = 10000;
+    int                 pre_split_region_cnt = -1;
     int                 range_count_limit = 0;
     int64_t           _sql_exec_timeout = -1;
     bool              _is_ddl_work = false;
@@ -496,18 +557,25 @@ public:
 
     // for acero vectorize
     pb::ExecuteType     execute_type = pb::EXEC_ROW;
-    bool                vectorlized_parallel_execution = true; 
+    bool                vectorlized_parallel_execution = false; 
     std::vector<arrow::acero::Declaration>  acero_declarations;
     SignExecType sign_exec_type = SignExecType::SIGN_EXEC_NOT_SET;
+    std::shared_ptr<arrow::Table>  subquery_result_table; // 非相关子查询结果
     // tuple id -> arrow schema
     std::unordered_map<int, std::shared_ptr<arrow::Schema>> arrow_input_schemas; 
     bool                is_simple_select = true;
     bool                force_vectorize = false; // For store, 强制走向量化
 
+    // mpp
+    bool                use_mpp = false;
+
     // 单表编码转换
     bool need_convert_charset = false;
     pb::Charset connection_charset = pb::CS_UNKNOWN;
     pb::Charset table_charset = pb::CS_UNKNOWN;
+
+    static std::string localhost_address;
+    bool force_single_rpc = false;
 
 private:
     bool _is_inited    = false;
@@ -527,7 +595,8 @@ private:
     std::map<int64_t, ReverseIndexBase*> _reverse_index_map;
     std::map<int64_t, VectorIndex*> _vector_index_map;
     DataBuffer*     _send_buf= nullptr;
-
+    bool _need_delete_ctx = false;
+    bool _need_delete_client_conn = false;
     bool _need_check_region = true;
 
     int64_t _num_increase_rows = 0; //存储净新增行数
@@ -536,6 +605,8 @@ private:
     int64_t _num_scan_rows     = 0; //存储baikalStore扫描行数
     int64_t _num_filter_rows   = 0; //存储过滤行数
     int64_t _read_disk_size = 0; // 扫描大小
+    int64_t _db_handle_rows = 0; //存储baikaldb处理行数
+    int64_t _db_handle_bytes = 0; //存储baikaldb处理字节数
     uint64_t _log_id = 0;
 
     bool              _single_sql_autocommit = true;     // used for baikaldb and store

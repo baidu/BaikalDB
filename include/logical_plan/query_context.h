@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #pragma once
+#include <boost/algorithm/string.hpp>
 #include "user_info.h"
 #include "proto/common.pb.h"
 #include "mem_row_descriptor.h"
@@ -21,7 +22,8 @@
 #include "runtime_state.h"
 #include "base.h"
 #include "expr.h"
-#include "range.h"
+// #include "range.h"
+#include "fragment.h"
 
 namespace baikaldb {
 DECLARE_bool(default_2pc);
@@ -76,6 +78,9 @@ struct QueryStat {
     uint64_t    old_txn_id = 0;
     int         old_seq_id = 0;
 
+    int64_t     db_handle_rows    = 0;
+    int64_t     db_handle_bytes   = 0;
+
     QueryStat() {
         reset();
     }
@@ -123,6 +128,8 @@ struct QueryStat {
         old_txn_id          = 0;
         old_seq_id          = 0;
         region_count        = 0;
+        db_handle_rows      = 0;
+        db_handle_bytes     = 0;
     }
 };
 
@@ -135,6 +142,81 @@ struct ExprParams {
     // (a,b) in (select a,b from t) row_filed_number=2
     int  row_filed_number  = 1;
     bool is_union_subquery = false;
+};
+
+struct UniqueIdContext {
+    int32_t tuple_cnt = 0;
+    int32_t sub_query_level = 0;
+    int32_t derived_table_id = -1;
+};
+typedef std::shared_ptr<UniqueIdContext> SmartUniqueIdCtx;
+
+// explain format='hint WITH_CBO IGNORE_INDEX(index_name1,index_name2)'
+// 用以explain时给提示
+// NO_FORCE 会在索引选择时忽视force标记
+// NO_USE 会在索引选择是忽视use标记
+// WITH_CBO 会在索引选择时使用cbo选择索引
+// WITHOUT_CBO 会在索引选择是不使用cbo选择索引
+// IGNORE_INDEX 可以在索引选择时屏蔽某些索引 IGNORE_INDEX(index_name1,index_name2) indexname之间不要有空格
+// NO_IGNORE 会在索引选择是忽视ignore标记
+// IGNORE_BLACKLIST 允许被加黑的sql 进行explain
+struct ExplainHint {
+    enum HintType {
+        NO_FORCE,
+        NO_USE,
+        NO_IGNORE,
+        WITH_CBO,
+        WITHOUT_CBO,
+        IGNORE_INDEX,
+        KEEP_VIRTUAL,
+    };
+
+    explicit ExplainHint(std::string format) {
+        std::vector<std::string> hints;
+        boost::split(hints, format, boost::is_any_of(" \t\n\r"), boost::token_compress_on);
+        for (const auto& hint: hints) {
+            if (boost::iequals(hint, "NO_FORCE")) {
+                set_flag<NO_FORCE>();
+            } else if (boost::iequals(hint, "NO_USE")) {
+                set_flag<NO_USE>();
+            } else if (boost::iequals(hint, "WITH_CBO")) {
+                set_flag<WITH_CBO>();
+            } else if (boost::iequals(hint, "WITHOUT_CBO")) {
+                set_flag<WITHOUT_CBO>();
+            } else if (boost::iequals(hint, "NO_IGNORE")) {
+                set_flag<NO_IGNORE>();
+            } else if (boost::iequals(hint, "KEEP_VIRTUAL")) {
+                set_flag<KEEP_VIRTUAL>();
+            } else if (boost::istarts_with(hint, "IGNORE_INDEX")) {
+                set_flag<IGNORE_INDEX>();
+                // 提取index names
+                std::string IGNORE_INDEX_names = hint.substr(12, hint.length() - 13);
+                std::vector<std::string> IGNORE_INDEX_names_list;
+                boost::split(IGNORE_INDEX_names_list, IGNORE_INDEX_names, boost::is_any_of(","), boost::token_compress_on);
+                blocked_indexes.insert(blocked_indexes.end(), IGNORE_INDEX_names_list.begin(), IGNORE_INDEX_names_list.end());
+            }
+        }
+    }
+
+    template<HintType ht>
+    void set_flag() {
+        constexpr long long mask = (1ULL << ht);
+        hint_bit_map |= mask;
+    }
+
+    template<HintType ht>
+    void unset_flag() {
+        constexpr long long mask = ~(1ULL << ht);
+        hint_bit_map &= mask;
+    }
+
+    template<HintType ht>
+    bool get_flag() {
+        return hint_bit_map & (1ULL << ht);
+    }
+
+    long long hint_bit_map = 0;
+    std::vector<std::string> blocked_indexes;
 };
 
 class QueryContext {
@@ -158,6 +240,9 @@ public:
     }
 
     pb::TupleDescriptor* get_tuple_desc(int tuple_id) {
+        if (tuple_id < 0 || tuple_id >= (int)_tuple_descs.size()) {
+            return nullptr;
+        }
         return &_tuple_descs[tuple_id];
     }
     std::vector<pb::TupleDescriptor>* mutable_tuple_descs() {
@@ -200,6 +285,12 @@ public:
         std::unique_lock<bthread::Mutex> lck(_kill_lock);
         sub_query_plans.emplace_back(ctx);
     }
+
+    void add_noncorrelated_subquerys(std::shared_ptr<QueryContext>& ctx) {
+        std::unique_lock<bthread::Mutex> lck(_kill_lock);
+        noncorrelated_subquerys.emplace_back(ctx);
+    }
+
     void set_kill_ctx(std::shared_ptr<QueryContext>& ctx) {
         std::unique_lock<bthread::Mutex> lck(_kill_lock);
         kill_ctx = ctx;
@@ -249,6 +340,10 @@ public:
         }
     }
 
+    // only use mpp
+    void set_client_conn(NetworkSocket* conn) {
+        client_conn = conn;
+    }
 public:
     std::string         sql;
     std::vector<std::string> comments;
@@ -260,11 +355,15 @@ public:
     parser::StmtNode*   stmt;
     parser::NodeType    stmt_type;
     bool                is_explain = false;
+    std::shared_ptr<ExplainHint> explain_hint;
+    std::vector<std::shared_ptr<QueryContext>> noncorrelated_subquerys;
     bool                is_get_keypoint = false;
     bool                is_full_export = false;
     bool                is_straight_join = false;
     bool                select_for_update = false;
     ExplainType         explain_type = EXPLAIN_NULL;
+    // Explain format内的具体信息
+    std::string         format;
     int                 single_store_concurrency = -1;
 
     uint8_t             mysql_cmd = COM_SLEEP;      // Command number in mysql protocal.
@@ -276,6 +375,13 @@ public:
 
     pb::Plan            plan;
     ExecNode*           root = nullptr;
+
+    // mpp TODO CACHE?
+    std::shared_ptr<FragmentInfo>        root_fragment;   // fragment树
+    std::map<int, std::shared_ptr<FragmentInfo>> fragments;
+    std::map<std::string, std::set<int>> db_to_fragments; // 非主db address0->fragment_ids
+    int                 fragment_max_id = 0;
+    int                 node_max_id = 0;                  // 只有Exchange有nodeid,一对Exchange的nodeid相同
     
     // 如果输出包含AGG表达式，则在PacketNode和AggNode节点中的常量节点都需要获取并赋值
     std::unordered_multimap<int, ExprNode*> placeholders;
@@ -316,6 +422,7 @@ public:
     bool                open_binlog = false;
     bool                no_binlog = false; // 用于控制DM导入是否写binlog
     SignExecType        sql_exec_type_defined = SignExecType::SIGN_EXEC_NOT_SET;
+    bool                use_mpp = false;
 
     // user can scan data in specific region by comments 
     // /*{"region_id":$region_id}*/ preceding a Select statement 
@@ -376,13 +483,48 @@ public:
     // 是否为Union型子查询
     bool is_union_subquery = false;
 
+    // 是否为insert select里的select子查询
+    bool is_insert_select_subquery = false;
+
     bool table_can_use_arrow_vectorize = true;
     // 是否是with语句
     bool is_with = false;
     // 是否是create view语句
     bool is_create_view = false;
+
+    // 是否包含窗口函数
+    bool has_window_func = false;
+
+    // 聚合下推使用
+    SmartUniqueIdCtx unique_id_ctx;
+
+    // 向量索引使用
+    int32_t efsearch = -1;
+
+    bool dumped_slow_sql = false;
+
+    // 注释或者配置指定的sign mpp hash值
+    int mpp_hash_num = -1;
+
+    // 查询是否包含DBLink Mysql表
+    bool has_dblink_mysql = false;
+
 private:
     std::vector<pb::TupleDescriptor> _tuple_descs;
     bthread::Mutex _kill_lock;
 };
+
+inline int32_t get_slot_idx(const pb::TupleDescriptor& tuple_desc, const int32_t slot_id) {
+    if (tuple_desc.slot_idxes().empty()) {
+        // 兼容MPP场景未上线的db还未赋值slot_idxes，将任务发送到已上线的db
+        return slot_id - 1;
+    }
+    const auto& slot_idxes = tuple_desc.slot_idxes();
+    if (slot_id - 1 < 0 || slot_id - 1 >= slot_idxes.size()) {
+        DB_WARNING("Invalid slot_id: %d, slot_idxes size: %d", slot_id, slot_idxes.size());
+        return -1;
+    }
+    return slot_idxes[slot_id - 1];
+}
+
 } //namespace baikal

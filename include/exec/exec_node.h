@@ -22,7 +22,7 @@
 #include "proto/meta.interface.pb.h"
 #include "mem_row_descriptor.h"
 #include "runtime_state.h"
-
+#include "mpp_property.h"
 namespace baikaldb {
 
 inline bool is_dml_op_type(const pb::OpType& op_type) {
@@ -70,6 +70,10 @@ inline bool is_2pc_op_type(const pb::OpType& op_type) {
     return false;
 }
 
+struct CreateExecOptions {
+    bool use_column_storage = false;
+};
+
 class RuntimeState;
 class QueryContext;
 class ExecNode {
@@ -94,6 +98,12 @@ public:
     //output:能推的条件尽量下推，不能推的条件做一个filter node, 连接到节点的上边
     virtual int predicate_pushdown(std::vector<ExprNode*>& input_exprs);
 
+    // @brief 下推聚合节点
+    // @param ctx: 当前查询的上下文
+    // @param agg_node: 需要下推的聚合节点
+    virtual int agg_pushdown(QueryContext* ctx, ExecNode* agg_node);
+    virtual bool can_agg_pushdown();
+
     virtual void remove_additional_predicate(std::vector<ExprNode*>& input_exprs);
     // 在计划树中插入一个filter node，filter node是该节点的父节点
     void add_filter_node(const std::vector<ExprNode*>& input_exprs, pb::PlanNodeType type = pb::TABLE_FILTER_NODE);
@@ -103,6 +113,8 @@ public:
     virtual void get_all_dual_scan_node(std::vector<ExecNode*>& exec_nodes);
     void get_node(const pb::PlanNodeType node_type, std::vector<ExecNode*>& exec_nodes);
     ExecNode* get_node(const pb::PlanNodeType node_type);
+    // 获取执行计划树中最后一个指定类型的节点
+    ExecNode* get_last_node(const pb::PlanNodeType node_type);
     ExecNode* get_node_pass_subquery(const pb::PlanNodeType node_type);
     void get_node_pass_subquery(const pb::PlanNodeType node_type, std::vector<ExecNode*>& exec_nodes);
     ExecNode* get_parent() {
@@ -163,10 +175,31 @@ public:
             child->replace_slot_ref_to_literal(sign_set, literal_maps);
         }
     }
-    virtual void show_explain(std::vector<std::map<std::string, std::string>>& output) {
+    /**
+     * @brief 生成explain的每行记录
+     * @param ctx 查询上下文，从中获取subquery给子查询explain使用
+     * @param output 输出，每个表扫描对应一条
+     * @param next_id 全局该生成的下一个id
+     * @param display_id join子节点id应该显示为一样，-1表示使用next_id作为display_id
+     * @return 返回本节点的id 设置虚拟表名时使用 <derived3> 这样的
+    */
+    virtual int show_explain(QueryContext* ctx, std::vector<std::map<std::string, std::string>>& output, int& next_id, int display_id) {
+        int return_id = (display_id != -1 ? display_id : next_id);
         for (auto child : _children) {
-            child->show_explain(output);
+            child->show_explain(ctx, output, next_id, display_id);
         }
+        return return_id;
+    }
+
+    static std::vector<std::map<std::string, std::string>>::iterator 
+    find_explain_record_by_id(std::vector<std::map<std::string, std::string>>& output, int id) {
+        return std::find_if(output.begin(), output.end(), [id](const std::map<std::string, std::string>& explain_map) {
+            auto it = explain_map.find("id");
+            if (it != explain_map.end() && it->second == std::to_string(id)) {
+                return true;
+            }
+            return false;
+        });
     }
 
     virtual bool check_satisfy_condition(MemRow* row) {
@@ -192,6 +225,23 @@ public:
         }
         return nullptr;
     }
+    bool only_has_specified_node(const std::unordered_set<pb::PlanNodeType>& node_types) {
+        if (node_types.find(_node_type) == node_types.end()) {
+            return false;
+        }
+        for (auto child : _children) {
+            if (child == nullptr) {
+                DB_FATAL("child is nulptr");
+                return false;
+            }
+            bool ret = child->only_has_specified_node(node_types);
+            if (!ret) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     void set_parent(ExecNode* parent_node) {
         _parent = parent_node;
     }
@@ -302,7 +352,7 @@ public:
     //除了表达式外大部分直接沿用保存的pb
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
     static void create_pb_plan(int64_t region_id, pb::Plan* plan, ExecNode* root);
-    static int create_tree(const pb::Plan& plan, ExecNode** root);
+    static int create_tree(const pb::Plan& plan, ExecNode** root, const CreateExecOptions& options);
     static void destroy_tree(ExecNode* root) {
         delete root;
     }
@@ -358,7 +408,7 @@ public:
         return _return_empty;
     }
     // for vectorized execute
-    virtual bool can_use_arrow_vector() {
+    virtual bool can_use_arrow_vector(RuntimeState* state) {
         return false;
     }
     virtual int build_arrow_declaration(RuntimeState* state) {
@@ -381,23 +431,69 @@ public:
         return _node_exec_type;
     }
 
-    // [ARROW] 临时用, 后续会删除
-    ExecNode* vec_get_limit_node() {
-        if (_node_type == pb::LIMIT_NODE) {
-            return this;
-        } else if (_node_type == pb::UNION_NODE) {
-            return nullptr;
-        } else {
-            for (auto c : _children) {
-                ExecNode* node = c->vec_get_limit_node();
-                if (node != nullptr) {
-                    return node;
-                }
+    void set_data_schema(const std::set<ColumnInfo>& schema) {
+        _data_schema = schema;
+    }
+
+    std::set<ColumnInfo>& data_schema() {
+        return _data_schema;
+    }
+
+    virtual int set_partition_property_and_schema(QueryContext* ctx) {
+        int no_valid_input_child_size = 0;
+        _partition_property.type = pb::AnyType;
+        for (auto& c : _children) {
+            if (0 != c->set_partition_property_and_schema(ctx)) {
+                return -1;
             }
-            return nullptr;
+            if (c->partition_property()->has_no_input_data) {
+                no_valid_input_child_size += 1;
+            }
+        }
+        if (_children.size() > 0) {
+            _data_schema.insert(_children[0]->data_schema().begin(), 
+                                _children[0]->data_schema().end());
+            _partition_property = *(_children[0]->partition_property());
+        }
+        if (_return_empty || (_children.size() > 0 && no_valid_input_child_size == _children.size())) {
+            _partition_property.has_no_input_data = true;
+        }
+        return 0;
+    }
+
+    void set_partition_property(NodePartitionProperty* partition_property) {
+        _partition_property.type = partition_property->type;
+        _partition_property.hash_partition_propertys = partition_property->hash_partition_propertys;
+        _partition_property.add_need_cast_string_columns(partition_property->need_cast_string_columns);
+    }
+
+    NodePartitionProperty* partition_property() {
+        return &_partition_property;
+    }
+    
+    bool shrink_partition_property(std::shared_ptr<HashPartitionColumns> hash_columns, NodePartitionProperty* partition_property);
+
+    virtual void update_runtime_state(RuntimeState* state) {
+        for (auto& child : _children) {
+            child->update_runtime_state(state);
         }
     }
-  
+
+    virtual int prune_columns(QueryContext* ctx, const std::unordered_set<int32_t>& invalid_column_ids) {
+        for (auto child : _children) {
+            if (child == nullptr) {
+                return -1;
+            }
+            int ret = child->prune_columns(ctx, invalid_column_ids);
+            if (ret != 0) {
+                return ret;
+            }
+        }
+        return 0;
+    }
+
+    static void encode_exprs_key(std::vector<ExprNode*>& exprs, MemRow* row, MutTableKey& key);
+
 protected:
     bool _has_optimized = false;
     int64_t _limit = -1;
@@ -415,6 +511,9 @@ protected:
     bool  _is_manual = false;
     std::vector<int64_t> _partitions {0};
 
+    // mpp
+    NodePartitionProperty _partition_property;
+
     pb::ExecuteType _node_exec_type = pb::EXEC_ROW;  // node实际上执行的类型
     bool _delay_fetcher_store = false;
     
@@ -422,10 +521,12 @@ protected:
     std::map<int64_t, std::vector<SmartRecord>> _return_old_records;
     std::map<int64_t, std::vector<SmartRecord>> _return_records;
 
+    // source schema for mpp
+    std::set<ColumnInfo> _data_schema;
 private:
     static int create_tree(const pb::Plan& plan, int* idx, ExecNode* parent, 
-                           ExecNode** root);
-    static int create_exec_node(const pb::PlanNode& node, ExecNode** exec_node);
+                           ExecNode** root, const CreateExecOptions& options);
+    static int create_exec_node(const pb::PlanNode& node, ExecNode** exec_node, const CreateExecOptions& options);
 };
 typedef std::shared_ptr<pb::TraceNode> SmartTrace;
 }

@@ -115,6 +115,7 @@ void UnionPlanner::parse_dual_fields() {
         slot_desc.set_ref_cnt(1);
         pb::SlotDescriptor* slot = tuple_desc.add_slots();
         slot->CopyFrom(slot_desc);
+        tuple_desc.add_slot_idxes(slot->slot_id() - 1);
         pb::ExprNode* node = select_expr.add_nodes();
         node->set_node_type(pb::SLOT_REF);
         node->set_col_type(pb::INVALID_TYPE);
@@ -253,6 +254,10 @@ int UnionPlanner::create_common_plan_node() {
                 return -1;
             }
             expr->add_nodes()->CopyFrom(_select_exprs[idx].nodes(0));
+            if (inc_slot_ref_cnt(*expr) != 0) {
+                DB_WARNING("Fail to inc_slot_ref_cnt, expr: %s", expr->ShortDebugString().c_str());
+                return -1;
+            }
         }
         agg->set_agg_tuple_id(-1);
     }
@@ -300,7 +305,7 @@ int UnionPlanner::get_slot_column_mapping() {
     }
     for (int i = 0; i < union_tuple_desc->slots().size(); ++i) {
         const pb::SlotDescriptor& slot_desc = union_tuple_desc->slots(i);
-        _ctx->slot_column_mapping[slot_desc.tuple_id()][slot_desc.slot_id()]= i;
+        _ctx->slot_column_mapping[slot_desc.tuple_id()][slot_desc.slot_id()] = i;
     }
     return 0;
 }

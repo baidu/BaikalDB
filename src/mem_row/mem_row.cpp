@@ -47,7 +47,12 @@ std::string* MemRow::mutable_string(int32_t tuple_id, int32_t slot_id) {
     }
     const google::protobuf::Reflection* reflection = tuple->GetReflection();
     const google::protobuf::Descriptor* descriptor = tuple->GetDescriptor();
-    auto field = descriptor->field(slot_id - 1);
+    int slot_idx = get_slot_idx(tuple_id, slot_id);
+    if (slot_idx < 0 || slot_idx >= descriptor->field_count()) {
+        DB_WARNING("Invalid slot_idx: %d, field_count: %d", slot_idx, descriptor->field_count());
+        return nullptr;
+    }
+    auto field = descriptor->field(slot_idx);
     if (field == nullptr) {
         return nullptr;
     }
@@ -94,7 +99,12 @@ int MemRow::decode_key(int32_t tuple_id, IndexInfo& index,
             }
             continue;
         }
-        const FieldDescriptor* field = descriptor->field(slot - 1);
+        int slot_idx = get_slot_idx(tuple_id, slot);
+        if (slot_idx < 0 || slot_idx >= descriptor->field_count()) {
+            DB_WARNING("Invalid slot_idx: %d, field_count: %d", slot_idx, descriptor->field_count());
+            return -1;
+        }
+        const FieldDescriptor* field = descriptor->field(slot_idx);
         if (field == nullptr) {
             DB_WARNING("invalid field: %d slot: %d", index.fields[idx].id, slot);
             return -1;
@@ -131,7 +141,12 @@ int MemRow::decode_primary_key(int32_t tuple_id, IndexInfo& index, std::vector<i
             }
             continue;
         }
-        const FieldDescriptor* field = descriptor->field(slot - 1);
+        int slot_idx = get_slot_idx(tuple_id, slot);
+        if (slot_idx < 0 || slot_idx >= descriptor->field_count()) {
+            DB_WARNING("Invalid slot_idx: %d, field_count: %d", slot_idx, descriptor->field_count());
+            return -1;
+        }
+        const FieldDescriptor* field = descriptor->field(slot_idx);
         if (field == nullptr) {
             DB_WARNING("invalid field: %d slot: %d", field_info.id, slot);
             return -1;

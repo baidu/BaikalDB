@@ -18,6 +18,7 @@
 #include "can_add_peer_setter.h"
 #include "concurrency.h"
 #include "proto/store.interface.pb.h"
+
 namespace baikaldb {
 DECLARE_int32(rocksdb_cost_sample);
 
@@ -252,7 +253,7 @@ int MyRaftLogStorage::get_binlog_entry(rocksdb::Slice& raftlog_value_slice, std:
     if (op_type != pb::OP_PREWRITE_BINLOG) {
         return 1;
     }
-    DB_WARNING("raft_log:%s", raftlog_pb.ShortDebugString().c_str());
+    //DB_WARNING("raft_log:%s", raftlog_pb.ShortDebugString().c_str());
     int64_t ts = -1;
     if (!raftlog_pb.has_binlog_desc()) {
         DB_FATAL("binlog region_id: %ld has not binlog ts", _region_id);
@@ -418,7 +419,7 @@ int MyRaftLogStorage::append_entries(const std::vector<braft::LogEntry*>& entrie
     {
         Concurrency::get_instance()->raft_write_concurrency.increase_wait();
         ON_SCOPE_EXIT([]() {
-                Concurrency::get_instance()->raft_write_concurrency.decrease_broadcast();
+                Concurrency::get_instance()->raft_write_concurrency.decrease_signal();
                 });
         auto status = _db->write(options, &batch);
         if (!status.ok()) {
@@ -537,6 +538,7 @@ int MyRaftLogStorage::truncate_suffix(const int64_t last_index_kept) {
         batch.Delete(_raftlog_handle, rocksdb::Slice(buf, LOG_DATA_KEY_SIZE));
         buf += LOG_DATA_KEY_SIZE;
     }
+
     auto status = _db->write(options, &batch);
     if (!status.ok()) {
         DB_FATAL("Fail to write db, region_id: %ld, err_mes:%s",

@@ -97,7 +97,8 @@ enum IndexHint {
     void calc_cost(std::map<std::string, std::string>* cost_info, std::map<int32_t, double>& filed_selectivity);
     void show_cost(std::map<std::string, std::string>* cost_info, std::map<int32_t, double>& filed_selectivity);
     void get_date_in_values(const ExprValue& left, bool left_open, const ExprValue& right, bool right_open, std::vector<ExprValue>& dates);
-    void insert_no_cut_condition(const std::map<ExprNode*, std::unordered_set<int32_t>>& expr_field_map, bool is_get_keypoint) {
+    void insert_no_cut_condition(const std::map<ExprNode*, std::unordered_set<int32_t>>& expr_field_map, 
+                                bool is_get_keypoint, bool use_column_storage) {
         for (auto& pair : expr_field_map) {
             const auto& expr = pair.first;
             const auto& expr_field_ids = pair.second;
@@ -117,23 +118,36 @@ enum IndexHint {
                 }
             }
         }
+        if (use_column_storage) {
+            other_condition.insert(need_cut_index_range_condition.begin(),
+                            need_cut_index_range_condition.end());
+            other_condition.insert(index_other_condition.begin(),
+                            index_other_condition.end());
+        }
     }
-    void calc_is_covering_index(const pb::TupleDescriptor& desc, std::set<int32_t>* slot_ids = nullptr) {
+
+    // fulltext_fields内是所有状态为is_possible 的全文索引的field_id << 5 + storage_type
+    void calc_is_covering_index(
+            const pb::TupleDescriptor& desc,
+            const std::set<int32_t>& slot_ids,
+            const std::map<int64_t, bool>& fulltext_fields_exact_like_map) {
         for (auto& slot : desc.slots()) {
-            if ((slot_ids != nullptr) && (slot_ids->count(slot.slot_id()) == 0)) {
+            if (!slot_ids.empty() && slot_ids.count(slot.slot_id()) == 0) {
                 continue;
             }
             if (cover_field_ids.count(slot.field_id()) == 0) {
                 // I_FULLTEXT; 获取不到索引的field信息
                 // 但是select count(*) from full like '%a%';是能够索引覆盖的
-                if (slot.ref_cnt() == 1 &&
-                        !need_cut_index_range_condition.empty() &&
-                        slot.field_id() == index_info_ptr->fields[0].id) {
-                    continue;
-                } else {
-                    is_covering_index = false;
-                    break;
+                // TODO: 旧版本需要index_info_ptr->storage_type， 新版本不需要
+                if (index_info_ptr->type == pb::I_FULLTEXT && slot.ref_cnt() == 1) {
+                    auto iter = fulltext_fields_exact_like_map.find((slot.field_id() << 5) + index_info_ptr->storage_type);
+                    if (iter != fulltext_fields_exact_like_map.end() && !iter->second) {
+                        // 在hit_index的fulltext_index中且不为exact_like
+                        continue;
+                    }
                 }
+                is_covering_index = false;
+                break;
             }
         }
         pos_index.set_is_covering_index(is_covering_index);
@@ -177,6 +191,7 @@ public:
     // 不分配内存，只获取filter节点的指针
     // 这些set是互斥的
     std::unordered_set<ExprNode*> need_cut_index_range_condition;
+    bool is_exact_like = false;
     std::unordered_set<ExprNode*> index_other_condition;
     std::unordered_set<ExprNode*> other_condition;
     std::shared_ptr<std::map<int32_t, range::FieldRange>> field_range_map;

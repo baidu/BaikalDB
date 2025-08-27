@@ -18,6 +18,7 @@
 #include "common.h"
 #include "mem_row_descriptor.h"
 #include "data_buffer.h"
+#include "mpp_property.h"
 #include "proto/store.interface.pb.h"
 #include "arrow/acero/options.h"
 #include "arrow/acero/exec_plan.h"
@@ -220,7 +221,7 @@ public:
                     desc += " [use_index_join: " + std::to_string(*info) + "]";
                 }
             } else {
-                desc += "NOT SUPPORT TYPE}";
+                desc += "}";
             }
         }
         return desc;
@@ -237,6 +238,13 @@ public:
             std::string filter_str = (filter == nullptr  ? "null" : filter->ToString());
             std::string desc = "{local filter: " + filter_str + ", " + "limit: " + std::to_string(limit) + "}";
             _local_node->add_arrow_plan(desc);
+        }
+    }
+
+    void set_partition_property_and_schema(NodePartitionProperty* partition) {
+        if (_trace_node != nullptr) {
+            std::string desc = partition->print();
+            _local_node->set_mpp_property(desc);
         }
     }
 private:
@@ -296,6 +304,9 @@ TraceLocalNode TRACE_LOCAL_NODE_NAME (__FUNCTION__, trace, vec, type, callback)
 #define LOCAL_TRACE_ARROW_PLAN(plan) TRACE_LOCAL_NODE_NAME.add_arrow_plan(plan)
 #define LOCAL_TRACE_ARROW_PLAN_WITH_INFO(plan, info) TRACE_LOCAL_NODE_NAME.add_arrow_plan(plan, nullptr, info)
 #define LOCAL_TRACE_ARROW_PLAN_WITH_SCHEMA(plan, schema, info) TRACE_LOCAL_NODE_NAME.add_arrow_plan(plan, schema, info)
+#define START_LOCAL_TRACE_WITH_PARTITION_PROPERTY(trace, vec, property, type, callback) \
+TraceLocalNode TRACE_LOCAL_NODE_NAME (__FUNCTION__, trace, vec, type, callback); \
+TRACE_LOCAL_NODE_NAME.set_partition_property_and_schema(property)
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

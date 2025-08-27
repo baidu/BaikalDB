@@ -31,6 +31,7 @@ DECLARE_int64(store_heart_beat_interval_us);
 DEFINE_int32(compact_interval, 1, "compact_interval xx (s)");
 DEFINE_bool(allow_compact_range, true, "allow_compact_range");
 DEFINE_bool(allow_blocking_flush, true, "allow_blocking_flush");
+DEFINE_bool(snapshot_consistency, true, "avoid bottommost compaction");
 int RegionControl::remove_data(int64_t drop_region_id) {
     rocksdb::WriteOptions options;
     MutTableKey start_key;
@@ -320,7 +321,7 @@ int RegionControl::remove_snapshot_path(int64_t drop_region_id) {
     DB_WARNING("drop snapshot directory, region_id: %ld", drop_region_id);
     return 0;
 }
-int RegionControl::clear_all_infos_for_region(int64_t drop_region_id) {
+int RegionControl::clear_all_infos_for_region(int64_t drop_region_id, int64_t table_id) {
     DB_WARNING("region_id: %ld, clear_all_infos_for_region do compact in queue", drop_region_id);
     //compact_data_in_queue(drop_region_id);
     remove_data(drop_region_id);
@@ -329,8 +330,10 @@ int RegionControl::clear_all_infos_for_region(int64_t drop_region_id) {
     remove_meta(drop_region_id);
     remove_snapshot_path(drop_region_id);
     remove_log_entry(drop_region_id);
+    ColumnFileManager::remove_column_file(drop_region_id, table_id);
     return 0;
 }
+
 int RegionControl::ingest_data_sst(const std::string& data_sst_file, int64_t region_id, bool move_files) {
     auto rocksdb = RocksWrapper::get_instance();
     rocksdb::IngestExternalFileOptions ifo;
@@ -339,6 +342,7 @@ int RegionControl::ingest_data_sst(const std::string& data_sst_file, int64_t reg
     ifo.move_files = move_files;
     ifo.write_global_seqno = false;
     ifo.allow_blocking_flush = FLAGS_allow_blocking_flush;
+    ifo.snapshot_consistency = FLAGS_snapshot_consistency;
     auto data_cf = rocksdb->get_data_handle();
     auto res = rocksdb->ingest_external_file(data_cf, {data_sst_file}, ifo);
     if (!res.ok()) {

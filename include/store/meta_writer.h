@@ -45,6 +45,10 @@ public:
     static const std::string REGION_OFFLINE_BINLOG_IDENTIFY;
     static const std::string WATT_STATS_VERSION_IDENTIFY;
     static const std::string ROLLUP_REGION_INIT_INDEX_INDENTIFY;
+    static const std::string SKIP_WATT_STATS_VERSION_IDENTIFY;
+    static const std::string COLUMN_HOT_FILE_INDENTIFY;
+    static const std::string COLUMN_COLD_FILE_INDENTIFY;
+    static const std::string BINLOG_DATA_CF_OLDEST_IDENTIFY;
 
     virtual ~MetaWriter() {}
    
@@ -96,16 +100,28 @@ public:
     int write_binlog_check_point(int64_t region_id, int64_t ts);
     int64_t read_binlog_check_point(int64_t region_id);
     std::string binlog_oldest_ts_key(int64_t region_id) const;
+    std::string binlog_data_cf_oldest_ts_key(int64_t region_id) const;
     int write_binlog_oldest_ts(int64_t region_id, int64_t ts);
     int64_t read_binlog_oldest_ts(int64_t region_id);
+    int write_binlog_data_cf_oldest_ts(int64_t region_id, int64_t ts);
+    int64_t read_binlog_data_cf_oldest_ts(int64_t region_id);
     std::string olap_key(int64_t region_id) const;
+    std::string column_hot_file_key(int64_t region_id) const;
+    std::string column_cold_file_key(int64_t region_id) const;
     int write_olap_info(int64_t region_id, const pb::OlapRegionInfo& olap_info);
     int read_olap_info(int64_t region_id, pb::OlapRegionInfo& olap_info);
+    int write_column_file_info(int64_t region_id, const pb::RegionColumnFiles& file_info);
+    int read_column_file_info(int64_t region_id, pb::RegionColumnFiles& file_info);
+    int clear_column_file_info(int64_t region_id);
     std::string offline_binlog_key(int64_t region_id) const;
     std::string watt_stats_version_key(int64_t region_id, uint64_t watt_stats_version) const;
     rocksdb::Status get_watt_stats_version(int64_t region_id, uint64_t watt_stats_version) const;
     int put_watt_stats_version(int64_t region_id, uint64_t watt_stats_version, SmartTransaction txn);
     int clear_watt_stats_version(int64_t region_id);
+    std::string skip_watt_stats_version_key(int64_t region_id, uint64_t raft_index) const;
+    rocksdb::Status get_skip_watt_stats_version(int64_t region_id, uint64_t raft_index) const;
+    int put_skip_watt_stats_version(int64_t region_id, uint64_t raft_index);
+    int clear_skip_watt_stats_version(int64_t region_id);
     int clear_rollup_batch_version(int64_t region_id);
     int write_region_offline_binlog_info(int64_t region_id, const pb::RegionOfflineBinlogInfo& offline_binlog_info);
     int read_region_offline_binlog_info(int64_t region_id, pb::RegionOfflineBinlogInfo& offline_binlog_info);

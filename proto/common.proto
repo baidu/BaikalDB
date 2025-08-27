@@ -38,6 +38,9 @@ enum ErrCode {
     STORE_BUSY   = 31;
     LEARNER_NOT_READY = 32;
     STORE_ROCKS_HANG  = 33;
+    COMPACTION_FILE_SYSTEM_ERROR = 34;
+    REMOTE_COMPACTION_ERROR = 35;
+    COMPACTION_FILE_NOT_EXIST = 36;
 };
 
 enum PrimitiveType {
@@ -65,7 +68,7 @@ enum PrimitiveType {
     BITMAP = 21;
     TDIGEST = 22;
     JSON = 23;
-    MAXVALUE_TYPE = 24;
+    MAXVALUE_TYPE = 24; //用做分区表less than MAXVALUE，后续增加类型不要改变这个tag
 };
 
 enum SchemaType {
@@ -115,6 +118,12 @@ message SchemaConf {
     optional string sign_exec_type          = 18;
     optional string snapshot_blacklist      = 19; // 用于watt报表数据修复
     optional string del_snapshot_blacklist  = 20; // 用于手动删除snapshot
+    // for column storage
+    optional bool use_column_storage        = 21; // 是否使用列存，读取时使用
+    optional bool enable_column_engine      = 22; // 是否开启列式存储，store使用
+    optional int32 olap_pre_split_cnt       = 23; // OLAP预分裂的个数
+    optional bool cold_use_column_only      = 24; // 是否冷数据只使用列存
+    optional bool force_column_storage      = 25; // 是否强制使用列存
 };
 
 enum Engine {
@@ -132,15 +141,15 @@ message SlotDescriptor {
     required int32 tuple_id = 3;
     optional int64 table_id = 4; //从表中获取才填
     optional int32 field_id = 5; //从表中获取才填
-    optional int32 ref_cnt  = 6; //引用这个slot的数量，用来给FULLTEXT做索引覆盖查询
-
+    optional int32 ref_cnt  = 6; //引用这个slot的数量，用来给FULLTEXT做索引覆盖查询及无效列裁剪
 };
 
 //tuple可以与table对应，也可以是中间表达式和聚合结果
 message TupleDescriptor {
     required int32 tuple_id = 1; //从0开始
     optional int64 table_id = 2; //与表映射才填
-    repeated SlotDescriptor slots = 3; 
+    repeated SlotDescriptor slots = 3;
+    repeated int32 slot_idxes = 4; // 用于获取slot在slots的位置
 };
 message ExprValue {
     required PrimitiveType type       = 1;
@@ -152,4 +161,50 @@ message ExprValue {
     optional float         float_val  = 7;
     optional double        double_val = 8;
     optional bytes         string_val = 9;
+};
+
+message FieldSlot {
+    required string          field_name = 1;
+    required int32           slot_id    = 2;
+};
+
+// dualscannode 内层的slot_id映射到外层的column id
+message SlotColumn {
+    required int32          slot_id     = 1;
+    required int32          column_id   = 2;
+};
+
+message RefSlotMapping {
+    required int64          tuple_id    = 1;
+    repeated FieldSlot      field_slot  = 2;
+
+};
+
+message QueryContext {
+    // index_selector判断是否是covering index
+    repeated RefSlotMapping     ref_slot_id_mapping     = 1;   
+
+};
+
+message RuntimeState {
+    repeated TupleDescriptor    tuples          = 1;   
+    optional QueryContext       query_context   = 2;   
+    optional uint64             log_id          = 3;
+    optional uint64             sign            = 4;    
+    optional uint64             sign_exec_type  = 5;
+};
+
+message CompactionFileInfo {
+    required string file_path = 1;
+    optional uint64 file_size = 2;
+    optional uint64 file_mtime = 3;
+};
+
+message MysqlInfo {
+    optional bytes addr = 1;
+    optional bytes username = 2;
+    optional bytes password = 3;
+    optional bytes database_name = 4;
+    optional bytes table_name = 5;
+    optional bytes charset = 6; // 连接字符串
 };

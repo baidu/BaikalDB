@@ -562,5 +562,9 @@ inline bool has_merged_type(std::vector<pb::PrimitiveType>& types, pb::Primitive
     }
     return true;
 }
+
+inline bool is_numberic(pb::PrimitiveType type) {
+    return is_int(type) || is_double(type) || type == pb::BOOL;
+}
 }
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

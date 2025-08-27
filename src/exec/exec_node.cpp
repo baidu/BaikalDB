@@ -38,7 +38,9 @@
 #include "apply_node.h"
 #include "load_node.h"
 #include "runtime_state.h"
-
+#include "exchange_sender_node.h"
+#include "exchange_receiver_node.h"
+#include "window_node.h"
 namespace baikaldb {
 
 int ExecNode::init(const pb::PlanNode& node) {
@@ -93,6 +95,7 @@ int ExecNode::common_expr_optimize(std::vector<ExprNode*>* exprs) {
         expr->close();
         delete expr;
         expr = new Literal(value);
+        expr->set_float_precision_len(value.float_precision_len);
     }
     return ret;
 }
@@ -106,6 +109,34 @@ int ExecNode::predicate_pushdown(std::vector<ExprNode*>& input_exprs) {
     }
     input_exprs.clear();
     return 0;
+}
+
+int ExecNode::agg_pushdown(QueryContext* ctx, ExecNode* node) {
+    for (auto child : _children) {
+        if (child == nullptr) {
+            DB_FATAL("child is nullptr");
+            return -1;
+        }
+        int ret = child->agg_pushdown(ctx, node);
+        if (ret < 0) {
+            return ret;
+        }
+    }
+    return 0;
+}
+
+bool ExecNode::can_agg_pushdown() {
+    for (auto child : _children) {
+        if (child == nullptr) {
+            DB_FATAL("child is nullptr");
+            return -1;
+        }
+        int ret = child->can_agg_pushdown();
+        if (!ret) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void ExecNode::remove_additional_predicate(std::vector<ExprNode*>& input_exprs) {
@@ -178,6 +209,22 @@ ExecNode* ExecNode::get_node(const pb::PlanNodeType node_type) {
     }
 }
 
+// 获取执行计划树中指定类型的最后一个节点
+ExecNode* ExecNode::get_last_node(const pb::PlanNodeType node_type) {
+    ExecNode* node = nullptr;
+    if (_node_type == node_type) {
+        node = this;
+    }
+    for (auto c : _children) {
+        ExecNode* node_tmp = nullptr;
+        node_tmp = c->get_last_node(node_type);
+        if (node_tmp != nullptr) {
+            node = node_tmp;
+        }
+    }
+    return node;
+}
+
 ExecNode* ExecNode::get_node_pass_subquery(const pb::PlanNodeType node_type) {
     if (_node_type == node_type) {
         return this;
@@ -239,6 +286,9 @@ bool ExecNode::need_seperate() {
             if (static_cast<ScanNode*>(this)->engine() == pb::ROCKSDB_CSTORE) {
                 return true;
             }
+            if (static_cast<ScanNode*>(this)->engine() == pb::DBLINK) {
+                return true;
+            }
             break;
         default:
             break;
@@ -263,6 +313,7 @@ void ExecNode::create_trace() {
     }
 }
 int ExecNode::open(RuntimeState* state) {
+    START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
     int num_affected_rows = 0;
     for (auto c : _children) {
         int ret = 0;
@@ -293,14 +344,14 @@ void ExecNode::create_pb_plan(int64_t region_id, pb::Plan* plan, ExecNode* root)
     }
 }
 
-int ExecNode::create_tree(const pb::Plan& plan, ExecNode** root) {
+int ExecNode::create_tree(const pb::Plan& plan, ExecNode** root, const CreateExecOptions& options) {
     int ret = 0;
     int idx = 0;
     if (plan.nodes_size() == 0) {
         *root = nullptr;
         return 0;
     }
-    ret = ExecNode::create_tree(plan, &idx, nullptr, root);
+    ret = ExecNode::create_tree(plan, &idx, nullptr, root, options);
     if (ret < 0) {
         return -1;
     }
@@ -308,7 +359,7 @@ int ExecNode::create_tree(const pb::Plan& plan, ExecNode** root) {
 }
 
 int ExecNode::create_tree(const pb::Plan& plan, int* idx, ExecNode* parent, 
-                          ExecNode** root) {
+                          ExecNode** root, const CreateExecOptions& options) {
     if (*idx >= plan.nodes_size()) {
         DB_FATAL("idx %d >= size %d", *idx, plan.nodes_size());
         return -1;
@@ -317,7 +368,7 @@ int ExecNode::create_tree(const pb::Plan& plan, int* idx, ExecNode* parent,
     ExecNode* exec_node = nullptr;
 
     int ret = 0;
-    ret = create_exec_node(plan.nodes(*idx), &exec_node);
+    ret = create_exec_node(plan.nodes(*idx), &exec_node, options);
     if (ret < 0) {
         DB_FATAL("create_exec_node fail:%s", plan.nodes(*idx).DebugString().c_str());
         return ret;
@@ -333,7 +384,7 @@ int ExecNode::create_tree(const pb::Plan& plan, int* idx, ExecNode* parent,
     }
     for (int i = 0; i < num_children; i++) {
         ++(*idx);
-        ret = create_tree(plan, idx, exec_node, nullptr);
+        ret = create_tree(plan, idx, exec_node, nullptr, options);
         if (ret < 0) {
             DB_FATAL("sub create_tree fail, idx:%d", *idx);
             return -1;
@@ -342,10 +393,10 @@ int ExecNode::create_tree(const pb::Plan& plan, int* idx, ExecNode* parent,
     return 0;
 }
 
-int ExecNode::create_exec_node(const pb::PlanNode& node, ExecNode** exec_node) {
+int ExecNode::create_exec_node(const pb::PlanNode& node, ExecNode** exec_node, const CreateExecOptions& options) {
     switch (node.node_type()) {
         case pb::SCAN_NODE:
-            *exec_node = ScanNode::create_scan_node(node);
+            *exec_node = ScanNode::create_scan_node(node, options);
             if (*exec_node == nullptr) {
                 return -1;
             }
@@ -419,6 +470,18 @@ int ExecNode::create_exec_node(const pb::PlanNode& node, ExecNode** exec_node) {
         case pb::LOAD_NODE:
             *exec_node = new LoadNode;
             return (*exec_node)->init(node);
+        case pb::EXCHANGE_RECEIVER_NODE:
+            *exec_node = new ExchangeReceiverNode;
+            return (*exec_node)->init(node);
+        case pb::EXCHANGE_SENDER_NODE:
+            *exec_node = new ExchangeSenderNode;
+            return (*exec_node)->init(node);
+        case pb::SELECT_MANAGER_NODE:
+            *exec_node = new SelectManagerNode;
+            return (*exec_node)->init(node);
+        case pb::WINDOW_NODE:
+            *exec_node = new WindowNode;
+            return (*exec_node)->init(node);
         default:
             DB_FATAL("create_exec_node failed: %s", node.DebugString().c_str());
             return -1;
@@ -450,6 +513,48 @@ int ExecNode::push_cmd_to_cache(RuntimeState* state,
     store_request->set_parent(nullptr);
     plan_item.tuple_descs = state->tuple_descs();
     return 1;
+}
+
+bool ExecNode::shrink_partition_property(std::shared_ptr<HashPartitionColumns> my_hash_columns, NodePartitionProperty* child_partition_property) {
+    bool is_same_or_shrinked = false;
+    for (auto& child_hash_partition : child_partition_property->hash_partition_propertys) {
+        if (my_hash_columns->hash_partition_is_contain(child_hash_partition.get())) {
+            is_same_or_shrinked = true;
+            for (auto iter = my_hash_columns->hash_columns.begin(); iter != my_hash_columns->hash_columns.end();) {
+                if (child_hash_partition->hash_columns.count(iter->first) == 0) {
+                    iter = my_hash_columns->hash_columns.erase(iter);
+                } else {
+                    ++iter;
+                }
+            }
+            for (auto order_iter = my_hash_columns->ordered_hash_columns.begin(); order_iter != my_hash_columns->ordered_hash_columns.end();) {
+                if (my_hash_columns->hash_columns.count(*order_iter) == 0) {
+                    order_iter = my_hash_columns->ordered_hash_columns.erase(order_iter);
+                } else {
+                    ++order_iter;
+                }
+            }
+        }
+    }
+    return is_same_or_shrinked;
+}
+
+void ExecNode::encode_exprs_key(std::vector<ExprNode*>& exprs, MemRow* row, MutTableKey& key) {
+    uint8_t null_flag = 0;
+    key.append_u8(null_flag);
+    for (uint32_t i = 0; i < exprs.size(); i++) {
+        if (exprs[i] == nullptr) {
+            DB_FATAL("exprs is nullptr");
+            return;
+        }
+        ExprValue value = exprs[i]->get_value(row);
+        if (value.is_null()) {
+            null_flag |= (0x01 << (7 - i));
+            continue;
+        }
+        key.append_value(value);
+    }
+    key.replace_u8(null_flag, 0);
 }
 
 }

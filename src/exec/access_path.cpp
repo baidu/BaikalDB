@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 #include "access_path.h"
 #include "slot_ref.h"
 #ifdef BAIDU_INTERNAL 
@@ -601,6 +600,10 @@ void AccessPath::calc_fulltext(Property& sort_property) {
         return;
     }
     FieldRange& range = iter->second;
+    if (index_type == pb::I_VECTOR && range.type != MATCH_VECTOR) {
+        // 向量索引只支持MATCH_VECTOR
+        return;
+    }
     bool hit_index = false;
     std::vector<ExprValue>* values = nullptr;
     auto range_type = range.type;
@@ -614,6 +617,8 @@ void AccessPath::calc_fulltext(Property& sort_property) {
             hit_index = true;
             if (!range.is_exact_like) {
                 need_cut_index_range_condition.insert(range.conditions.begin(), range.conditions.end());
+            } else {
+                is_exact_like = true;
             }
             values = &range.like_values;
             if (range.type != OR_LIKE) {
@@ -658,6 +663,7 @@ void AccessPath::calc_fulltext(Property& sort_property) {
                 range->set_match_mode(pb::M_BOOLEAN);
             }
             range->set_topk(sort_property.expected_cnt);
+            range->set_efsearch(sort_property.efsearch);
             if (first_field_expr_values != nullptr && !first_field_expr_values->empty()) {
                 ExprValue& expr_value = *(first_field_expr_values->begin());
                 uint64_t separate_value = expr_value.cast_to(pb::UINT64).get_numberic<uint64_t>();
@@ -707,7 +713,7 @@ double AccessPath::calc_field_selectivity(int32_t field_id, FieldRange& range) {
                 if (eq_in_values_set.seek(value) != nullptr) {
                     continue;
                 }
-                in_selectivity += SchemaFactory::get_instance()->get_cmsketch_ratio(table_id, field_id, value);
+                in_selectivity += SchemaFactory::get_instance()->get_eq_field_ratio(table_id, field_id, value);
                 eq_in_values_set.insert(value);
             }
             return in_selectivity;

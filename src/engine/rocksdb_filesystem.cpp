@@ -23,12 +23,14 @@
 #include <butil/files/file_enumerator.h>
 #endif
 #include "rocksdb_filesystem.h"
-
+#include <openssl/md5.h>
+#include <iomanip>
+#include <cstring>
 namespace baikaldb {
 static bvar::Adder<int64_t> g_external_sst_count("external_afs_sst_count");
 static bvar::Adder<int64_t> g_external_sst_size_bytes("external_sst_size_bytes");
 const std::string SstExtLinker::SST_EXT_MAP_FILE_PREFIX = "sst_ext_map";
-
+ 
 rocksdb::IOStatus ExtRandomAccessFile::Read(uint64_t offset, size_t n, const rocksdb::IOOptions& options,
                     rocksdb::Slice* result, char* scratch, rocksdb::IODebugContext* dbg) const {
     rocksdb::IOStatus s;
@@ -57,6 +59,61 @@ rocksdb::IOStatus ExtRandomAccessFile::Read(uint64_t offset, size_t n, const roc
 
     *result = rocksdb::Slice(scratch, (r < 0) ? 0 : n - left);
     return s;
+}
+
+
+rocksdb::IOStatus ExtSequentialFile::Read(size_t n, const rocksdb::IOOptions& options,
+                    rocksdb::Slice* result, char* scratch, rocksdb::IODebugContext* dbg) {
+    rocksdb::IOStatus s;
+    ssize_t r = -1;
+    size_t left = n;
+    char* ptr = scratch;
+    bool eof = false;
+    while (left > 0) {
+        r = _file_reader->read(ptr, left, static_cast<off_t>(current_offset_), &eof);
+        if (r < 0) {
+            break;
+        }
+        ptr += r;
+        current_offset_ += r;
+        left -= r;
+        if (eof) {
+            break;
+        }
+    }
+    if (r < 0) {
+        DB_FATAL("filename: %s, read current_offset: %lu, len: %ld failed",
+            _file_reader->file_name().c_str(), current_offset_, n);
+        // An error: return a non-ok status
+        s = rocksdb::IOStatus::IOError("While pread offset " + std::to_string(current_offset_) + " len " +
+                        std::to_string(n) + " " + _file_reader->file_name());
+    }
+
+    *result = rocksdb::Slice(scratch, (r < 0) ? 0 : n - left);
+    return s;
+}
+
+rocksdb::IOStatus ExtSequentialFile::Skip(uint64_t n) {
+    // 将当前偏移量移动 n 个字节
+    rocksdb::IOStatus status;
+    current_offset_ += n;
+
+    // 检查跳过操作是否超过文件末尾
+    bool eof = false;
+    ssize_t skipped_bytes = _file_reader->skip(n, &eof);
+    if (skipped_bytes < 0) {
+        // 如果发生错误，返回 IOError 状态
+        status = rocksdb::IOStatus::IOError("Failed to skip " + std::to_string(n) + " bytes");
+    } else if (eof) {
+        // 如果到达文件末尾，调整偏移量并返回 OK
+        current_offset_ -= (n - skipped_bytes);
+        status = rocksdb::IOStatus::OK();
+    } else {
+        // 成功跳过所需的字节数
+        status = rocksdb::IOStatus::OK();
+    }
+
+    return status;
 }
 
 int SstExtLinker::init(const std::shared_ptr<ExtFileSystem>& ext_fs, const std::string& rocksdb_path) {
@@ -249,7 +306,7 @@ int SstExtLinker::new_ext_random_access_file(const std::string& ext_file_name,
     }
 
     result->reset(new ExtRandomAccessFile(std::move(file_reader)));
-    DB_NOTICE("ext file: %s", ext_file_name.c_str());
+    // DB_NOTICE("ext file: %s", ext_file_name.c_str());
     return 0;
 }
 
@@ -474,6 +531,186 @@ int SstExtLinker::do_rewrite_file() {
         return -1;
     }
     
+    return 0;
+}
+
+int CompactionSstExtLinker::register_job(const std::string& remote_compaction_id,
+                        const std::shared_ptr<CompactionExtFileSystem>& ext_fs,
+                        const std::vector<std::string>& input_files) {
+    std::shared_ptr<CompactionSstExtLinkerData> linker_data = std::make_shared<CompactionSstExtLinkerData>();                   
+    linker_data->ext_fs = ext_fs;
+    std::vector<pb::CompactionFileInfo> file_info_list;
+    if (0 != ext_fs->get_file_info_list(file_info_list)) {
+        DB_FATAL("remote_compaction_id: %s get_file_info_list failed", remote_compaction_id.c_str());
+        return -1;
+    }
+    for (const auto& file_info : file_info_list) {
+        linker_data->file_size_map[file_info.file_path()] = file_info.file_size();
+    }
+    for (const auto& file_name : input_files) {
+        linker_data->input_file_set.insert("/" + file_name);
+    }
+    BAIDU_SCOPED_LOCK(_mutex);
+    _linker_data_map[remote_compaction_id] = linker_data;
+    return 0;
+}
+
+int CompactionSstExtLinker::finish_job(const std::string& remote_compaction_id) {
+    BAIDU_SCOPED_LOCK(_mutex);                      
+    _linker_data_map.erase(remote_compaction_id);
+    return 0;
+}
+
+int CompactionSstExtLinker::new_ext_random_access_file(const std::string& remote_compaction_id,
+                        const std::string& ext_file_name,
+                        std::unique_ptr<rocksdb::FSRandomAccessFile>* result) {
+    result->reset();
+    std::shared_ptr<CompactionSstExtLinkerData> linker_data;
+    if (get_linker_data(remote_compaction_id, linker_data) != 0 || linker_data == nullptr) {
+        DB_FATAL("remote compaction id: %s not found", remote_compaction_id.c_str());
+        return -1;
+    }
+    std::shared_ptr<CompactionExtFileSystem> ext_fs = linker_data->ext_fs;
+    if (ext_fs == nullptr) {
+        DB_FATAL("remote compaction id: %s ext_fs not found", remote_compaction_id.c_str());
+        return -1;
+    }
+    std::shared_ptr<ExtFileReader> file_reader;
+    int ret = ext_fs->open_reader(ext_file_name, &file_reader);
+    if (ret != 0) {
+        DB_FATAL("open ext file: %s failed", ext_file_name.c_str());
+        return -1;
+    }
+
+    result->reset(new ExtRandomAccessFile(std::move(file_reader)));
+    // DB_NOTICE("remote_compaction_id: %s, ext file: %s", remote_compaction_id.c_str(), ext_file_name.c_str());
+    return 0;
+}
+
+int CompactionSstExtLinker::new_ext_sequential_file(const std::string& remote_compaction_id,
+                        const std::string& ext_file_name,
+                        std::unique_ptr<rocksdb::FSSequentialFile>* result) {
+    result->reset();
+    std::shared_ptr<CompactionSstExtLinkerData> linker_data;
+    if (get_linker_data(remote_compaction_id, linker_data) != 0 || linker_data == nullptr) {
+        DB_FATAL("remote compaction id: %s not found", remote_compaction_id.c_str());
+        return -1;
+    }
+    std::shared_ptr<CompactionExtFileSystem> ext_fs = linker_data->ext_fs;
+    if (ext_fs == nullptr) {
+        DB_FATAL("remote compaction id: %s ext_fs not found", remote_compaction_id.c_str());
+        return -1;
+    }
+    std::shared_ptr<ExtFileReader> file_reader;
+    int ret = ext_fs->open_reader(ext_file_name, &file_reader);
+    if (ret != 0) {
+        DB_FATAL("open ext file: %s failed", ext_file_name.c_str());
+        return -1;
+    }
+
+    result->reset(new ExtSequentialFile(std::move(file_reader)));
+    return 0;
+}
+
+int CompactionSstExtLinker::get_dir_children(const std::string& remote_compaction_id,
+                        const std::string& dir, 
+                        std::set<std::string>& file_list) {
+    std::shared_ptr<CompactionSstExtLinkerData> linker_data;
+    if (get_linker_data(remote_compaction_id, linker_data) != 0 || linker_data == nullptr) {
+        DB_FATAL("remote compaction id: %s not found", remote_compaction_id.c_str());
+        return -1;
+    }
+    const std::map<std::string, uint64_t>& file_size_map = linker_data->file_size_map;
+    for (const auto& file_info : file_size_map) {
+        file_list.insert(file_info.first);
+    }
+    DB_DEBUG("remote_compaction_id: %s, dir: %s", remote_compaction_id.c_str(), dir.c_str());
+    return file_list.size();
+}
+
+int CompactionSstExtLinker::file_exists(const std::string& remote_compaction_id,
+                        const std::string& ext_file_name) {
+    std::shared_ptr<CompactionSstExtLinkerData> linker_data;
+    if (get_linker_data(remote_compaction_id, linker_data) != 0 || linker_data == nullptr) {
+        DB_FATAL("remote compaction id: %s not found", remote_compaction_id.c_str());
+        return -1;
+    }
+    std::map<std::string, uint64_t>& file_size_map = linker_data->file_size_map;
+    std::size_t pos = ext_file_name.rfind('/');
+    if (pos == std::string::npos) {
+        DB_WARNING("file: %s not have /", ext_file_name.c_str());
+        return -1;
+    }
+    const std::string& file_name = ext_file_name.substr(pos + 1);
+    if (file_size_map.find(file_name) == file_size_map.end()) {
+        DB_WARNING("file: %s not found, file_size_map size: %lu", file_name.c_str(), file_size_map.size());
+        return -1;
+    }
+    return file_size_map[file_name];
+}
+
+int CompactionSstExtLinker::create_dir(const std::string& remote_compaction_id,
+                            const std::string& dir) {
+    std::shared_ptr<CompactionSstExtLinkerData> linker_data;
+    if (get_linker_data(remote_compaction_id, linker_data) != 0 || linker_data == nullptr) {
+        DB_FATAL("remote compaction id: %s not found", remote_compaction_id.c_str());
+        return -1;
+    }
+    std::shared_ptr<CompactionExtFileSystem> ext_fs = linker_data->ext_fs;
+    if (ext_fs == nullptr) {
+        DB_FATAL("remote compaction id: %s ext_fs not found", remote_compaction_id.c_str());
+        return -1;
+    }
+    return ext_fs->create(dir);
+}
+
+int CompactionSstExtLinker::get_file_size(const std::string& remote_compaction_id,
+                            const std::string& ext_file_name, 
+                            uint64_t* size) {
+    std::shared_ptr<CompactionSstExtLinkerData> linker_data;
+    if (get_linker_data(remote_compaction_id, linker_data) != 0 || linker_data == nullptr) {
+        DB_FATAL("remote compaction id: %s not found", remote_compaction_id.c_str());
+        return -1;
+    }
+    std::map<std::string, uint64_t>& file_size_map = linker_data->file_size_map;
+    std::size_t pos = ext_file_name.rfind('/');
+    if (pos == std::string::npos) {
+        DB_WARNING("file: %s not have /", ext_file_name.c_str());
+        return -1;
+    }
+    const std::string& file_name = ext_file_name.substr(pos + 1);
+    if (file_size_map.find(file_name) == file_size_map.end()) {
+        DB_DEBUG("file: %s not found", file_name.c_str());
+        return -1;
+    }
+    *size = file_size_map[file_name];
+    return 0;
+}
+
+int CompactionSstExtLinker::rename_file(const std::string& remote_compaction_id,
+                            const std::string& src_file_name, 
+                            const std::string& dst_file_name) {
+    std::shared_ptr<CompactionSstExtLinkerData> linker_data;
+    if (get_linker_data(remote_compaction_id, linker_data) != 0 || linker_data == nullptr) {
+        DB_FATAL("remote compaction id: %s not found", remote_compaction_id.c_str());
+        return -1;
+    }
+    std::shared_ptr<CompactionExtFileSystem> ext_fs = linker_data->ext_fs;
+    if (ext_fs == nullptr) {
+        DB_FATAL("remote compaction id: %s ext_fs not found", remote_compaction_id.c_str());
+        return -1;
+    }
+    return ext_fs->rename_file(src_file_name, dst_file_name);
+}
+
+int CompactionSstExtLinker::get_linker_data(const std::string& remote_compaction_id, 
+                            std::shared_ptr<CompactionSstExtLinkerData>& linker_data) {
+    BAIDU_SCOPED_LOCK(_mutex);
+    if (_linker_data_map.find(remote_compaction_id) == _linker_data_map.end()) {
+        DB_FATAL("remote compaction id: %s not found", remote_compaction_id.c_str());
+        return -1;
+    }
+    linker_data = _linker_data_map[remote_compaction_id];
     return 0;
 }
 

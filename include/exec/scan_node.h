@@ -18,6 +18,7 @@
 #include "filter_node.h"
 #include "access_path.h"
 #include "table_record.h"
+#include "query_context.h"
 #include <boost/variant.hpp>
 
 namespace baikaldb {
@@ -161,6 +162,16 @@ public:
         }
         return false;
     }
+
+    void set_explain_hint(std::shared_ptr<ExplainHint> explain_hint) {
+        _explain_hint = explain_hint;
+    }
+
+    template<ExplainHint::HintType ht>
+    bool get_explain_hint_flag() {
+        return _explain_hint != nullptr && _explain_hint->get_flag<ht>();
+    }
+
 private:
     int compare_two_path(SmartPath& outer_path, SmartPath& inner_path);
     void inner_loop_and_compare(std::map<int64_t, SmartPath>::iterator outer_loop_iter);
@@ -182,6 +193,7 @@ private:
     int32_t _possible_index_cnt = 0;
     int32_t _cover_index_cnt = 0;
     bool _fulltext_use_arrow = false;
+    std::shared_ptr<ExplainHint> _explain_hint;
 };
 
 struct ScanIndexInfo {
@@ -217,7 +229,7 @@ public:
     }
     virtual ~ScanNode() {
     }
-    static ScanNode* create_scan_node(const pb::PlanNode& node);
+    static ScanNode* create_scan_node(const pb::PlanNode& node, const CreateExecOptions& options);
     virtual int init(const pb::PlanNode& node);
     virtual int open(RuntimeState* state);
     virtual void close(RuntimeState* state);
@@ -365,7 +377,7 @@ public:
     int64_t select_join_index_in_baikaldb(const std::string& sample_sql);
     int64_t select_index_in_baikaldb(const std::string& sample_sql);
 
-    virtual void show_explain(std::vector<std::map<std::string, std::string>>& output);
+    virtual int show_explain(QueryContext* ctx, std::vector<std::map<std::string, std::string>>& output, int& next_id, int display_id);
 
     void set_fulltext_index_tree(const FulltextInfoTree& tree) {
         _fulltext_index_tree = tree;
@@ -405,10 +417,21 @@ public:
         return _is_rocksdb_scan_node;
     }
 
+    bool is_mysql_scan_node() const {
+        return _is_mysql_scan_node;
+    }
+
     void calc_index_range() {
         _main_path.path(_select_idx)->calc_index_range(_partition_field_id, _expr_partition_map);
         if (!_main_path.path(_select_idx)->index_info_ptr->is_global && _select_idx != _table_id) {
             _main_path.path(_table_id)->calc_index_range(_partition_field_id, _expr_partition_map);
+        }
+    }
+
+    void calc_join_index_range() {
+        _join_path.path(_select_index_for_join)->calc_index_range(_partition_field_id, _expr_partition_map);
+        if (!_join_path.path(_select_index_for_join)->index_info_ptr->is_global && _select_index_for_join != _table_id) {
+            _join_path.path(_table_id)->calc_index_range(_partition_field_id, _expr_partition_map);
         }
     }
 
@@ -422,9 +445,17 @@ public:
     }
 
     bool can_use_no_index_join() {
-        // 当join on条件推不推都选择同一个索引, 且不是主键的时候, 才可以使用非index join
         if (_select_idx == _select_index_for_join && _select_idx != _table_id) {
+            // 当join on条件推不推都选择同一个索引, 且不是主键的时候, 可以使用no index join
             return true;
+        }
+        if (_select_idx == _select_index_for_join && _select_idx == _table_id) {
+            // 当join on条件推不推都选择主键, 且range都是空, 即都扫全表, 可以使用no index join
+            if (_join_path.path(_select_index_for_join)->pos_index.ranges_size() == 1
+                    && _join_path.path(_select_index_for_join)->pos_index.ranges(0).left_key().empty()
+                    && _join_path.path(_select_index_for_join)->pos_index.ranges(0).right_key().empty()) {
+                return true;
+            }
         }
         return false;
     }
@@ -467,6 +498,28 @@ public:
     }
     bool has_merge_index() const {
         return _merge_index_infos.size() > 0;
+
+    virtual int set_partition_property_and_schema(QueryContext* ctx);
+
+    bool no_need_runtime_filter() const {
+        return _no_need_runtime_filter;
+    }
+
+    void set_no_need_runtime_filter(bool no_need) {
+        _no_need_runtime_filter = no_need;
+    }
+
+    void set_explain_hint(std::shared_ptr<ExplainHint> explain_hint) {
+        // 只设置给 main和 join
+        _main_path.set_explain_hint(explain_hint);
+        _join_path.set_explain_hint(explain_hint);
+    }
+
+    void set_related_manager_node(ExecNode* manager_node) {
+        _related_manager_node = manager_node;
+    }
+    ExecNode* get_related_manager_node() const {
+        return _related_manager_node;
     }
 
 protected:
@@ -483,6 +536,7 @@ protected:
     bool _is_covering_index = true; // 只有store会用
     bool _has_index = false;
     bool _is_rocksdb_scan_node = false;
+    bool _is_mysql_scan_node = false;
     pb::LockCmdType _lock = pb::LOCK_NO;
     RouterPolicy _router_policy = RouterPolicy::RP_RANGE;
     google::protobuf::RepeatedPtrField<pb::RegionInfo> _old_region_infos;
@@ -512,7 +566,11 @@ protected:
 
 //    int64_t _origin_select_idx = -1;
 //    AccessPathMgr _origin_main_path;    //主集群索引选择
+
+    bool _no_need_runtime_filter = false;
+    ExecNode* _related_manager_node = nullptr;
 };
+
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

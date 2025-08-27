@@ -118,8 +118,13 @@ private:
         }
         return ExprValue::True();
     }
+
+    virtual std::string to_sql(const std::unordered_map<int32_t, std::string>& slotid_fieldname_map, 
+                               baikal::client::MysqlShortConnection* conn) override;
+
 protected:
     pb::Function _fn;
+    std::string _origin_fn_name;
     bool _is_row_expr = false;
     std::function<ExprValue(const std::vector<ExprValue>&)> _fn_call;
     // FT_COMMON构建arrow expression

@@ -116,18 +116,18 @@ int ReverseIndex<Schema>::handle_reverse(
     int ret = 0;
     if (_is_seg_cache) {
         if (_seg_cache.find(word, &cache_seg_res) != 0) {
-            ret = Schema::segment(word, pk, record, _segment_type, _name_field_id_map, flag, *seg_res, _charset);
+            ret = segment(word, pk, record, _segment_type, _name_field_id_map, flag, *seg_res, _charset);
             _seg_cache.add(word, seg_res);
         } else {
             *seg_res = *cache_seg_res;
             // 填充pk，flag信息
-            ret = Schema::segment(word, pk, record, _segment_type, _name_field_id_map, flag, *seg_res, _charset);
+            ret = segment(word, pk, record, _segment_type, _name_field_id_map, flag, *seg_res, _charset);
         }
     } else {
-        ret = Schema::segment(word, pk, record, _segment_type, _name_field_id_map, flag, *seg_res, _charset);
+        ret = segment(word, pk, record, _segment_type, _name_field_id_map, flag, *seg_res, _charset);
     }
     if (ret != 0) {
-        DB_FATAL("segment fail");
+        DB_FATAL("segment fail, word:%s", word.c_str());
         return -1;
     }
     auto map_it = seg_res->begin();
@@ -219,7 +219,7 @@ int ReverseIndex<Schema>::get_reverse_list_two(
         iter_first_new->Seek(key_first_new);
         item_statistic->seek_new += timer_tmp.get_time();
         timer_tmp.reset();
-        FirstLevelMSIterator<ReverseNode, ReverseList> iter_first(
+        FirstLevelMSIterator<ReverseList> iter_first(
                                             iter_first_new, 
                                             _reverse_prefix, 
                                             _key_range, 
@@ -227,13 +227,13 @@ int ReverseIndex<Schema>::get_reverse_list_two(
         
         ReverseListSptr second_list(new ReverseList()); 
         _get_level_reverse_list(txn, 2, term, second_list, true);
-        SecondLevelMSIterator<ReverseNode, ReverseList> iter_second(
+        SecondLevelMSIterator<ReverseList> iter_second(
                                                             (ReverseList&)*second_list, 
                                                             _key_range);
         item_statistic->get_two += timer_tmp.get_time();
         timer_tmp.reset();
         ReverseListSptr tmp_ptr(new ReverseList());
-        level_merge<ReverseNode, ReverseList>(
+        level_merge<ReverseList>(
                             &iter_first, &iter_second, 
                             (ReverseList&)*tmp_ptr, false);
         list_new_ptr = tmp_ptr;
@@ -371,13 +371,13 @@ int ReverseIndex<Schema>::_reverse_remove_range_for_third_level(uint8_t prefix) 
             DB_WARNING("old_count is 0; region_id: %ld, index_id: %ld, term: %s",
                     _region_id, _index_id, merge_term.c_str());
         }
-        SecondLevelMSIterator<ReverseNode, ReverseList> 
+        SecondLevelMSIterator<ReverseList> 
             second_iter((ReverseList&)*second_level_list, _key_range);
-        SecondLevelMSIterator<ReverseNode, ReverseList> 
+        SecondLevelMSIterator<ReverseList> 
             third_iter((ReverseList&)*third_level_list, _key_range);
         std::unique_ptr<ReverseList> new_third_level_list(new ReverseList());
         // merge里判断了范围(迭代器扫描内判断了范围)
-        int result_count = level_merge<ReverseNode, ReverseList>(
+        int result_count = level_merge<ReverseList>(
                 &second_iter, &third_iter, *new_third_level_list, false);
         if (old_count > 0 && result_count == old_count) {
             DB_WARNING("need not remove, region_id: %ld, index_id: %ld, old_count: %d",
@@ -440,7 +440,7 @@ int ReverseIndex<Schema>::_reverse_merge_to_second_level(
     txn->begin(txn_opt);
     //get merge term
     std::string merge_term = get_term_from_reverse_key(iterator->key());
-    FirstLevelMSIterator<ReverseNode, ReverseList> first_iter(iterator, prefix, 
+    FirstLevelMSIterator<ReverseList> first_iter(iterator, prefix, 
                                         _key_range, merge_term, true, _rocksdb, txn->get_txn());
     //create second level key
     std::string second_level_key;
@@ -459,11 +459,11 @@ int ReverseIndex<Schema>::_reverse_merge_to_second_level(
         DB_WARNING("get second level list failed");
         return -1;
     }
-    SecondLevelMSIterator<ReverseNode, ReverseList> second_iter(
+    SecondLevelMSIterator<ReverseList> second_iter(
                                                             (ReverseList&)*second_level_list, 
                                                             _key_range);
     std::unique_ptr<ReverseList> new_second_level_list(new ReverseList());
-    int result_count = level_merge<ReverseNode, ReverseList>(
+    int result_count = level_merge<ReverseList>(
                     &first_iter, &second_iter, *new_second_level_list, false);
     if (result_count == -1) {
         DB_WARNING("merge 1 and 2 failed, term:%s", merge_term.c_str());
@@ -498,13 +498,13 @@ int ReverseIndex<Schema>::_reverse_merge_to_second_level(
         if (status != 0) {
             return -1;
         }
-        SecondLevelMSIterator<ReverseNode, ReverseList> 
+        SecondLevelMSIterator<ReverseList> 
                         third_iter((ReverseList&)*third_level_list, _key_range);
-        SecondLevelMSIterator<ReverseNode, ReverseList> second_iter(
+        SecondLevelMSIterator<ReverseList> second_iter(
                                                         *new_second_level_list, 
                                                         _key_range);
         std::unique_ptr<ReverseList> new_third_level_list(new ReverseList());
-        int result_count = level_merge<ReverseNode, ReverseList>(
+        int result_count = level_merge<ReverseList>(
                         &second_iter, &third_iter, *new_third_level_list, true);
         if (result_count == -1) {
             DB_WARNING("merge 2 and 3 failed");
@@ -675,166 +675,6 @@ int ReverseIndex<Schema>::_insert_one_reverse_node(
         return -1;
     }
     ++g_statistic_insert_key_num;
-    return 0;
-}
-
-template <typename Schema>
-int MutilReverseIndex<Schema>::search(
-                       myrocksdb::Transaction* txn,
-                       SmartIndex& index_info,
-                       SmartTable& table_info,
-                       const std::vector<ReverseIndex<Schema>*>& reverse_indexes,
-                       const std::vector<std::string>& search_datas,
-                       const std::vector<pb::MatchMode>& modes,
-                       bool is_fast, bool bool_or) {
-    uint32_t son_size = reverse_indexes.size();
-    if (son_size == 0) {
-        _exe = nullptr;
-        return 0;
-    }
-    _reverse_indexes = reverse_indexes;
-    _index_info = index_info;
-    _table_info = table_info;
-    _weight_field = get_field_info_by_name(_table_info->fields, "__weight");
-    _query_words_field = get_field_info_by_name(_table_info->fields, "__querywords");
-    bool_executor_type type = NODE_COPY;
-    _son_exe_vec.resize(son_size);
-    bool type_init = false; 
-    for (uint32_t i = 0; i < son_size; ++i) {
-        reverse_indexes[i]->create_executor(txn, index_info, table_info, search_datas[i], modes[i],
-            std::vector<ExprNode*>(), is_fast);
-        _query_words += reverse_indexes[i]->get_query_words();
-        _query_words += ";";
-        _son_exe_vec[i] = reverse_indexes[i]->get_executor();
-        if (!type_init && _son_exe_vec[i]) {
-            type = ((BooleanExecutor<Schema>*)_son_exe_vec[i])->get_type();
-            type_init = true;
-        } 
-        reverse_indexes[i]->print_reverse_statistic_log();
-    } 
-    if (bool_or) {
-        _exe = new OrBooleanExecutor<Schema>(type, nullptr);
-        _exe->set_merge_func(Schema::merge_or);
-        for (uint32_t i = 0; i < son_size; ++i) {
-            if (_son_exe_vec[i]) {
-                _exe->add((BooleanExecutor<Schema>*)_son_exe_vec[i]);
-            }
-        }
-    } else {
-        _exe = new AndBooleanExecutor<Schema>(type, nullptr);
-        _exe->set_merge_func(Schema::merge_or);
-        for (uint32_t i = 0; i < son_size; ++i) {
-            if (_son_exe_vec[i]) {
-                _exe->add((BooleanExecutor<Schema>*)_son_exe_vec[i]);
-            }
-        }
-    }
-    if (_query_words.size() > 0 && _query_words.back() == ';') {
-        _query_words.pop_back();
-    }
-    return 0;
-}
-
-template <typename Schema>
-int MutilReverseIndex<Schema>::search(
-    myrocksdb::Transaction* txn,
-    SmartIndex& index_info,
-    SmartTable& table_info,
-    std::map<int64_t, ReverseIndexBase*>& reverse_index_map,
-    bool is_fast, const pb::FulltextIndex& fulltext_index_info) {
-
-    _index_info = index_info;
-    _table_info = table_info;
-    _txn = txn;
-    _is_fast = is_fast;
-    _weight_field = get_field_info_by_name(_table_info->fields, "__weight");
-    _query_words_field = get_field_info_by_name(_table_info->fields, "__querywords");
-    _reverse_index_map = reverse_index_map;    
-    _reverse_indexes.reserve(5);
-    init_operator_executor(fulltext_index_info, _exe);
-    if (_query_words.size() > 0 && _query_words.back() == ';') {
-        _query_words.pop_back();
-    }
-    return 0;
-}
-
-template <typename Schema>
-int MutilReverseIndex<Schema>::init_operator_executor(
-    const pb::FulltextIndex& fulltext_index_info, OperatorBooleanExecutor<Schema>*& exe) {
-
-    if (fulltext_index_info.fulltext_node_type() == pb::FNT_AND) {
-        exe = new AndBooleanExecutor<Schema>(_type, nullptr);
-        exe->set_merge_func(Schema::merge_or);
-        for (const auto& child : fulltext_index_info.nested_fulltext_indexes()) {
-            if (child.fulltext_node_type() == pb::FNT_AND || child.fulltext_node_type() == pb::FNT_OR) {
-                OperatorBooleanExecutor<Schema>* child_exe = nullptr;
-                if (init_operator_executor(child, child_exe) == 0 && child_exe != nullptr) {
-                    exe->add(child_exe);
-                }
-            } else {
-                BooleanExecutor<Schema>* child_exe = nullptr;
-                if (init_term_executor(child, child_exe) == 0 && child_exe != nullptr) {
-                    exe->add(child_exe);
-                }
-            }
-        }
-    } else if (fulltext_index_info.fulltext_node_type() == pb::FNT_OR) {
-        exe = new OrBooleanExecutor<Schema>(_type, nullptr);
-        exe->set_merge_func(Schema::merge_or);
-        for (const auto& child : fulltext_index_info.nested_fulltext_indexes()) {
-
-            if (child.fulltext_node_type() == pb::FNT_AND || child.fulltext_node_type() == pb::FNT_OR) {
-                OperatorBooleanExecutor<Schema>* child_exe = nullptr;
-                if (init_operator_executor(child, child_exe) == 0 && child_exe != nullptr) {
-                    exe->add(child_exe);
-                }
-            } else {
-                BooleanExecutor<Schema>* child_exe = nullptr;
-                if (init_term_executor(child, child_exe) == 0 && child_exe != nullptr) {
-                    exe->add(child_exe);
-                }
-            }
-        }
-    } else {
-        DB_WARNING("unknown node type[%s].", fulltext_index_info.ShortDebugString().c_str());
-    }
-    return 0;
-}
-
-template <typename Schema>
-int MutilReverseIndex<Schema>::init_term_executor(
-    const pb::FulltextIndex& fulltext_index_info, BooleanExecutor<Schema>*& exe) {
-
-    auto index_id = fulltext_index_info.possible_index().index_id();
-    auto reverse_iter = static_cast<ReverseIndex<Schema>*>(_reverse_index_map[index_id]);
-    //析构用，可以重复。
-    _reverse_indexes.push_back(reverse_iter);
-    std::string word;
-    auto& range = fulltext_index_info.possible_index().ranges(0);
-    if (range.has_left_key()) {
-        word = range.left_key();
-    } else {
-        SmartRecord record = SchemaFactory::get_instance()->new_record(_table_info->id);
-        record->decode(range.left_pb_record());
-        auto index_info = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
-        if (index_info == nullptr || index_info->id == -1) {
-            DB_WARNING("no index_info found for index id: %ld", index_id);
-            return -1;
-        }
-        int ret = record->get_reverse_word(*index_info, word);
-        if (ret < 0) {
-            DB_WARNING("index_info to word fail for index_id: %ld", index_id);
-            return ret;
-        }
-    }
-    reverse_iter->create_executor(_txn, _index_info, _table_info, word, 
-        fulltext_index_info.possible_index().ranges(0).match_mode(),
-        std::vector<ExprNode*>(), _is_fast);
-
-    _query_words += reverse_iter->get_query_words();
-    _query_words += ";";
-    exe = static_cast<BooleanExecutor<Schema>*>(reverse_iter->get_executor());
-    reverse_iter->print_reverse_statistic_log();
     return 0;
 }
 } // end of namespace

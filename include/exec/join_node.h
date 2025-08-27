@@ -74,6 +74,16 @@ public:
         }
         return inner_node;
     }
+    ExecNode* get_outter_node() {
+        if (_children.size() < 2) {
+            return nullptr;
+        }
+        ExecNode* outter_node = _children[0];
+        if (join_type() == pb::RIGHT_JOIN) {
+            outter_node = _children[1];
+        }
+        return outter_node;
+    }
     int hash_join(RuntimeState* state);
     int loop_hash_join(RuntimeState* state);
 
@@ -104,12 +114,38 @@ public:
             ExecNode* node, 
             std::unordered_set<int32_t>& tuple_ids, 
             std::vector<MemRow*>& mem_rows,
-            std::shared_ptr<arrow::Table>& intermediate_table,
-            const std::unordered_map<int32_t, std::set<int32_t>>& cast_string_slot_ids);
+            const std::unordered_map<int32_t, std::set<int32_t>>& cast_string_slot_ids,
+            bool need_add_index_colletor_node,
+            bool remove_useless_sort,
+            bool need_add_join_key);
 
+    void get_need_add_index_collector_cond_nodes(ExecNode* node, std::set<ExecNode*>& need_add_nodes);
     virtual int build_arrow_declaration(RuntimeState* state);
     
-    virtual bool can_use_arrow_vector();
+    virtual bool can_use_arrow_vector(RuntimeState* state);
+
+    virtual int set_partition_property_and_schema(QueryContext* ctx);
+
+    void get_hash_partitions(NodePartitionProperty& outer_property, 
+                             NodePartitionProperty& inner_property, 
+                             const std::unordered_set<std::string>& cast_string_hash_columns) {
+        outer_property.type = _partition_property.type;
+        inner_property.type = _partition_property.type;
+        if (_partition_property.type == pb::HashPartitionType) {
+            outer_property.hash_partition_propertys.emplace_back(_partition_property.hash_partition_propertys[0]);
+            inner_property.hash_partition_propertys.emplace_back(_partition_property.hash_partition_propertys[1]);
+        }
+        outer_property.need_cast_string_columns = _partition_property.need_cast_string_columns;
+        inner_property.need_cast_string_columns = _partition_property.need_cast_string_columns;
+        for (auto& name : cast_string_hash_columns) {
+            outer_property.need_cast_string_columns.insert(name);
+            inner_property.need_cast_string_columns.insert(name);
+            if (_on_condition_column_map.count(name) > 0) {
+                outer_property.need_cast_string_columns.insert(_on_condition_column_map[name]);
+                inner_property.need_cast_string_columns.insert(_on_condition_column_map[name]);
+            }
+        }
+    }
 };
 }
 

@@ -59,6 +59,8 @@
 #include "exec_node.h"
 #include "concurrency.h"
 #include "backup.h"
+#include "file_manager.h"
+#include "region_column.h"
 
 #ifdef BAIDU_INTERNAL
 #else
@@ -94,6 +96,7 @@ DECLARE_int64(binlog_warn_timeout_minute);
 extern void print_metadata_info(const rocksdb::LiveFileMetaData& metadata);
 extern int copy_file(const std::string& local_file, const std::string& user_define_path, std::string& external_file, uint64_t size);
 extern void print_external_info(const rocksdb::ExternalSstFileInfo& info);
+extern std::string make_make_relative_path_without_filename(const std::string& prefix, int64_t table_id, int64_t partition_id);
 
 static const int32_t RECV_QUEUE_SIZE = 128;
 struct StatisticsInfo {
@@ -175,6 +178,43 @@ private:
     Region* _region;
 };
 
+class ColumnSnapshotClosure {
+public:
+    ColumnSnapshotClosure(int64_t region_id, int64_t raft_index, braft::SnapshotWriter* writer, braft::Closure* done) : 
+        _raft_index(raft_index), _writer(writer), _done(done) { }
+    ~ColumnSnapshotClosure() {
+        if (_done != nullptr) {
+            DB_NOTICE("ColumnSnapshotClosure region_id: %ld, raft_index:%ld, cost: %ld", _region_id, _raft_index, _time_cost.get_time());
+            if (!_success) {
+                _done->status().set_error(EINVAL, "Fail to wait column snapshot");
+            }
+            _done->Run();
+        }
+    }
+    int64_t get_raft_index() const { 
+        return _raft_index; 
+    }
+
+    int64_t get_time() {
+        return _time_cost.get_time();
+    }
+
+    void set_success() {
+        _success = true;
+    }
+
+    braft::SnapshotWriter* writer() {
+        return _writer;
+    }
+private:
+    bool _success = false;
+    TimeCost _time_cost;
+    int64_t _region_id = 0;
+    int64_t _raft_index = -1;
+    braft::SnapshotWriter* _writer = nullptr; 
+    braft::Closure* _done = nullptr;
+};
+
 struct FollowerReadCond {
     int64_t ask_leader_read_index_cost = 0;
     int64_t wait_read_index_cost = 0;
@@ -251,7 +291,7 @@ enum GetMode {
 };
     BinlogReadMgr(int64_t region_id, int64_t begin_ts, const std::string& capture_ip, uint64_t log_id, int64_t need_read_cnt, bool is_read_offline_binlog = false);
     BinlogReadMgr(int64_t region_id, GetMode mode);
-    ~BinlogReadMgr() { }
+    ~BinlogReadMgr();
     int get_binlog_value(int64_t commit_ts, int64_t start_ts, pb::StoreRes* response, int64_t binlog_row_cnt);
     int fill_fake_binlog(int64_t fake_ts, std::string& binlog);
     int get_binlog_finish(pb::StoreRes* response);
@@ -285,6 +325,9 @@ private:
     std::map<int64_t, std::string> _fake_binlog_map;
     std::string _capture_ip;
     bool _read_offline_binlog = false;
+    static int64_t _SMALL_REQUEST; // = 10 * 1024 * 1024 // 低于10MB算小请求，不计入内存限制
+    bool _incremental_update = false;
+    SmartMemTracker _mem_tracker = nullptr;
 };
 
 class BinlogAlarm {
@@ -409,8 +452,15 @@ public:
         _no_op_timer.destroy();
         if (_need_decrease) {
             _need_decrease = false;
-            Concurrency::get_instance()->recieve_add_peer_concurrency.decrease_broadcast();
+            Concurrency::get_instance()->recieve_add_peer_concurrency.decrease_signal();
         }
+
+        {
+            // shutdown时释放raft closure, 终止column save snapshot流程
+            std::unique_lock<std::mutex> l(_snapshot_closure_mutex);
+            _snapshot_closure.reset();
+        }
+
         bool expected_status = false;
         if (_shutdown.compare_exchange_strong(expected_status, true)) {
             is_learner() ? _learner->shutdown(NULL) : _node.shutdown(NULL);
@@ -457,6 +507,7 @@ public:
                 _num_delete_lines(0),
                 _region_control(this, region_id),
                 _snapshot_adaptor(new RocksdbFileSystemAdaptor(region_id)), _is_learner(is_learner),
+                _column_mgr(region_id),
                 _not_leader_alarm(region_id, peerId) {
         //create table and add peer请求状态初始化都为IDLE, 分裂请求状态初始化为DOING
         _region_control.store_status(_region_info.status());
@@ -623,16 +674,19 @@ public:
 
     //int clear_data();
     void compact_data_in_queue();
-    int ingest_snapshot_sst(const std::string& dir); 
+    int ingest_snapshot_sst(const std::string& dir);
     int ingest_sst_backup(const std::string& data_sst_file, const std::string& meta_sst_file); 
     // other thread
-    void vector_compaction();
+    void vector_truncate_del();
+    // other thread
+    void vector_compaction(bool is_manual = false);
     // other thread
     void reverse_merge();
     // other thread
     void reverse_merge_doing_ddl();
     // other thread
     void ttl_remove_expired_data();
+    void vector_schema_change();
 
     int restore_faiss(const std::string& path, const std::vector<std::string>& files);
 
@@ -737,6 +791,7 @@ public:
         _real_writing_cond.decrease_signal();
     }
     void reset_allow_write() {
+        //
         _disable_write_cond.decrease_broadcast();
     }
 
@@ -1267,6 +1322,39 @@ public:
         return _olap_state.load();
     }
 
+    // for column
+    int sync_column_info(const std::vector<std::shared_ptr<ColumnFileInfo>>& new_column_files);
+    void apply_column_info(const pb::StoreReq& request, braft::Closure* done);
+    int column_on_snapshot_load_restart();
+    int column_on_snapshot_load(const std::string& dir);
+    void column_on_snapshot_save(braft::SnapshotWriter* writer, braft::Closure* done);
+    void column_snapshot_save();
+    int column_snapshot_save(const std::string& snapshot_path, std::vector<std::string>& files);
+    int get_column_files(const std::vector<pb::PossibleIndex::Range>& key_ranges, std::vector<std::shared_ptr<ParquetFile>>& files);
+    bool use_column_storage(const pb::Plan& plan, SmartTable table);
+    bool use_userid_statis(bool is_eq, const google::protobuf::RepeatedPtrField<pb::PossibleIndex::Range>& key_ranges);
+    std::vector<std::shared_ptr<ColumnFileInfo>> column_link_files(const std::vector<ColumnFileMeta>& file_infos, int64_t min_version, int64_t max_version);
+    void column_delete_files(const std::vector<std::shared_ptr<ColumnFileInfo>>& files);
+    bool can_do_column_compact();
+    int column_minor_compact();
+    void column_major_compact(bool is_base);
+    void column_flush();
+    void column_base_row2column();
+    void column_flush_to_cold();
+    pb::ColumnStatus column_status() {
+        return _column_mgr.column_status();
+    }
+    int64_t column_lines() {
+        return _column_mgr.column_lines();
+    }
+    void column_manual_base_compaction() {
+        _column_mgr.manual_base_compaction();
+    }
+    void column_manual_row2column() {
+        // 重新触发行转列
+        _column_mgr.remove_column_data(pb::CS_INVALID, 0);
+    }
+
     // for binlog backup
     int restore_offline_binlog_info_on_snapshot_load(bool need_ingest_sst);
     int get_binlog_backup_days();
@@ -1277,6 +1365,10 @@ public:
     void delete_remote_expired_file();
     bool need_clear_offline_binlog_sst();
     int clear_offline_binlog(int64_t start_ts, int64_t end_ts);
+
+    static void add_peer_info(pb::StoreHeartBeatRequest& request, const pb::RegionInfo& region_info, 
+                              int64_t applied_index, bool is_learner, bool has_exist_leader);
+
 private:
     struct SplitParam {
         int64_t split_start_index = INT_FAST64_MAX;
@@ -1346,6 +1438,7 @@ private:
         int64_t max_ts_applied  = -1; // map中prewrite会和commit抵消删除，索引map中最大的ts实际上并不是真实的最大ts，需要该字段记录
         int64_t check_point_ts = -1; // 检查点，检查点之前的binlog都已经commit，重启之后从检查点开始扫描
         int64_t oldest_ts      = -1; // rocksdb中最小ts，如果region 某个peer迁移，binlog数据不迁移则oldest_ts改为当前ts
+        int64_t data_cf_oldest_ts = -1; // rocksdb中最小data cf ts, 在ttl remove时会更新，基本只有一个线程会访问，使用atomic
         std::map<int64_t, bool> timeout_start_ts_done; // 标记超时反查的start_ts, 仅用来避免重复commit导致的报警，不用于严格一致性场景
     };
 
@@ -1392,7 +1485,7 @@ private:
 
     void apply_kv_out_txn(const pb::StoreReq& request, braft::Closure* done, 
                                   int64_t index, int64_t term, bool is_replay);
-    bool validate_version(const pb::StoreReq* request, pb::StoreRes* response);
+    int validate_version(const pb::StoreReq* request, pb::StoreRes* response, bool& is_valid_version);
     void print_log_entry(const int64_t start_index, const int64_t end_index);
     void set_region(const pb::RegionInfo& region_info) {
         std::lock_guard<std::mutex> lock(_region_lock);
@@ -1511,6 +1604,10 @@ private:
         uint32_t timestamp =  tso::get_timestamp_internal(std::max(_binlog_param.oldest_ts, _rocksdb->get_oldest_ts_in_binlog_cf()));
         return time(NULL) - timestamp;
     }
+
+    static int mpp_send_version_old(
+        const pb::ExchangeSenderNode& pb_exchange_sender_node, const bool is_merge, const int64_t region_id,
+        const ::google::protobuf::RepeatedPtrField<pb::RegionInfo>& region_infos);
 
 private:
     //Singleton
@@ -1657,6 +1754,9 @@ private:
 
     // olap
     std::atomic<pb::OlapRegionStat> _olap_state  {pb::OLAP_ACTIVE};
+    ColumnFileManager _column_mgr;
+    std::mutex _snapshot_closure_mutex;
+    std::unique_ptr<ColumnSnapshotClosure> _snapshot_closure = nullptr; // 使用
 
     //NOT_LEADER分类报警
     struct NotLeaderAlarm {

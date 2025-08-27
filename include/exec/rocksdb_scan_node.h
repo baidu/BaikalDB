@@ -89,6 +89,12 @@ public:
         for (auto expr : _scan_conjuncts) {
             ExprNode::destroy_tree(expr);
         }
+        for (auto expr : _vector_filter_conjuncts) {
+            ExprNode::destroy_tree(expr);
+        }
+        for (auto expr : _pre_filter_conjuncts) {
+            ExprNode::destroy_tree(expr);
+        }
         for (auto expr : _update_exprs) {
             ExprNode::destroy_tree(expr);
         }
@@ -103,10 +109,11 @@ public:
     // TODO 索引条件下推后续也不需要做
     bool need_pushdown(ExprNode* expr);
     int index_condition_pushdown();
+    int index_condition_pullup(); // 将向量索引无法过滤的条件添加回filter node中；
     virtual int open(RuntimeState* state);
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state);
-    virtual bool can_use_arrow_vector() {
+    virtual bool can_use_arrow_vector(RuntimeState* state) {
         return true;
     }
     virtual int build_arrow_declaration(RuntimeState* state);
@@ -117,12 +124,6 @@ public:
             return true;
         } 
         return false;
-    }
-    void set_related_manager_node(ExecNode* manager_node) {
-        _related_manager_node = manager_node;
-    }
-    ExecNode* get_related_manager_node() const {
-        return _related_manager_node;
     }
     virtual void transfer_pb(int64_t region_id, pb::PlanNode* pb_node);
     virtual void find_place_holder(std::unordered_multimap<int, ExprNode*>& placeholders) {
@@ -166,18 +167,14 @@ private:
     int vectorize_filter(RuntimeState* state, std::shared_ptr<Chunk> chunk);
 
     int multi_get_next(pb::StorageType st, SmartRecord record) {
-        if (st == pb::ST_PROTOBUF_OR_FORMAT1) {
+        if (st == pb::ST_PROTOBUF_OR_FORMAT1 || st == pb::ST_ARROW) {
             return _m_index.get_next(record);
-        } else if (st == pb::ST_ARROW) {
-            return _m_arrow_index.get_next(record);
         }
         return -1;
     }
     bool multi_valid(pb::StorageType st) {
-        if (st == pb::ST_PROTOBUF_OR_FORMAT1) {
+        if (st == pb::ST_PROTOBUF_OR_FORMAT1 || st == pb::ST_ARROW) {
             return _m_index.valid();
-        } else if (st == pb::ST_ARROW) {
-            return _m_arrow_index.valid();
         }
         return false;
     }
@@ -197,7 +194,6 @@ private:
     std::vector<int32_t> _trivial_field_ids;
     std::vector<int32_t> _field_slot;
     MemRowDescriptor* _mem_row_desc;
-    ExecNode* _related_manager_node = NULL;
     SchemaFactory* _factory = nullptr;
     int64_t _index_id = -1;
     int64_t _region_id;
@@ -215,7 +211,6 @@ private:
     bool _use_encoded_key = false;
     bool _range_key_sorted = false;
     bool _bool_and = false;
-    bool _vector_eos = false;
     int64_t _sort_limit_by_range = 0;
     int64_t _num_rows_returned_by_range = 0;
     
@@ -239,13 +234,15 @@ private:
     size_t _idx = 0;
     //后续做下推用
     std::vector<ExprNode*> _scan_conjuncts;
+    std::vector<ExprNode*> _vector_filter_conjuncts;
+    std::vector<ExprNode*> _pre_filter_conjuncts; // 在向量索引中前过滤的条件
     IndexIterator* _index_iter = nullptr;
     TableIterator* _table_iter = nullptr;
     ReverseIndexBase* _reverse_index = nullptr;
     VectorIndex* _vector_index = nullptr;
     std::string _vector_word;
     int _topk = 10;
-    int _vector_retry = 0;
+    int _efsearch = 16;
     uint64_t _separate_value = 0;
 
     SmartTable       _table_info;
@@ -257,8 +254,7 @@ private:
     std::vector<std::string> _query_words;
     std::vector<pb::MatchMode> _match_modes;
     std::vector<ReverseIndexBase*> _reverse_indexes;
-    MutilReverseIndex<CommonSchema> _m_index;
-    MutilReverseIndex<ArrowSchema> _m_arrow_index;
+    MutilReverseIndex _m_index;
 
     std::map<int32_t, int32_t> _index_slot_field_map;
     pb::StorageType _storage_type = pb::ST_UNKNOWN;
@@ -273,6 +269,7 @@ private:
     BatchRecord   _multiget_filter_records;
     int _arrow_filter_batch_size = 1024;
     bool _vectorized_filtered = false; 
+    std::shared_ptr<BthreadArrowExecutor> _arrow_io_executor;
 };
 
 class RocksdbVectorizedReader : public arrow::RecordBatchReader {

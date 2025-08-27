@@ -15,6 +15,9 @@
 #pragma once
 #include <cstdint>
 #include <cctype>
+#include <gflags/gflags.h>
+#include "arrow/vendored/fast_float/fast_float.h"
+#include "arrow/vendored/double-conversion/double-to-string.h"
 #ifdef BAIDU_INTERNAL
 #include <base/arena.h>
 #else
@@ -31,7 +34,10 @@ namespace butil = base;
 namespace brpc = baidu::rpc;
 namespace braft = raft;
 #endif
-
+namespace baikaldb {
+DECLARE_bool(use_double_conversion);
+DECLARE_bool(double_use_all_precision);
+}
 namespace parser {
 struct String {
     char* value;
@@ -272,6 +278,57 @@ inline char hex_to_char(const char* str, size_t len) {
         }
     }
     return out;
+}
+
+inline int double_to_string(double d, int float_precision_len, char* buf, size_t len) {
+    if (baikaldb::FLAGS_use_double_conversion) {
+        using ::arrow_vendored::double_conversion::DoubleToStringConverter;
+        using ::arrow_vendored::double_conversion::StringBuilder;
+        static thread_local DoubleToStringConverter converter(
+                DoubleToStringConverter::NO_TRAILING_ZERO,
+                "inf", "nan", 'e', -6, 16, 11, 0);
+        StringBuilder builder(buf, len);
+        if (float_precision_len == -1) {
+            if (baikaldb::FLAGS_double_use_all_precision) {
+                converter.ToShortest(d, &builder); //全精度输出，兼容mysql的double输出
+            } else {
+                converter.ToPrecision(d, 12, &builder); //兼容%.12g
+            }
+        } else {
+            converter.ToFixed(d, float_precision_len, &builder);
+        }
+        return builder.position();
+    } else {
+        if (float_precision_len == -1) {
+            return snprintf(buf, len, "%.12g", d);
+        } else {
+            return snprintf(buf, len, "%.*f", float_precision_len, d);
+        }
+    }
+    return 0;
+}
+inline int float_to_string(float d, int float_precision_len, char* buf, size_t len) {
+    if (baikaldb::FLAGS_use_double_conversion) {
+        using ::arrow_vendored::double_conversion::DoubleToStringConverter;
+        using ::arrow_vendored::double_conversion::StringBuilder;
+        static thread_local DoubleToStringConverter converter(
+                DoubleToStringConverter::NO_TRAILING_ZERO,
+                "inf", "nan", 'e', -6, 16, 5, 0);
+        StringBuilder builder(buf, len);
+        if (float_precision_len == -1) {
+            converter.ToPrecision(d, 6, &builder); //兼容mysql float的6位有效数字
+        } else {
+            converter.ToFixed(d, float_precision_len, &builder);
+        }
+        return builder.position();
+    } else {
+        if (float_precision_len == -1) {
+            return snprintf(buf, len, "%.6g", d);
+        } else {
+            return snprintf(buf, len, "%.*f", float_precision_len, d);
+        }
+    }
+    return 0;
 }
 
 }

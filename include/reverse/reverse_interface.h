@@ -20,7 +20,6 @@
 #include "schema_factory.h"
 #include "reverse_arrow.h"
 #include "reverse_common.h"
-#include "reverse_index.h"
 #include <map>
 
 namespace baikaldb {
@@ -30,12 +29,10 @@ namespace baikaldb {
 template<typename Schema>
 class CommRindexNodeParser : public RindexNodeParser<Schema> {
 public:
-    typedef typename Schema::ReverseNode ReverseNode;
-    typedef typename Schema::PrimaryIdT PrimaryIdT;
     typedef typename Schema::ReverseList ReverseList;
 
     using ReverseListSptr = typename Schema::ReverseListSptr;
-    CommRindexNodeParser(Schema* schema) : 
+    CommRindexNodeParser(Schema* schema) :
                             RindexNodeParser<Schema>(schema) {
         _key_range = schema->key_range();
     }
@@ -50,9 +47,9 @@ public:
     const ReverseNode* advance(const PrimaryIdT& target_id);
 private:
     //二分查找，大于或等于
-    uint32_t binary_search(uint32_t first, 
-                           uint32_t last, 
-                           const PrimaryIdT& target_id, 
+    uint32_t binary_search(uint32_t first,
+                           uint32_t last,
+                           const PrimaryIdT& target_id,
                            ReverseList* list);
     ReverseListSptr _new_list_ptr;
     ReverseListSptr _old_list_ptr;
@@ -69,47 +66,31 @@ private:
     KeyRange _key_range;
 };
 
+int segment(
+        const std::string& word,
+        const std::string& pk,
+        SmartRecord record,
+        pb::SegmentType segment_type,
+        const std::map<std::string, int32_t>& name_field_id_map,
+        pb::ReverseNodeType flag,
+        std::map<std::string, ReverseNode>& res,
+        const pb::Charset& charset);
+
+int merge_and(ReverseNode& to, const ReverseNode& from, BoolArg* arg);
+int merge_or(ReverseNode& to, const ReverseNode& from, BoolArg* arg);
+int merge_weight(ReverseNode& to, const ReverseNode& from, BoolArg* arg);
+
+//--common interface
 //--common
-template<typename Node, typename List>
-class NewSchema : public SchemaBase<Node, List> {
+template<typename List>
+class NewSchema : public SchemaBase<List> {
 public:
-    using ReverseNode = Node;
     using ReverseList = List;
     using ReverseListSptr = std::shared_ptr<ReverseList>;
-    using ThisType = NewSchema<ReverseNode, ReverseList>;
+    using ThisType = NewSchema<ReverseList>;
     using Parser = CommRindexNodeParser<ThisType> ;
     using IndexSearchType = ReverseIndex<ThisType>;
 
-    static int segment(
-                    const std::string& word,
-                    const std::string& pk,
-                    SmartRecord record,
-                    pb::SegmentType segment_type,
-                    const std::map<std::string, int32_t>& name_field_id_map,
-                    pb::ReverseNodeType flag, 
-                    std::map<std::string, ReverseNode>& res,
-                    const pb::Charset& charset);
-    
-    static int merge_and(
-                    ReverseNode& to, 
-                    const ReverseNode& from, 
-                    BoolArg* arg) {
-        to.set_weight(to.weight() + from.weight());
-        return 0; 
-    }
-    static int merge_or(
-                    ReverseNode& to, 
-                    const ReverseNode& from, 
-                    BoolArg* arg) {
-        to.set_weight(to.weight() + from.weight());
-        return 0;
-    }
-    static int merge_weight(
-                    ReverseNode& to, 
-                    const ReverseNode& from, 
-                    BoolArg* arg) {
-        return 0;
-    }
     //search_data 字符串格式
     //"hello world"
     int create_executor(
@@ -130,8 +111,8 @@ public:
     }
 
     int get_reverse_list(
-                    const std::string& term, 
-                    ReverseListSptr& list_new, 
+                    const std::string& term,
+                    ReverseListSptr& list_new,
                     ReverseListSptr& list_old) {
         return _index_ptr->get_reverse_list_two(_txn, term, list_new, list_old, _is_fast);
     }
@@ -145,19 +126,19 @@ private:
     std::string _query_words;
     FieldInfo* _query_words_field = nullptr;
     std::map<std::string, Parser*> _temp_map;
-    using SchemaBase<Node, List>::_table_info;
-    using SchemaBase<Node, List>::_exe;
-    using SchemaBase<Node, List>::_statistic;
-    using SchemaBase<Node, List>::_cur_node;
-    using SchemaBase<Node, List>::_index_info;
-    using SchemaBase<Node, List>::_txn;
-    using SchemaBase<Node, List>::_is_fast;
+    using SchemaBase<List>::_table_info;
+    using SchemaBase<List>::_exe;
+    using SchemaBase<List>::_statistic;
+    using SchemaBase<List>::_cur_node;
+    using SchemaBase<List>::_index_info;
+    using SchemaBase<List>::_txn;
+    using SchemaBase<List>::_is_fast;
 
     IndexSearchType* _index_ptr;
 };
 
-using CommonSchema = NewSchema<pb::CommonReverseNode, pb::CommonReverseList>;
-using ArrowSchema = NewSchema<ArrowReverseNode, ArrowReverseList>;
+using CommonSchema = NewSchema<pb::CommonReverseList>;
+using ArrowSchema = NewSchema<ArrowReverseList>;
 
 }//end of namespace
 

@@ -2,6 +2,7 @@ syntax="proto2";
 import "common.proto";
 import "optype.proto";
 import "expr.proto";
+import "meta.interface.proto";
 package baikaldb.pb;
 //option cc_enable_arenas = true;
 
@@ -46,7 +47,18 @@ enum PlanNodeType {
     APPLY_NODE = 37;
     LOAD_NODE = 38;
     BASE_SUBSCRIBE_MANAGER_NODE = 39;
+    EXCHANGE_SENDER_NODE = 40;
+    EXCHANGE_RECEIVER_NODE = 41;
+    WINDOW_NODE = 42;
 };
+
+message SelectManagerNode { 
+    optional bytes schema                               = 1;  
+    repeated Expr  slot_order_exprs                     = 2;
+    repeated bool  is_asc                               = 3;
+    repeated bool  is_null_first                        = 4;
+    optional bool  is_return_empty                      = 5;
+}
 
 enum TxnCmdType {
     TXN_INVALID = 0;        // invalid transaction cmd
@@ -92,6 +104,7 @@ message PossibleIndex {
         repeated int32 partition_ids = 15; // 该Range属于哪个partition，外挂分区场景可能属于多个partition
         optional int32 topk = 16;
         optional uint64 separate_value = 17; // 向量索引使用
+        optional int32 efsearch = 18; // 向量索引使用
     };
 
     message SortIndex {
@@ -153,6 +166,7 @@ message ScanNode {
     optional ColumnDdlInfo column_ddl_info = 14;
     optional uint64 watt_stats_version = 15; // watt stats写入version幂等, 用于ROLLUP基准
     optional int32 union_tuple_id = 16; // union子查询对应的union_tuple_id
+    optional bool use_column_storage = 17; // 是否使用列存，读取时使用
 };
 
 message LimitNode {
@@ -174,11 +188,23 @@ message AggNode {
     repeated Expr agg_funcs = 2;
     optional int32 agg_tuple_id = 3;
     optional int32 arrow_ignore_tuple_id = 4;
+    optional bool is_pushdown = 5; // 是否为被下推的agg节点
 };
 
 message FilterNode {
     repeated Expr conjuncts = 1; //and分开的条件
     repeated Expr conjuncts_learner = 2; //and分开的条件，learner集群可能和主集群使用索引不同
+};
+
+message DualScanNode { // 需要实现dualScanNode的create_tree
+    optional Plan              sub_query_node                       = 1;
+    repeated Expr              derived_table_projections            = 2;
+    optional RuntimeState      runtime_state                        = 3;
+    repeated SlotColumn        slot_column                          = 4;
+    repeated bool              derived_table_projections_agg_or_window_vec = 5;
+    repeated int32             agg_tuple_id_pair                    = 6;
+    repeated int32             agg_slot_ids                         = 7;
+    repeated int32             multi_distinct_agg_slot_ids          = 8;
 };
 
 enum JoinType {
@@ -199,6 +225,7 @@ message JoinNode {
     repeated int64          left_table_ids  = 5;
     repeated int32          right_tuple_ids = 6;
     repeated int64          right_table_ids = 7;
+    optional bool           use_index_join  = 8;
 };
 
 enum CompareType {
@@ -314,7 +341,10 @@ message KillNode {
 };
 
 message UnionNode {
-    optional int32 union_tuple_id = 1;
+    optional int32 union_tuple_id               = 1;
+    repeated Expr  slot_order_exprs             = 2;
+    repeated bool  is_asc                       = 3;
+    repeated bool  is_null_first                = 4;
 };
 
 message LoadNode {
@@ -334,6 +364,95 @@ message LoadNode {
     optional bool                 opt_enclosed = 15;
     optional int64                file_size = 16;
     optional Charset              char_set = 17;
+};
+
+enum PartitionPropertyType {
+    AnyType 	           = 1;
+    SinglePartitionType    = 2;
+    HashPartitionType      = 3;
+    BroadcastPartitionType = 4;
+    RandomPartitionType    = 5; // TODO
+};
+
+message PartitionProperty {
+    required PartitionPropertyType type  = 1;
+    repeated bytes hash_cols             = 2;
+    repeated bytes need_cast_string_cols = 3;
+    repeated bytes need_project_hash_cols= 4;
+    repeated Expr need_project_hash_exprs= 5; // 需要先project的hash expr
+};
+
+message ExchangeDestination {
+    required uint64 fragment_instance_id = 1; // fragment_id 32bit + instance_id 32bit = 64bit
+    required int32 node_id               = 2;
+    optional bytes address               = 3; 
+};
+
+message ExchangeSenderNode {
+    required uint64 log_id                             = 1;
+    required int32 fragment_id                         = 2;  
+    required int32 receiver_fragment_id                = 3;  
+    required uint64 fragment_instance_id               = 4; // 该节点所在fragment instance
+    required int32 node_id                             = 5; // 该节点的id
+    repeated ExchangeDestination receiver_destinations = 6; 
+    repeated ExchangeDestination fragment_addresses    = 7; 
+    optional PartitionProperty partition_property      = 8; // exchange属性
+    optional bytes schema                              = 9; 
+};
+
+message ExchangeReceiverNode { 
+    required uint64 log_id                           = 1;
+    required int32 fragment_id                       = 2; 
+    required int32 sender_fragment_id                = 3; 
+    required uint64 fragment_instance_id             = 4; // 该节点所在fragment instance
+    required int32 node_id                           = 5; // 该节点的id
+    repeated ExchangeDestination sender_destinations = 6; // 下游ES db端点, 需要等到所有db端点都发送EOF才能停止Receive
+    repeated RegionInfo regions                      = 7; // 下游ES store region信息，需要等到所有region都发送EOF才能停止Receive
+    optional PartitionProperty partition_property    = 8; // exchange属性
+    required bytes schema                            = 9; // 接收端schema
+    repeated Expr  slot_order_exprs                  = 10;
+    repeated bool  is_asc                            = 11;
+    repeated bool  is_null_first                     = 12;
+};
+
+enum FrameType {
+    FT_ROWS = 0;
+    FT_RANGE = 1;
+};
+
+enum BoundType {
+    BT_PRECEDING = 0;
+    BT_FOLLOWING = 1;
+    BT_CURRENT_ROW = 2;
+};
+
+message FrameBound {
+    optional BoundType bound_type = 1;
+    optional bool is_unbounded = 2;
+    optional Expr expr = 3;
+};
+
+message FrameExtent {
+    optional FrameBound frame_start = 1;
+    optional FrameBound frame_end = 2;
+};
+
+message WindowFrame {
+    optional FrameType frame_type = 1;
+    optional FrameExtent frame_extent = 2;
+};
+
+message WindowSpec {
+    repeated Expr partition_exprs = 1;
+    repeated Expr order_exprs = 2;
+    repeated bool is_asc = 3;
+    optional int32 tuple_id = 4; // 存放构造SortNode的tuple_id
+    optional WindowFrame window_frame = 5;
+};
+
+message WindowNode {
+    repeated Expr func_exprs = 1;
+    optional WindowSpec window_spec = 2;
 };
 
 message DerivePlanNode {
@@ -357,6 +476,11 @@ message DerivePlanNode {
     optional ApplyNode apply_node = 18;
     optional LoadNode  load_node = 19;
     optional FilterNode raw_filter_node = 20;
+    optional ExchangeSenderNode exchange_sender_node = 21;   
+    optional ExchangeReceiverNode exchange_receiver_node = 22;
+    optional SelectManagerNode select_manager_node = 23;
+    optional DualScanNode dual_scan_node = 24;
+    optional WindowNode window_node = 25;
 };
 
 message PlanNode {
@@ -389,6 +513,7 @@ message LocalTraceNode {
     optional int64             where_filter_rows = 9;
     optional string            index_name        = 10;
     repeated string            arrow_plan        = 11;
+    optional string            mpp_property      = 12;
 };
 
 message TraceNode {
@@ -407,4 +532,10 @@ message TraceNode {
     optional LocalTraceNode    store_agg         = 13;
     repeated TraceNode         child_nodes       = 14;
     optional int64             partition_id      = 15;
+};
+
+message FragmentInfo {
+    required int32              fragment_id         = 1;
+    required Plan               plan                = 2;
+    optional RuntimeState       runtime_state        = 3;
 };

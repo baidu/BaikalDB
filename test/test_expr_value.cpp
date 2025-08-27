@@ -27,6 +27,8 @@
 #include "parser.h"
 #include "proto/meta.interface.pb.h"
 #include "joiner.h"
+#include "arrow/vendored/fast_float/fast_float.h"
+#include "arrow/vendored/double-conversion/double-to-string.h"
 
 int main(int argc, char* argv[])
 {
@@ -38,6 +40,14 @@ namespace baikaldb {
 TEST(test_proto, case_all) {
     std::vector<int> vv {11,22,33,44};
     std::cout << "v:" << vv[-1] << vv[10000] << std::endl;
+    float flt = 1.2;
+    double db = flt;
+    char buf[100] = {0};
+    snprintf(buf, sizeof(buf), "%.12g", db);
+    std::cout << flt << ":" << buf << "\n";
+    double db2 = 1345678891284324321345.1233523;
+    snprintf(buf, sizeof(buf), "%.3f", db2);
+    std::cout << flt << ":" << buf << "\n";
     /*
     std::ofstream fp;
     fp.open("sign", std::ofstream::out);
@@ -238,7 +248,66 @@ TEST(test_proto, case_all) {
     }
 }
 
+TEST(float_parse_cost, case_all) {
+    using ::arrow_vendored::fast_float::from_chars;
+    srand(static_cast <unsigned> (time(0)));
+    std::vector<std::string> float_vec_string;
+    std::vector<double> float_vec;
+    float_vec.reserve(10000);
+    for (int i = 0; i < 10000; i++) {
+        char tmp_buf[24] = {0};
+        snprintf(tmp_buf, sizeof(tmp_buf), "%.12g", (rand() / (RAND_MAX + 1.0)));
+        float_vec_string.push_back(tmp_buf);
+        if (i % 243 == 0) {
+            std::cout << float_vec_string.back() << std::endl;
+        }
+    }
+    TimeCost cost;
+    double result = 0.0;
+    double result2 = 0.0;
+    for (const auto& s : float_vec_string) {
+        auto res = from_chars(s.data(), s.data() + s.size(), result2);
+        result = result > result2 ? result : result2;
+    }
+    int64_t old_cost =  cost.get_time();
+    cost.reset();
+    float_vec.clear();
+    for (const auto& s : float_vec_string) {
+        result2 = strtod(s.c_str(), NULL);
+        result = result > result2 ? result : result2;
+    }
+    int64_t new_cost =  cost.get_time();
+    std::cout << "float_parse_cost ===  fast_float_cost:" << old_cost << " strtod_cost: " << new_cost << std::endl;
+    float_vec_string.emplace_back("+12.12134e32");
+    float_vec_string.emplace_back("-12.12134e32");
+    float_vec_string.emplace_back("-12.12134e-32abc");
+    float_vec_string.emplace_back("-12.12134E-32abc");
+    float_vec_string.emplace_back("-12.12134E+32abc");
+    float_vec_string.emplace_back("-abc");
+    float_vec_string.emplace_back("-.124wq12412");
+    float_vec_string.emplace_back("1.2345xxa>??");
+    float_vec_string.emplace_back("\t 1.2345");
+    float_vec_string.emplace_back("1.2345e991");
+    float_vec_string.emplace_back("1.2345e-991");
+    float_vec_string.emplace_back("1.7976931348623157e+308");
+    float_vec_string.emplace_back("1.79769313486232e+308");
+    for (const auto& s : float_vec_string) {
+        result = 0.0;
+        auto res = from_chars(s.data(), s.data() + s.size(), result);
+        if (res.ec != std::errc()) { 
+            std::cerr << "parsing failure" << s << "\n"; 
+        }
+        result2 = strtod(s.c_str(), NULL);
+        EXPECT_EQ(result, result2);
+        //std::cout << result << ":" << result2 << " raw:" << s << "\n";
+    }
+}
+
 TEST(float_fmt_cost, case_all) {
+    using ::arrow_vendored::double_conversion::DoubleToStringConverter;
+    using ::arrow_vendored::double_conversion::StringBuilder;
+    FLAGS_use_double_conversion = true;
+    FLAGS_double_use_all_precision = true;
     srand(static_cast <unsigned> (time(0)));
     std::vector<double> float_vec;
     for (int i = 0; i < 10000; i++) {
@@ -246,7 +315,7 @@ TEST(float_fmt_cost, case_all) {
     }
     TimeCost cost;
     for (int i = 0; i < 10000; i++) {
-        char tmp_buf[100] = {0};
+        char tmp_buf[50] = {0};
         snprintf(tmp_buf, sizeof(tmp_buf), "%.12g", float_vec[i]);
     }
     int64_t old_cost =  cost.get_time();
@@ -257,7 +326,131 @@ TEST(float_fmt_cost, case_all) {
         std::string double_string = ss.str();
     }
     int64_t new_cost =  cost.get_time();
-    std::cout << "old_cost:" << old_cost << " new_cost: " << new_cost << std::endl;
+    cost.reset();
+    for (auto& dbl : float_vec) {
+        char buf[50] = {0};
+        int len = parser::double_to_string(dbl, -1, buf, sizeof(buf));
+    }
+    int64_t gg_cost =  cost.get_time();
+    std::cout << "print_cost:" << old_cost << " ss_cost: " << new_cost << " gg_cost:" << gg_cost << std::endl;
+    for (auto& dbl : float_vec) {
+        char buf[100] = {0};
+        int len = parser::double_to_string(dbl, -1, buf, sizeof(buf));
+        EXPECT_EQ(dbl, strtod(buf, NULL));
+        EXPECT_EQ(len, strlen(buf));
+    }
+    std::vector<std::pair<double, std::string>> dbl_map = {
+        {777777744225350500000000000.0, "7.777777442253505e26"},
+        {0.123456789123456789, "0.12345678912345678"},
+        {1.7976931348623157e+308, "1.7976931348623157e308"},
+        {-1.7976931348623157e+308, "-1.7976931348623157e308"},
+        {-1.797693134862315789e+308, "-1.7976931348623157e308"},
+        {4.940656458412465442e-324, "5e-324"},
+        {0.1 * 10, "1"},
+        {0.001 * 10, "0.01"},
+        {0.003 * 100, "0.3"},
+        //{1.003 * 100, "100.3"},
+        //{1.003 * 1000, "1003"},
+    };
+    for (auto& [dbl, str] : dbl_map) {
+        char buf[100] = {0};
+        int len = parser::double_to_string(dbl, -1, buf, sizeof(buf));
+        std::cout << str << ":" << buf << ">" << len << "\n";
+        EXPECT_STREQ(str.c_str(), buf);
+        EXPECT_EQ(str.size(), len);
+    }
+    EXPECT_EQ(0.003 * 100, 0.3);
+    //EXPECT_EQ(1.003 * 100, 100.3) << "error 100.3"; // 精度损失，下面的case才对
+    EXPECT_EQ(1.003 * 100, 100.29999999999998) << "error 100.29999999999998";
+    EXPECT_EQ(1.003, 100.3 / 100) << "error 100.3 / 100"; 
+    EXPECT_EQ(1.003 * 10, 10.03) << "error 1.003 * 10 10.03"; 
+    FLAGS_double_use_all_precision = false;  //保留12位精度
+    dbl_map = {
+        {0.01, "0.01"},
+        {0.00001, "0.00001"},
+        {0.0000001, "0.0000001"},
+        {10000000.0, "10000000"},
+        {777777744225350500000000000.0, "7.77777744225e26"},
+        {0.123456789123456789, "0.123456789123"},
+        {1.7976931348623157e+308, "1.79769313486e308"},
+        {-1.7976931348623157e+308, "-1.79769313486e308"},
+        {-1.797693134862315789e+308, "-1.79769313486e308"},
+        {4.940656458412465442e-324, "4.94065645841e-324"},
+        {0.1 * 10, "1"},
+        {0.001 * 10, "0.01"},
+        {0.003 * 100, "0.3"},
+        {1.003 * 100, "100.3"},
+        {1.003 * 1000, "1003"},
+        {0.1 * 10, "1"},
+        {0.001 * 10, "0.01"},
+        {1.003 * 100, "100.3"},
+        {1.003 * 1000, "1003"},
+    };
+    for (auto& [dbl, str] : dbl_map) {
+        char buf[100] = {0};
+        int len = parser::double_to_string(dbl, -1, buf, sizeof(buf));
+        std::cout << std::setprecision(12) << dbl << ":" << str << ":" << buf << "\n";
+        EXPECT_STREQ(str.c_str(), buf);
+        EXPECT_EQ(str.size(), len);
+        // 测试固定小数位情况
+        FLAGS_use_double_conversion = false;
+        parser::float_to_string(dbl, 7, buf, sizeof(buf));
+        FLAGS_use_double_conversion = true;
+        char buf2[100] = {0};
+        parser::float_to_string(dbl, 7, buf2, sizeof(buf2));
+        std::cout << buf << ":" << buf2 << "\n";
+        EXPECT_STREQ(buf, buf2);
+    }
+    std::vector<std::pair<float, std::string>> flt_map = {
+        {0.01, "0.01"},
+        {0.001, "0.001"},
+        {0.0001, "0.0001"},
+        {0.00001, "0.00001"},
+        {0.000001, "1e-6"},
+        {0.0000001, "1e-7"},
+        {0.123451334, "0.123451"},
+        {0.00000123451334, "1.23451e-6"},
+        {10.0, "10"},
+        {100.0, "100"},
+        {1000.0, "1000"},
+        {10000.0, "10000"},
+        {100000.0, "100000"},
+        {1000000.0, "1e6"},
+        {10000000.0, "1e7"},
+        {3.402823466E+38, "3.40282e38"},
+        {9.78954123, "9.78954"},
+        {987654321.0, "9.87654e8"},
+        {4.84064234e-15, "4.84064e-15"},
+        {0.1 * 10, "1"},
+        {0.001 * 10, "0.01"},
+        {1.003 * 100, "100.3"},
+        {1.003 * 1000, "1003"},
+    };
+    for (auto&  [dbl, str] : flt_map) {
+        char buf[100] = {0};
+        int len = parser::float_to_string(dbl, -1, buf, sizeof(buf));
+        std::cout << std::setprecision(6) << dbl << ":" << buf << ">" << len << "\n";
+        EXPECT_STREQ(str.c_str(), buf);
+        EXPECT_EQ(str.size(), len);
+        // 测试固定小数位情况
+        FLAGS_use_double_conversion = false;
+        parser::float_to_string(dbl, 3, buf, sizeof(buf));
+        FLAGS_use_double_conversion = true;
+        char buf2[100] = {0};
+        parser::float_to_string(dbl, 3, buf2, sizeof(buf2));
+        std::cout << buf << ":" << buf2 << "\n";
+        EXPECT_STREQ(buf, buf2);
+    }
+    //FLAGS_use_double_conversion = false;
+    //for (auto&  [dbl, str] : flt_map) {
+    //    char buf[100] = {0};
+    //    int len = parser::float_to_string(dbl, -1, buf, sizeof(buf));
+    //    std::cout << std::setprecision(6) << dbl << ":" << buf << ">" << len << "\n";
+    //    EXPECT_STREQ(str.c_str(), buf);
+    //    EXPECT_EQ(str.size(), len);
+    //}
+    //FLAGS_use_double_conversion = true;
+    
 }
 
 TEST(test_compare, case_all) {
