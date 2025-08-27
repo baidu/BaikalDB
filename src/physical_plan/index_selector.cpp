@@ -1237,7 +1237,7 @@ int64_t IndexSelector::index_merge_selector(const std::vector<pb::TupleDescripto
         conjuncts.insert(conjuncts.end(), sub_conjuncts.begin(), sub_conjuncts.end());
         filter_node->modify_conjuncts(conjuncts); // filter_node's conjuncts are modified
         IndexSelectorOptions options;
-        index_selector(tuple_descs, scan_node, filter_node, sort_node, join_node, packet_node, agg_node, having_filter_node,
+        index_selector(tuple_descs, scan_node, filter_node, sort_node, join_node, packet_node, agg_node, having_filter_node, nullptr,
                        index_has_null, field_range_type, sample_sql, options); // filter_node's pruned_conjuncts are modified
         auto path = scan_node->select_path();
         if (scan_node->select_path()->prefix_ratio_index_score <= select_index_score &&
