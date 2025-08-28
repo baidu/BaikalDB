@@ -997,6 +997,7 @@ int IndexSelector::select_partition(SmartTable& table_info, ScanNode* scan_node,
             user_info = client_conn->user_info;
         }
 
+        scan_node->set_partition_field_id(table_info->partition_ptr->partition_field_id());
         auto partition_type = table_info->partition_ptr->partition_type();
         auto field_iter = field_range_map.find(table_info->partition_ptr->partition_field_id());
 
