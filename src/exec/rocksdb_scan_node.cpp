@@ -1333,7 +1333,13 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
         if (batch->chunk_exceed_max_size()) {
             return 0;
         }
-
+        if (!batch->use_memrow() 
+                && _sort_use_index_by_range && _sort_limit_by_range != -1  
+                && _index_iter != nullptr && !_index_iter->valid()
+                && batch->size() > 0) {
+            // 不同range的数据必须拆开来
+            return 0;
+        }
         if (_table_iter == nullptr || !_table_iter->valid() || range_reach_limit()) {
             if (_scan_range_keys.is_traverse_over()) {
                 *eos = true;
@@ -1664,6 +1670,13 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
                 continue;
             }
         } else {
+            if (use_chunk 
+                    && _sort_use_index_by_range && _sort_limit_by_range != -1  
+                    && _index_iter != nullptr && !_index_iter->valid()
+                    && batch->size() > 0) {
+                // 不同range的数据必须拆开
+                return 0;
+            }
             if (_index_iter == nullptr || !_index_iter->valid() || range_reach_limit()) {
                 if (_scan_range_keys.is_traverse_over()) {
                     multiget_last_records = true;
