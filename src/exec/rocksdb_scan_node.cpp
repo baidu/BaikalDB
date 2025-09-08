@@ -205,7 +205,7 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
         check_memory = true;
     }
     bool has_global_param = false;
-    if (pos_index.has_is_eq() && pos_index.has_left_field_cnt()) {
+    if (pos_index.has_left_field_cnt() || pos_index.has_right_field_cnt()) {
         has_global_param = true;
         _is_eq = pos_index.is_eq();
         _like_prefix = pos_index.like_prefix();
