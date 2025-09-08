@@ -211,6 +211,7 @@ std::unique_ptr<ScanNode> DDLWorkPlanner::create_scan_node() {
     _pos_index.Clear();
     _pos_index.set_index_id(_table_id);
     auto range_index = _pos_index.add_ranges();
+    _pos_index.set_is_eq(false);
     _pos_index.set_left_field_cnt(_field_num);
     _pos_index.set_left_open(true);
     if (_start_key != "") {
