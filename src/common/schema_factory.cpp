@@ -3034,8 +3034,8 @@ int SchemaFactory::get_region_by_key(int64_t main_table_id,
     if (primary->has_sort_index()) {
         template_primary.mutable_sort_index()->CopyFrom(primary->sort_index());
     }
-    if (primary->has_is_eq()) {
-        template_primary.mutable_index_conjuncts()->CopyFrom(primary->index_conjuncts());
+    template_primary.mutable_index_conjuncts()->CopyFrom(primary->index_conjuncts());
+    if (primary->has_left_field_cnt() || primary->has_right_field_cnt()) {
         template_primary.set_is_eq(primary->is_eq());
         template_primary.set_left_field_cnt(primary->left_field_cnt());
         template_primary.set_right_field_cnt(primary->right_field_cnt());
