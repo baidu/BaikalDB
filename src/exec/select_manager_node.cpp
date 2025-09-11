@@ -737,14 +737,12 @@ int SelectManagerNode::construct_primary_possible_index(
                 DB_FATAL("Fail to encode_key left, table:%ld", pri_info->id);
                 return -1;
             }
+            pos_index.set_is_eq(true);
             range->set_left_key(key.data());
             range->set_left_full(key.get_full());
-            range->set_right_key(key.data());
-            range->set_right_full(key.get_full());
-            range->set_left_field_cnt(pri_info->fields.size());
-            range->set_right_field_cnt(pri_info->fields.size());
-            range->set_left_open(false);
-            range->set_right_open(false);
+            pos_index.set_left_field_cnt(pri_info->fields.size());
+            pos_index.set_left_open(false);
+            
             range->add_partition_ids(mem_row->get_partition_id());
             limit_cnt --;
             if(!limit_cnt) {
@@ -869,14 +867,11 @@ int SelectManagerNode::construct_primary_possible_index_vectorize(
             DB_FATAL("Fail to encode_key left, table:%ld", pri_info->id);
             return -1;
         }
+        pos_index.set_is_eq(true);
         range->set_left_key(key.data());
         range->set_left_full(key.get_full());
-        range->set_right_key(key.data());
-        range->set_right_full(key.get_full());
-        range->set_left_field_cnt(pri_info->fields.size());
-        range->set_right_field_cnt(pri_info->fields.size());
-        range->set_left_open(false);
-        range->set_right_open(false);
+        pos_index.set_left_field_cnt(pri_info->fields.size());
+        pos_index.set_left_open(false);
         // [ARROW todo] 全局索引反查partition分发
         // range->set_partition_id(mem_row->get_partition_id());
     }

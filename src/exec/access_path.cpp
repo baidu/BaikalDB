@@ -508,7 +508,7 @@ void AccessPath::calc_index_range(
     pos_index.set_left_open(_left_open);
     pos_index.set_right_open(_right_open);
     if (_left_field_cnt == 0 && _right_field_cnt == 0) {
-        pos_index.clear_is_eq();//无命中条件非eq
+        pos_index.set_is_eq(false);//无命中条件非eq
         pos_index.add_ranges();
     } else if (in_records.size() > 0) {
         is_possible = true;

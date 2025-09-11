@@ -3035,21 +3035,23 @@ int SchemaFactory::get_region_by_key(int64_t main_table_id,
         template_primary.mutable_sort_index()->CopyFrom(primary->sort_index());
     }
     template_primary.mutable_index_conjuncts()->CopyFrom(primary->index_conjuncts());
-    template_primary.set_is_eq(primary->is_eq());
-    template_primary.set_left_field_cnt(primary->left_field_cnt());
-    template_primary.set_right_field_cnt(primary->right_field_cnt());
-    template_primary.set_left_open(primary->left_open());
-    template_primary.set_right_open(primary->right_open());
-    template_primary.set_like_prefix(primary->like_prefix());
+    if (primary->has_left_field_cnt() || primary->has_right_field_cnt()) {
+        template_primary.set_is_eq(primary->is_eq());
+        template_primary.set_left_field_cnt(primary->left_field_cnt());
+        template_primary.set_right_field_cnt(primary->right_field_cnt());
+        template_primary.set_left_open(primary->left_open());
+        template_primary.set_right_open(primary->right_open());
+        template_primary.set_like_prefix(primary->like_prefix());
+    }
 
     std::map<int64_t, std::vector<int>> region_idx_map;
     auto record_template = TableRecord::new_record(main_table_id);
     int range_size = primary->ranges_size();
     for (int i = 0; i < range_size; ++i) {
         const auto& range = primary->ranges(i);
-        bool like_prefix = template_primary.has_like_prefix();
-        bool left_open = template_primary.has_left_open();
-        bool right_open = template_primary.has_right_open();
+        bool like_prefix = template_primary.has_like_prefix() ? template_primary.like_prefix() : range.like_prefix();
+        bool left_open = template_primary.has_left_open() ? template_primary.left_open() : range.left_open();
+        bool right_open = template_primary.has_right_open() ? template_primary.right_open() : range.right_open();
         MutTableKey  start;
         MutTableKey  end;
         if (!range.left_key().empty()) {
