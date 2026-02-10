@@ -27,6 +27,48 @@ public:
         return &_instance;
     }
 
+    int construct_mpp_dag_request(QueryContext* ctx, 
+                                  const std::set<int32_t>& fragment_ids, 
+                                  pb::DAGFragmentRequest& request) {
+        if (ctx == nullptr) {
+            DB_WARNING("ctx is nullptr");
+            return -1;
+        }
+        SmartState state = ctx->get_runtime_state();
+        if (state == nullptr) {
+            DB_WARNING("state is nullptr");
+            return -1;
+        }
+        request.set_op(pb::OP_FRAGMENT_START);
+        request.set_log_id(state->log_id());
+        request.set_sql_sign(state->sign);
+        for (const auto& fragment_id : fragment_ids) {
+            SmartFragment fragment_info;
+            if (ctx->fragments.find(fragment_id) != ctx->fragments.end()) {
+                fragment_info = ctx->fragments[fragment_id];
+            }
+            if (fragment_info == nullptr) {
+                DB_WARNING("fragment_info is nullpt, fragment_id: %d", fragment_id);
+                return -1;
+            }
+            pb::Plan fragment_plan;
+            pb::FragmentInfo* fragment_info_pb = request.add_fragments();
+            fragment_info_pb->set_fragment_id(fragment_id);
+            pb::RuntimeState* pb_rs = fragment_info_pb->mutable_runtime_state();
+            if (fragment_info->runtime_state == nullptr) {
+                DB_WARNING("fragment_info->runtime_state is nullptr");
+                return -1;
+            }
+            fragment_info->runtime_state->to_proto(pb_rs);
+            ExecNode::create_pb_plan(0, &fragment_plan, fragment_info->root);
+            fragment_info_pb->mutable_plan()->CopyFrom(fragment_plan);
+        }
+        if (ctx->user_info != nullptr) {
+            request.set_username(ctx->user_info->username);
+        }
+        return 0;
+    }
+
     int handle_mpp_dag_fragment(const pb::DAGFragmentRequest& request,
                             const std::string& db_address) {
         brpc::ChannelOptions channel_opt;

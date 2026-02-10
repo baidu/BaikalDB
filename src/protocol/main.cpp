@@ -53,7 +53,7 @@ void crash_handler(int sig) {
 int main(int argc, char **argv) {
     // Initail signal handlers.
     signal(SIGPIPE, SIG_IGN);
-    signal(SIGSEGV, (sighandler_t)baikaldb::crash_handler);
+    //signal(SIGSEGV, (sighandler_t)baikaldb::crash_handler);
     signal(SIGINT, (sighandler_t)baikaldb::handle_exit_signal);
     signal(SIGTERM, (sighandler_t)baikaldb::handle_exit_signal);
 #ifdef BAIKALDB_REVISION
@@ -175,6 +175,7 @@ int main(int argc, char **argv) {
     server->stop();
     baikaldb::MemoryGCHandler::get_instance()->close();
     baikaldb::MemTrackerPool::get_instance()->close();
+    baikaldb::GlobalArrowExecutor::shutdown();
 
     dummy_server.Stop(0);
     dummy_server.Join();

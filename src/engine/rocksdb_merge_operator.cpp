@@ -14,6 +14,7 @@
 #include "rocksdb_merge_operator.h"
 
 namespace baikaldb {
+DEFINE_bool(olap_enable_partial_merge, false, "Enable partial merge for OLAP, default: false");
 bool OLAPMergeOperator::FullMergeV2(const rocksdb::MergeOperator::MergeOperationInput& merge_in,
                    rocksdb::MergeOperator::MergeOperationOutput* merge_out) const {
     // 扫表或compaction时同一个线程大量处理同一个table的merge，可以thread local将table信息缓存 OLAPTODO
@@ -30,7 +31,7 @@ bool OLAPMergeOperator::FullMergeV2(const rocksdb::MergeOperator::MergeOperation
     static thread_local TimeCost table_cache_time; 
     static TimeCost print_log_time;
     static bool first_print_log = true; //确保启动时第一次能打印日志
-    if (table_info == nullptr || table_info->id != table_id || table_cache_time.get_time() > 60 * 1000 * 1000LL) {
+    if (table_info == nullptr || (table_info->id != table_id && table_info->rollup_indexs.count(table_id) <= 0) || table_cache_time.get_time() > 60 * 1000 * 1000LL) {
         auto info = factory->get_table_info_ptr(table_id);
         if (info == nullptr) {
             info = factory->get_table_info_ptr_by_index(table_id);
@@ -48,7 +49,12 @@ bool OLAPMergeOperator::FullMergeV2(const rocksdb::MergeOperator::MergeOperation
     }
     bool is_rollup_key = false;
     if (table_info->id != table_id) {
-        is_rollup_key = true;
+        if (table_info->rollup_indexs.count(table_id) > 0) {
+            is_rollup_key = true;
+        } else {
+            DB_FATAL("table_id: %ld, region_id: %ld, get table failed", table_id, region_id);
+            return true;
+        }
     }
 
     int begin_idx = 0;
@@ -153,19 +159,103 @@ bool OLAPMergeOperator::FullMergeV2(const rocksdb::MergeOperator::MergeOperation
     return true;
 }
 
-// bool OLAPMergeOperator::PartialMerge(const rocksdb::Slice& key, const rocksdb::Slice& left_operand,
-//                     const rocksdb::Slice& right_operand, std::string* new_value,
-//                     rocksdb::Logger* /*logger*/) const {
-//     TableKey table_key(key);
-//     int64_t region_id = table_key.extract_i64(0);
-//     int64_t table_id = table_key.extract_i64(sizeof(int64_t));
-//     SmartRecord left_record = SchemaFactory::get_instance()->new_record(table_id);
-//     SmartRecord right_record = SchemaFactory::get_instance()->new_record(table_id);
-//     left_record->decode(left_operand.data(), left_operand.size());
-//     right_record->decode(right_operand.data(), right_operand.size());
-//     DB_WARNING("table_id: %ld, region_id: %ld, left_record: %s, right_operand: %s", table_id, region_id, 
-//         left_record->debug_string().c_str(), right_record->debug_string().c_str());
-//     return false;
-// }
+bool OLAPMergeOperator::PartialMerge(const rocksdb::Slice& key, const rocksdb::Slice& left_operand,
+                    const rocksdb::Slice& right_operand, std::string* new_value,
+                    rocksdb::Logger* /*logger*/) const {
+    if (!FLAGS_olap_enable_partial_merge) {
+        return false;
+    }
+
+    auto factory = SchemaFactory::get_instance();
+    TableKey table_key(key);
+    int64_t region_id = table_key.extract_i64(0);
+    int64_t table_id = table_key.extract_i64(sizeof(int64_t));
+
+    // table_info会在thread_local短暂cache，如果加列有概率会造成新列短暂无法识别
+    static thread_local SmartTable table_info = nullptr;
+    static thread_local TimeCost table_cache_time; 
+    if (table_info == nullptr || (table_info->id != table_id && table_info->rollup_indexs.count(table_id) <= 0) || table_cache_time.get_time() > 60 * 1000 * 1000LL) {
+        auto info = factory->get_table_info_ptr(table_id);
+        if (info == nullptr) {
+            info = factory->get_table_info_ptr_by_index(table_id);
+            if (info == nullptr) {
+                return false;
+            }
+        }
+
+        table_cache_time.reset();
+        table_info = info;
+    }
+
+    bool is_rollup_key = false;
+    if (table_info->id != table_id) {
+        if (table_info->rollup_indexs.count(table_id) > 0) {
+            is_rollup_key = true;
+        } else {
+            DB_FATAL("table_id: %ld, region_id: %ld, not found", table_id, region_id);
+            return false;
+        }
+    }
+
+    SmartRecord left_record  = factory->new_record(*table_info);
+    SmartRecord right_record = factory->new_record(*table_info);
+    left_record->decode(left_operand.data(), left_operand.size());
+    right_record->decode(right_operand.data(), right_operand.size());
+    DB_DEBUG("table_id: %ld, region_id: %ld, left_record: %s, right_operandright_record: %s", table_id, region_id, 
+        left_record->debug_string().c_str(), right_record->debug_string().c_str());
+    if (table_info->has_version && !is_rollup_key) {
+        auto left_version_desc = left_record->get_field_by_idx(table_info->version_field.pb_idx);
+        if (left_version_desc == nullptr) {
+            DB_FATAL("table_id: %ld, region_id: %ld, get left version desc failed", table_id, region_id);
+            return false;
+        }
+
+        ExprValue left_version = left_record->get_value(left_version_desc);
+        if (left_version.is_null()) {
+            DB_FATAL("table_id: %ld, region_id: %ld, left version is null", table_id, region_id);
+            return false;
+        }
+
+        auto right_version_desc = right_record->get_field_by_idx(table_info->version_field.pb_idx);
+        if (right_version_desc == nullptr) {
+            DB_FATAL("table_id: %ld, region_id: %ld, get right version desc failed", table_id, region_id);
+            return false;
+        }
+
+        ExprValue right_version = right_record->get_value(right_version_desc);
+        if (right_version.is_null()) {
+            DB_FATAL("table_id: %ld, region_id: %ld, right version is null", table_id, region_id);
+            return false;
+        }
+
+        if (left_version.get_numberic<uint64_t>() != 0 || right_version.get_numberic<uint64_t>() != 0) {
+            return false;
+        }
+    }
+
+    for (const FieldInfo& f : table_info->fields_need_sum) {
+        auto left_field = left_record->get_field_by_idx(f.pb_idx);
+        if (left_field == nullptr) {
+            return false;
+        }
+
+        ExprValue left_value = left_record->get_value(left_field);
+        if (left_value.is_null()) {
+            return false;
+        }
+
+        auto right_field = right_record->get_field_by_idx(f.pb_idx);
+        if (right_field == nullptr) {
+            return false;
+        }
+
+        right_record->add_value(right_field, left_value);
+    }
+
+    DB_DEBUG("table_id: %ld, region_id: %ld, left_record: %s, right_operand: %s", table_id, region_id, 
+        left_record->debug_string().c_str(), right_record->debug_string().c_str());
+    right_record->encode(*new_value);
+    return true;
+}
 
 }  // namespace baikaldb

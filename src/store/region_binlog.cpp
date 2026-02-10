@@ -43,6 +43,7 @@ DEFINE_int64(binlog_seek_batch, 10000, "10000");
 DEFINE_int64(binlog_use_seek_interval_min, 60, "1h");
 DEFINE_int64(offline_binlog_size_peer_sst, 1073741824LL, "defualt 1GB, -1 means no limit");
 DEFINE_bool(binlog_force_get, false, "false");
+DECLARE_bool(use_binlog_cache);
 DECLARE_int64(print_time_us);
 DECLARE_string(meta_server_bns);
 DECLARE_string(db_path);
@@ -403,9 +404,12 @@ std::string Region::binlog_get_str_val(const std::string& name, const std::map<s
     return iter->second.get_string();
 }
 
-void Region::binlog_get_scan_fields(std::map<int32_t, FieldInfo*>& field_ids, std::vector<int32_t>& field_slot, 
-        SmartTable& binlog_table, SmartIndex& binlog_pri) {
+void Region::binlog_get_scan_fields(std::map<int32_t, FieldInfo*>& field_ids, BinlogReadFields& binlog_fields, std::vector<int32_t>& field_slot, 
+        SmartTable& binlog_table, SmartIndex& binlog_pri, bool read_all) {
     field_slot.resize(binlog_table->fields.back().id + 1);
+    static const std::unordered_set<std::string> read_field = {
+        "binlog_type", "start_ts", "binlog_row_cnt"
+    };
 
     std::set<int32_t> pri_field_ids;
     for (auto& field_info : binlog_pri->fields) {
@@ -413,16 +417,27 @@ void Region::binlog_get_scan_fields(std::map<int32_t, FieldInfo*>& field_ids, st
     }
 
     for (auto& field : binlog_table->fields) {
-        field_slot[field.id] = field.id;
-        if (pri_field_ids.count(field.id) == 0) {
-            field_ids[field.id] = &field;
+        if (field.short_name == "ts") {
+            binlog_fields.ts_field = &field;
+        } else if (field.short_name == "binlog_type") {
+            binlog_fields.binlog_type_field = &field;
+        } else if (field.short_name == "start_ts") {
+            binlog_fields.start_ts_field =  &field;
+        } else if (field.short_name == "binlog_row_cnt") {
+            binlog_fields.binlog_row_cnt_field = &field;
+        }
+        if (read_all || read_field.count(field.short_name) == 1) {
+            field_slot[field.id] = field.id;
+            if (pri_field_ids.count(field.id) == 0) {
+                field_ids[field.id] = &field;
+            }
         }
     }
 }
 
 void Region::binlog_get_field_values(std::map<std::string, ExprValue>& field_value_map, SmartRecord& record, SmartTable& binlog_table) {
     for (auto& field : binlog_table->fields) {
-        auto f = record->get_field_by_tag(field.id);
+        auto f = record->get_field_by_idx(field.pb_idx);
         field_value_map[field.short_name] = record->get_value(f);
     }
 }
@@ -515,7 +530,7 @@ int Region::binlog_scan_when_restart() {
     ExprValue value;
     value.type = pb::INT64;
     value._u.int64_val = begin_ts;
-    left_record->set_value(left_record->get_field_by_tag(1), value);
+    left_record->set_value(left_record->get_field_by_idx(0), value);
     right_record->decode("");
 
     MutTableKey  left_key, right_key;
@@ -528,9 +543,10 @@ int Region::binlog_scan_when_restart() {
                         &_region_info, 1, 0, false, false, false);
 
     std::map<int32_t, FieldInfo*> field_ids;
+    BinlogReadFields binlog_fields;
     std::vector<int32_t> field_slot;
 
-    binlog_get_scan_fields(field_ids, field_slot, binlog_table, binlog_pri);
+    binlog_get_scan_fields(field_ids, binlog_fields, field_slot, binlog_table, binlog_pri);
 
     TableIterator* table_iter = Iterator::scan_primary(nullptr, range, field_ids, field_slot, false, true);
     if (table_iter == nullptr) {
@@ -869,12 +885,12 @@ int Region::write_binlog_value(const std::map<std::string, ExprValue>& field_val
                 default_value = ExprValue::Now();
                 default_value.cast_to(field.type);
             }
-            if (0 != record->set_value(record->get_field_by_tag(field.id), default_value)) {
+            if (0 != record->set_value(record->get_field_by_idx(field.pb_idx), default_value)) {
                 DB_WARNING("fill insert value failed");
                 return -1;
             }
         } else {
-            if (0 != record->set_value(record->get_field_by_tag(field.id), iter->second)) {
+            if (0 != record->set_value(record->get_field_by_idx(field.pb_idx), iter->second)) {
                 DB_WARNING("fill insert value failed");
                 return -1;
             }
@@ -1341,65 +1357,6 @@ int BinlogReadMgr::get_binlog_finish(pb::StoreRes* response) {
     return 0;
 }
 
-int64_t Region::read_data_cf_oldest_ts() {
-    int64_t begin_ts = 0;
-    SmartTable binlog_table = _factory->get_table_info_ptr(get_table_id());
-    SmartIndex binlog_pri   = _factory->get_index_info_ptr(get_table_id());
-    SmartRecord left_record  = _factory->new_record(*binlog_table);
-    SmartRecord right_record = _factory->new_record(*binlog_table);
-    if (left_record == nullptr || right_record == nullptr) {
-        return -1;
-    }
-
-    ExprValue value;
-    value.type = pb::INT64;
-    value._u.int64_val = begin_ts;
-    left_record->set_value(left_record->get_field_by_tag(1), value);
-    right_record->decode("");
-
-    MutTableKey  left_key, right_key;
-    if (left_record->encode_key(*binlog_pri.get(), left_key, binlog_pri.get()->fields.size(), false, false) != 0) {
-        DB_FATAL("Fail to encode_key left, table:%ld", binlog_table.get()->id);
-        return -1;
-    }
-    left_key.set_full(true);
-    IndexRange range(left_key, right_key, binlog_pri.get(), binlog_pri.get(),
-                        &_region_info, 1, 0, false, false, false);
-
-    std::map<int32_t, FieldInfo*> field_ids;
-    std::vector<int32_t> field_slot;
-    binlog_get_scan_fields(field_ids, field_slot, binlog_table, binlog_pri);
-
-    TableIterator* table_iter = Iterator::scan_primary(nullptr, range, field_ids, field_slot, false, true);
-    if (table_iter == nullptr) {
-        DB_WARNING("open TableIterator fail, table_id:%ld", get_table_id());
-        return -1;
-    }
-
-    ON_SCOPE_EXIT(([this, table_iter]() {
-        delete table_iter;
-    }));
-
-    SmartRecord record = _factory->new_record(*binlog_table);
-    int ret = 0;
-    record->clear();
-    if (!table_iter->valid()) {
-        DB_WARNING("region_id: %ld table_iter is invalid", _region_id);
-        return -1;
-    }
-
-    ret = table_iter->get_next(record);
-    if (ret < 0) {
-        DB_WARNING("region_id: %ld get_next failed", _region_id);
-        return -1;
-    }
-
-    std::map<std::string, ExprValue> field_value_map;
-    binlog_get_field_values(field_value_map, record, binlog_table);
-    int64_t ts = binlog_get_int64_val("ts", field_value_map);
-    return ts;
-}
-
 bool Region::flash_back_need_read(const pb::StoreReq* request, 
                                 const std::map<std::string, ExprValue>& field_value_map,
                                 const std::set<std::string>& req_db_tables,
@@ -1539,6 +1496,17 @@ void Region::read_binlog(const pb::StoreReq* request,
         return;
     }
 
+    if (FLAGS_use_binlog_cache && !is_read_offline_binlog && !request->binlog_desc().flash_back_read()) {
+        int ret = _binlog_cache.find(begin_ts, response);
+        if (ret == 0) {
+            int64_t select_cost = cost.get_time();
+            Store::get_instance()->select_time_cost << select_cost;
+            static bvar::LatencyRecorder cache_binlog_time("cache_binlog_time", 60);
+            cache_binlog_time << cost.get_time();
+            return;
+        }
+    }
+
     SmartRecord left_record  = _factory->new_record(*binlog_table);
     SmartRecord right_record = _factory->new_record(*binlog_table);
     if (left_record == nullptr || right_record == nullptr) {
@@ -1550,7 +1518,7 @@ void Region::read_binlog(const pb::StoreReq* request,
     ExprValue value;
     value.type = pb::INT64;
     value._u.int64_val = begin_ts;
-    left_record->set_value(left_record->get_field_by_tag(1), value);
+    left_record->set_value(left_record->get_field_by_idx(0), value);
     right_record->decode("");
 
     MutTableKey  left_key, right_key;
@@ -1564,9 +1532,10 @@ void Region::read_binlog(const pb::StoreReq* request,
                         &_region_info, 1, 0, false, false, false);
 
     std::map<int32_t, FieldInfo*> field_ids;
+    BinlogReadFields binlog_fields;
     std::vector<int32_t> field_slot;
 
-    binlog_get_scan_fields(field_ids, field_slot, binlog_table, binlog_pri);
+    binlog_get_scan_fields(field_ids, binlog_fields, field_slot, binlog_table, binlog_pri, request->binlog_desc().flash_back_read());
 
     TableIterator* table_iter = Iterator::scan_binlog_primary(range, field_ids, field_slot, is_read_offline_binlog);
     if (table_iter == nullptr) {
@@ -1579,7 +1548,6 @@ void Region::read_binlog(const pb::StoreReq* request,
     }));
 
     int64_t max_fake_binlog = 0;
-    std::map<std::string, ExprValue> field_value_map;
     SmartRecord record = _factory->new_record(*binlog_table);
     BinlogReadMgr binlog_reader(_region_id, begin_ts, remote_side, log_id, binlog_cnt, is_read_offline_binlog);
     int ret = 0;
@@ -1587,7 +1555,7 @@ void Region::read_binlog(const pb::StoreReq* request,
     // SQL闪回预先插入
     std::set<std::string> req_db_tables;
     std::set<uint64_t> req_signs;
-    if ((request->binlog_desc().flash_back_read() || request->binlog_desc().read_offline_binlog())) {
+    if (request->binlog_desc().flash_back_read()) {
         if (request->binlog_desc().db_tables_size() > 0) {
             for (const std::string& db_table : request->binlog_desc().db_tables()) {
                 req_db_tables.insert(db_table);
@@ -1613,11 +1581,13 @@ void Region::read_binlog(const pb::StoreReq* request,
             break;
         }
         std::map<std::string, ExprValue> field_value_map;
-        binlog_get_field_values(field_value_map, record, binlog_table);
-        int64_t ts = binlog_get_int64_val("ts", field_value_map); // type 为 COMMIT 时，ts 为 commit_ts
-        BinlogType binlog_type = static_cast<BinlogType>(binlog_get_int64_val("binlog_type", field_value_map));
-        int64_t start_ts = binlog_get_int64_val("start_ts", field_value_map);
-        int64_t binlog_row_cnt = binlog_get_int64_val("binlog_row_cnt", field_value_map);
+        if (request->binlog_desc().flash_back_read()) {
+            binlog_get_field_values(field_value_map, record, binlog_table);
+        }
+        int64_t ts = binlog_fields.get_ts(record); // type 为 COMMIT 时，ts 为 commit_ts
+        BinlogType binlog_type = binlog_fields.get_binlog_type(record);
+        int64_t start_ts = binlog_fields.get_start_ts(record);;
+        int64_t binlog_row_cnt = binlog_fields.get_binlog_row_cnt(record);
         DB_DEBUG("ts:%ld,start_ts:%ld, binlog_type:%d", ts, start_ts, binlog_type);
         if (binlog_row_cnt <= 0) {
             binlog_row_cnt = 1;
@@ -1645,7 +1615,7 @@ void Region::read_binlog(const pb::StoreReq* request,
         }
 
         // SQL闪回读取时过滤
-        if ((request->binlog_desc().flash_back_read() || request->binlog_desc().read_offline_binlog())
+        if (request->binlog_desc().flash_back_read()
                  && !flash_back_need_read(request, field_value_map, req_db_tables, req_signs)) {
             continue;
         }
@@ -1683,7 +1653,16 @@ void Region::read_binlog(const pb::StoreReq* request,
 
     response->set_errcode(pb::SUCCESS); 
     response->set_errmsg("read binlog success");    
+    // 下发binlog才缓存，否则ts推进不了
+    if (FLAGS_use_binlog_cache && response->binlogs_size() > 0
+        && !is_read_offline_binlog && !request->binlog_desc().flash_back_read()) {
+        _binlog_cache.add(begin_ts, *response);
+    }
     int64_t select_cost = cost.get_time();
+    if (response->binlogs_size() == 0) {
+        static bvar::LatencyRecorder no_binlog_time("no_binlog_time", 60);
+        no_binlog_time << cost.get_time();
+    }
     Store::get_instance()->select_time_cost << select_cost;
 }
 
@@ -1721,7 +1700,6 @@ void Region::query_binlog_ts(const pb::StoreReq* request,
         data_cf_oldest_ts = _binlog_param.data_cf_oldest_ts;
     }
 
-    int64_t begin_ts = 0;
     int64_t binlog_cf_oldest_ts = RocksWrapper::get_instance()->get_oldest_ts_in_binlog_cf();
     auto binlog_info = response->mutable_binlog_info();
     binlog_info->set_region_id(request->region_id());
@@ -1934,7 +1912,7 @@ private:
 int OfflineBinlogSstWriter::open_writer() {
     rocksdb::Options option = RocksWrapper::get_instance()->get_cold_options();
     option.env = rocksdb::Env::Default();
-    _writer.reset(new SstFileWriter(option, false));
+    _writer.reset(new SstFileWriter(option));
     if (_writer == nullptr) {
         DB_FATAL("region_id: %ld backup task fail, SstFileWriter is nullptr", _region_id);
         return -1;
@@ -2543,8 +2521,9 @@ int Region::write_offline_binlog_data() {
      */
 
     std::map<int32_t, FieldInfo*> field_ids;
+    BinlogReadFields binlog_fields;
     std::vector<int32_t> field_slot;
-    binlog_get_scan_fields(field_ids, field_slot, binlog_table, binlog_pri);
+    binlog_get_scan_fields(field_ids, binlog_fields, field_slot, binlog_table, binlog_pri);
 
     MutTableKey prefix;
     prefix.append_i64(_region_id).append_i64(_table_id);
@@ -2589,7 +2568,6 @@ int Region::write_offline_binlog_data() {
 
     int ret = 0;
     bool batch_finish = false;
-    std::map<std::string, ExprValue> field_value_map;
     std::map<int64_t, std::string> start_binlog_map;
     SmartRecord record = _factory->new_record(*binlog_table);
     BinlogReadMgr binlog_reader(_region_id, _offline_binlog_task.backup_task_start_ts, "backup_task", 0, 0, false);

@@ -74,6 +74,7 @@ enum IndexHint {
     
     void fetch_field_ids() {
         if (index_type == pb::I_KEY || index_type == pb::I_UNIQ || index_type == pb::I_PRIMARY) {
+            // TODO: 普通索引支持使用主键字段这边暂时不修改，后续可能需要修改I_KEY相关逻辑
             for (auto& field : index_info_ptr->fields) {
                 index_field_ids.insert(field.id);
             }

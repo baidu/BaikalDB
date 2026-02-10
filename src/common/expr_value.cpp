@@ -16,7 +16,7 @@
 #include "hll_common.h"
 
 namespace baikaldb {
-DEFINE_bool(use_double_conversion, true, "use_double_conversion");
+DEFINE_bool(use_double_conversion, true, "Enable double conversion, default: true");
 DEFINE_bool(double_use_all_precision, false, "Double precision output compatibility with MySQL, eg: 1.003*100=100.29999999999998");
 SerializeStatus ExprValue::serialize_to_mysql_text_packet(char* buf, size_t size, size_t& len) const {
     if (size < 1) {

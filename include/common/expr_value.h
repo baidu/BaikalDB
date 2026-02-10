@@ -1013,7 +1013,7 @@ struct ExprValue {
     }
 
     bool is_string() const {
-        return type == pb::STRING || type == pb::HEX || type == pb::BITMAP || type == pb::HLL || type == pb::TDIGEST || type == pb::JSON;
+        return ::baikaldb::is_string(type);
     }
 
     bool is_double() const {

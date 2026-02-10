@@ -245,7 +245,12 @@ public:
         if (_children[0]->transfer_to_arrow_expression() != 0) {
             return -1;
         }
-        _arrow_expr = arrow::compute::call("cast", {_children[0]->arrow_expr()}, arrow::compute::CastOptions::Unsafe(arrow::boolean()));
+        auto bool_expr = arrow_cast(_children[0]->arrow_expr(), _children[0]->col_type(), pb::BOOL);
+        _arrow_expr = arrow::compute::call("if_else", {
+            arrow::compute::call("is_null", {bool_expr}),
+            arrow::compute::literal(false), 
+            bool_expr
+        });
         return 0;
     }
     virtual bool can_use_arrow_vector() {
@@ -466,9 +471,7 @@ public:
         if (_children[0]->transfer_to_arrow_expression() != 0) {
             return -1;
         }
-        _arrow_expr = arrow::compute::not_(arrow::compute::call("cast", 
-                                                {_children[0]->arrow_expr()}, 
-                                                arrow::compute::CastOptions::Unsafe(arrow::boolean())));
+        _arrow_expr = arrow::compute::not_(arrow_cast(_children[0]->arrow_expr(), _children[0]->col_type(), pb::BOOL));
         return 0;
     }
     virtual bool can_use_arrow_vector() {

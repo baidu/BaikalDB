@@ -64,6 +64,8 @@ struct FragmentInfo {
     int64_t open_cost = 0;
     int64_t exec_cost = 0;
 
+    pb::TraceNode       trace_node;
+
     arrow::Result<std::shared_ptr<arrow::Table>> wait() {
         if (executor) {
             executor->wait();

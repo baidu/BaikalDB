@@ -438,9 +438,9 @@ TEST(BvarMap, bvarmap) {
     uint64_t parent_sign = 2385825078143366794;
     std::set<uint64_t> subquery_signs = {8394144613061275097, 8919421716185942419};
     //bm << BvarMap(std::make_pair("abc", 1));
-    bm << BvarMap("abc", 1, 101, 101, 10, 1, 5, 3, 100, 1, field_range_type, 1, parent_sign, subquery_signs);
-    bm << BvarMap("abc", 4, 102, 102, 20, 2, 6, 2, 100, 1, field_range_type, 1, parent_sign, subquery_signs);
-    bm << BvarMap("bcd", 5, 103, 103, 30, 3, 7, 1, 100, 1, field_range_type, 1, parent_sign, subquery_signs);
+    bm << BvarMap("abc", 1, 101, 101, 10, 1, 5, 3, 100, 1, field_range_type, 1, parent_sign, subquery_signs, "");
+    bm << BvarMap("abc", 4, 102, 102, 20, 2, 6, 2, 100, 1, field_range_type, 1, parent_sign, subquery_signs, "");
+    bm << BvarMap("bcd", 5, 103, 103, 30, 3, 7, 1, 100, 1, field_range_type, 1, parent_sign, subquery_signs, "");
     std::cout << bm.get_value();
 }
 
@@ -483,10 +483,10 @@ TEST(test_gbk_regex, match) {
     std::cout << "wregex match result : " << boost::regex_match(wval1, wzhao_regex) << '\n';
 }
 
-DEFINE_int64(gflags_test_int64, 20000, "");
-DEFINE_double(gflags_test_double, 0.234, "");
-DEFINE_string(gflags_test_string, "abc", "");
-DEFINE_bool(gflags_test_bool, true, "");
+DEFINE_int64(gflags_test_int64, 20000, "Test int64 gflag with default value 20000");
+DEFINE_double(gflags_test_double, 0.234, "Test double gflag with default value 0.234");
+DEFINE_string(gflags_test_string, "abc", "Test string gflag with default value 'abc'");
+DEFINE_bool(gflags_test_bool, true, "Test boolean gflag with default value true");
 
 TEST(gflags_test, case_all) {
     if (!google::SetCommandLineOption("gflags_test_int64", "1000").empty()) {
@@ -529,7 +529,6 @@ TEST(gflags_test, case_all) {
 
 TEST(bns_to_meta_bns_test, case_all) {
      static std::map<std::string, std::string> mapping = {
-        {"31.opera-adp-baikalStore-000-nj.FENGCHAO.njjs",          "group.opera-ps-baikalMeta-000-bj.FENGCHAO.all"},
         {"28.opera-atomkv-baikalStore-000-bj.FENGCHAO.bjhw",       "group.opera-atomkv-baikalMeta-000-bj.FENGCHAO.all"},
         {"2.opera-bigtree-baikalStore-000-bj.FENGCHAO.bjyz",       "group.opera-atomkv-baikalMeta-000-bj.FENGCHAO.all"},
         {"5.opera-coffline-baikalStore-000-mix.FENGCHAO.dbl",      "group.opera-coffline-baikalMeta-000-bj.FENGCHAO.all"},
@@ -543,7 +542,7 @@ TEST(bns_to_meta_bns_test, case_all) {
         {"1.opera-aladdin-baikaldb-000-bj.FENGCHAO.dbl",           "group.opera-aladdin-baikalMeta-000-bj.FENGCHAO.all"},
         {"group.opera-aladdin-baikaldb-000-nj.FENGCHAO.all",       "group.opera-aladdin-baikalMeta-000-bj.FENGCHAO.all"},
         {"7.opera-aladdin-baikalStore-000-mix.FENGCHAO.gzhxy",     "group.opera-aladdin-baikalMeta-000-bj.FENGCHAO.all"},
-        {"0.opera-hmkv-baikalStore-000-bd.FENGCHAO.bddwd",         "group.opera-holmes-baikalMeta-000-yq.FENGCHAO.all"},
+        {"0.opera-hmkv-baikalStore-000-bdnew.FENGCHAO.bddwd",         "group.opera-holmes-baikalMeta-000-yq.FENGCHAO.all"},
         {"55.opera-hm-baikalStore-000-bd.FENGCHAO.bddwd",          "group.opera-holmes-baikalMeta-000-yq.FENGCHAO.all"},
         {"group.opera-hm-baikalStore-000-bd.FENGCHAO.all.serv",    "group.opera-holmes-baikalMeta-000-yq.FENGCHAO.all"},
         {"1.opera-adp-baikalBinlog-000-bj.FENGCHAO.bjhw",          "group.opera-ps-baikalMeta-000-bj.FENGCHAO.all"},
@@ -574,9 +573,9 @@ TEST(brpc_http_get_info_test_db, case_all) {
     }
 }
 
-DEFINE_int32(bvar_test_total_time_s, 0, "");
-DEFINE_int32(bvar_test_loop_time_ms, 100, "");
-DEFINE_int32(bvar_test_interaval_time_s, 60, "");
+DEFINE_int32(bvar_test_total_time_s, 0, "Total time in seconds for bvar testing with default value 0");
+DEFINE_int32(bvar_test_loop_time_ms, 100, "Loop time in milliseconds for bvar testing with default value 100");
+DEFINE_int32(bvar_test_interaval_time_s, 60, "Interval time in seconds for bvar testing with default value 60");
 TEST(bvar_window_test, bvar) {
     bvar::Adder<int> count;
     bvar::Window<bvar::Adder<int>> window_count(&count, FLAGS_bvar_test_interaval_time_s);
@@ -593,7 +592,7 @@ TEST(bvar_window_test, bvar) {
         bthread_usleep(FLAGS_bvar_test_loop_time_ms * 1000);
     }
 }
-DEFINE_int64(ttl_time_us, 60, "");
+DEFINE_int64(ttl_time_us, 60, "Time to live in microseconds with default value 60");
 TEST(ttl_test, ttl) {
     int64_t now_time = butil::gettimeofday_us();
     uint64_t ttl_storage = ttl_encode(now_time);

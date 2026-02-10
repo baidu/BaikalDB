@@ -22,7 +22,7 @@ DEFINE_int32(meta_request_timeout, 30000,
 DEFINE_int32(meta_connect_timeout, 5000, 
             "meta as server connect timeout, default:5000ms");
 DEFINE_string(meta_server_bns, "group.opera-qa-baikalMeta-000-yz.FENGCHAO.all", "meta server bns");
-DEFINE_string(backup_meta_server_bns, "", "backup_meta_server_bns");
+DEFINE_string(backup_meta_server_bns, "", "Backup meta server BNS name, default: empty");
 DEFINE_int64(time_between_meta_connect_error_ms, 0, "time_between_meta_connect_error_ms. default(0ms)");
 DEFINE_bool(auto_update_meta_list, false, "auto_update_meta_list, default false");
 

@@ -38,19 +38,30 @@ public:
     }
     ~CommRindexNodeParser() {
     }
-    int init(const std::string& term);
+    int init(const std::string& term, ReverseDelayInitContext<Schema>* delay_init_context);
     //return nullptr 代表遍历结束
     const ReverseNode* current_node();
     const PrimaryIdT* current_id();
     //只进不退
     const ReverseNode* next();
     const ReverseNode* advance(const PrimaryIdT& target_id);
+    int delay_init(const std::string& term, ReverseListSptr new_list_ptr, ReverseListSptr old_list_ptr) override {
+        auto* exist_parser = this->_schema->get_term(term);
+        if (exist_parser != NULL) {
+            *this = *exist_parser;
+            return 0;
+        }
+        return _init(term, new_list_ptr, old_list_ptr);
+    }
 private:
     //二分查找，大于或等于
     uint32_t binary_search(uint32_t first,
                            uint32_t last,
                            const PrimaryIdT& target_id,
                            ReverseList* list);
+    int _create_reverse_key_prefix(std::string& key);
+    int _init(const std::string& term, ReverseListSptr new_list_ptr, ReverseListSptr old_list_ptr);
+
     ReverseListSptr _new_list_ptr;
     ReverseListSptr _old_list_ptr;
     ReverseList* _new_list;
@@ -93,8 +104,8 @@ public:
 
     //search_data 字符串格式
     //"hello world"
-    int create_executor(
-        const std::string& search_data, pb::MatchMode mode, pb::SegmentType segment_type, const pb::Charset& charset);
+    int create_executor(myrocksdb::Transaction* txn, const std::string& search_data,
+            pb::MatchMode mode, pb::SegmentType segment_type, const pb::Charset& charset);
     int next(SmartRecord record);
     bool_executor_type executor_type = ReverseTrait<List>::executor_type;
     void set_term(const std::string& term, Parser* parse) {
@@ -119,6 +130,14 @@ public:
 
     const std::string& get_query_words () const {
         return _query_words;
+    }
+
+    int64_t get_region_id() const {
+        return  _index_ptr->get_region_id();
+    }
+
+    int64_t get_index_id() const {
+        return _index_ptr->get_index_id();
     }
 
 private:

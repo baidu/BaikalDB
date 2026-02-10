@@ -13,7 +13,7 @@
 // limitations under the License.
 
 #pragma once
-#include "exec_node.h"
+#include "scan_node.h"
 #include "proto/db.interface.pb.h"
 
 #include <arrow/compute/api_vector.h>
@@ -235,6 +235,25 @@ private:
     arrow::Status repartition(std::shared_ptr<arrow::RecordBatch> batch,
                               std::unordered_map<int, std::shared_ptr<arrow::RecordBatch>>& hash_batch_map);
 
+    bool is_db_fragment() {
+        bool has_dblink_scan_node = false;
+        std::vector<ExecNode*> scan_nodes;
+        get_node_pass_subquery(pb::SCAN_NODE, scan_nodes);
+        for (auto* scan_node : scan_nodes) {
+            if (scan_node != nullptr) {
+                if (static_cast<ScanNode*>(scan_node)->is_file_scan_node()) {
+                    has_dblink_scan_node = true;
+                    break;
+                }
+                if (static_cast<ScanNode*>(scan_node)->is_mysql_scan_node()) {
+                    has_dblink_scan_node = true;
+                    break;
+                }
+            }
+        }
+        return (get_node_pass_subquery(pb::EXCHANGE_RECEIVER_NODE) != nullptr) || has_dblink_scan_node;
+    }
+
     uint64_t _log_id = 0; 
     int32_t _fragment_id = 0;
     int32_t _receiver_fragment_id = 0;
@@ -261,7 +280,12 @@ private:
     std::atomic<int64_t> _repartition_cost_us {0};
     std::atomic<int64_t> _repartition_rows {0};
 
-    StockRecordBatchKeeper _broadcast_record_batch_keepper; // for broadcast type
+    // for broadcast type
+    StockRecordBatchKeeper _broadcast_record_batch_keepper; 
+
+    // for random type
+    int _target_channel_idx_for_random_type = -1;
+    std::shared_ptr<arrow::Buffer> _empty_recordbatch_buffer;
 };
 
 } // naemspace baikaldb

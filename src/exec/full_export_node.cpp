@@ -176,7 +176,6 @@ int FullExportNode::calc_last_key(RuntimeState* state, MemRow* mem_row) {
     pos_index.set_left_open(true);
     pos_index.mutable_ranges(0)->set_left_key(key.data());
     pos_index.mutable_ranges(0)->set_left_full(key.get_full());
-
     pos_index.mutable_ranges(0)->mutable_partition_ids()->Clear();
     pos_index.mutable_ranges(0)->add_partition_ids(_current_partition);
     pos_index.SerializeToString(&scan_index_info.raw_index);

@@ -257,6 +257,13 @@ int DataStreamReceiver::add_record_batch(const pb::TransmitDataParam& param,
         DB_WARNING_ER("get process key failed");
         return -1;
     }
+    // filter first
+    if (_condition != nullptr && record_batch != nullptr) {
+        if (0 != VectorizeHelpper::vectorize_filter(record_batch, _condition, &record_batch)) {
+            DB_WARNING_ER("filter record batch failed");
+            return -1;
+        }
+    }
     BAIDU_SCOPED_LOCK(_mtx);
     // 重复数据以第一次为准，merge场景可能重复发送同一个region的数据
     if (_done_set.find(process_key) != _done_set.end()) {
@@ -332,12 +339,26 @@ int DataStreamReceiver::add_record_batch(const pb::TransmitDataParam& param,
 
 int DataStreamReceiver::add_local_pass_through_chunk(uint64_t sender_fragment_instance_id, 
                         const std::vector<std::shared_ptr<arrow::RecordBatch>>& record_batchs) {
+    std::vector<std::shared_ptr<arrow::RecordBatch>> filtered_record_batchs;
+    if (_condition != nullptr) {
+        filtered_record_batchs.reserve(record_batchs.size());
+        for (auto& record_batch : record_batchs) {
+            std::shared_ptr<arrow::RecordBatch> out;
+            if (0 != VectorizeHelpper::vectorize_filter(record_batch, _condition, &out)) {
+                DB_WARNING_ER("filter record batch failed");
+                return -1;
+            }
+            filtered_record_batchs.emplace_back(out);
+        }
+    } else {
+        filtered_record_batchs = record_batchs;
+    }
     BAIDU_SCOPED_LOCK(_mtx);
     _local_pass_through_record_batchs[sender_fragment_instance_id];
     if (record_batchs.empty()) {
         return 0;
     }
-    for (auto& record_batch : record_batchs) {
+    for (auto& record_batch : filtered_record_batchs) {
         if (record_batch != nullptr) {
             DB_DEBUG("local pass through record batch num rows: %ld, _fragment_instance_id: %lu, sender_fragment_instance_id: %lu", 
                 record_batch->num_rows(), _fragment_instance_id, sender_fragment_instance_id);  
@@ -426,6 +447,26 @@ int ExchangeReceiverNode::init(const pb::PlanNode& node) {
     for (bool is_null_first : er_node.is_null_first()) {
         _is_null_first.push_back(is_null_first);
     }
+    _conditions.reserve(er_node.filter_conditions_size());
+    for (auto& expr : er_node.filter_conditions()) {
+        ExprNode* expr_node = nullptr;
+        ret = ExprNode::create_tree(expr, &expr_node);
+        if (ret < 0) {
+            DB_FATAL("create expr fail");
+            ExprNode::destroy_tree(expr_node);
+            return ret;
+        }
+        _conditions.emplace_back(expr_node);
+    }
+    return 0;
+}
+
+int ExchangeReceiverNode::init_condition_and_sort_info(ExecNode* select_manager) {
+    SelectManagerNode* select_manager_node = static_cast<SelectManagerNode*>(select_manager);
+    _slot_order_exprs = select_manager_node->slot_order_exprs();
+    _is_asc = select_manager_node->is_asc();
+    _is_null_first = select_manager_node->is_null_first();
+    _conditions = select_manager_node->conditions();
     return 0;
 }
 
@@ -435,6 +476,21 @@ int ExchangeReceiverNode::open(RuntimeState* state) {
         DB_FATAL_ER("ExecNode::open fail, ret:%d", ret);
         return ret;
     }
+
+    // 主db的schema和region在构建物理计划的时候生成, pb里没有
+    // 非主db的schema和region在init(pb)的时候生成
+    if (_exchange_sender_node != nullptr && _exchange_sender_node->children_size() > 0) {
+        auto data_schema = _exchange_sender_node->children(0)->data_schema();
+        _arrow_schema = VectorizeHelpper::get_arrow_schema(data_schema);
+    }
+    if (_arrow_schema == nullptr) {
+        DB_FATAL_ER("transfer receiver arrow schema fail");
+        return -1;
+    }
+    if (0 != VectorizeHelpper::init_conditions(state, _conditions, _vectorize_conditions, -1, _arrow_schema)) {
+        DB_FATAL_ER("init condition fail");
+        return -1;
+    } 
     _data_stream_receiver = 
         DataStreamManager::get_instance()->create_receiver(_log_id,
                                                            _fragment_instance_id,
@@ -446,16 +502,8 @@ int ExchangeReceiverNode::open(RuntimeState* state) {
         return -1;
     }
     _data_stream_receiver->set_fragment_id(_fragment_id);
-
-    // 主db的schema和region在构建物理计划的时候生成, pb里没有
-    // 非主db的schema和region在init(pb)的时候生成
-    if (_exchange_sender_node != nullptr && _exchange_sender_node->children_size() > 0) {
-        auto data_schema = _exchange_sender_node->children(0)->data_schema();
-        _arrow_schema = VectorizeHelpper::get_arrow_schema(data_schema);
-    }
-    if (_arrow_schema == nullptr) {
-        DB_FATAL_ER("transfer receiver arrow schema fail");
-        return -1;
+    if (_conditions.size() > 0) {
+        _data_stream_receiver->set_conditions(&_vectorize_conditions);
     }
     set_node_exec_type(pb::EXEC_ARROW_ACERO);
     return 0;
@@ -488,6 +536,11 @@ void ExchangeReceiverNode::close(RuntimeState* state) {
             ExprNode::destroy_tree(expr);
         }
     }
+    if (_pb_node.derive_node().exchange_receiver_node().filter_conditions_size() > 0) {
+        for (auto& expr : _conditions) {
+            ExprNode::destroy_tree(expr);
+        }
+    }
     if (_arrow_io_executor != nullptr) {
         _arrow_io_executor.reset();
     }
@@ -508,14 +561,16 @@ void ExchangeReceiverNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node)
     }
     
     if (_relate_select_manager_node != nullptr) {
-        auto regions = _relate_select_manager_node->region_infos();
-        if (regions.empty()) {
-            DB_FATAL_ER("relate select manager node region is empty");
-            return;
-        }
-        for (auto& region : regions) {
-            // TODO 如果region多, 改成[region_id, version]? 确认实际执行用了region info哪些信息
-            er_node->add_regions()->CopyFrom(region.second);
+        if (!static_cast<SelectManagerNode*>(_relate_select_manager_node)->is_dblink_scan()) {
+            auto regions = _relate_select_manager_node->region_infos();
+            if (regions.empty()) {
+                DB_FATAL_ER("relate select manager node region is empty");
+                return;
+            }
+            for (auto& region : regions) {
+                // TODO 如果region多, 改成[region_id, version]? 确认实际执行用了region info哪些信息
+                er_node->add_regions()->CopyFrom(region.second);
+            }
         }
     }
     // 序列化schema
@@ -529,7 +584,7 @@ void ExchangeReceiverNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node)
         DB_FATAL_ER("transfer receiver arrow schema fail");
         return;
     }
-    arrow::Result<std::shared_ptr<arrow::Buffer>> schema_ret = arrow::ipc::SerializeSchema(*_arrow_schema, arrow::default_memory_pool());
+    arrow::Result<std::shared_ptr<arrow::Buffer>> schema_ret = arrow::ipc::SerializeSchema(*_arrow_schema, GetMemoryPoolForRead());
     if (!schema_ret.ok()) {
         DB_FATAL_ER("arrow serialize schema fail, status: %s", schema_ret.status().ToString().c_str());
         return;
@@ -545,6 +600,10 @@ void ExchangeReceiverNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node)
     }
     for (bool null_first : _is_null_first) {
         er_node->add_is_null_first(null_first);
+    }
+    // filter
+    for (ExprNode* expr : _conditions) {
+        ExprNode::create_pb_expr(er_node->add_filter_conditions(), expr);
     }
     return;
 }
@@ -567,6 +626,9 @@ int ExchangeReceiverNode::build_arrow_declaration(RuntimeState* state) {
     arrow::acero::Declaration dec{"record_batch_source",
         arrow::acero::RecordBatchSourceNodeOptions{reader->schema(), std::move(iter_maker), _arrow_io_executor.get()}};
     LOCAL_TRACE_ARROW_PLAN_WITH_SCHEMA(dec, reader->schema(), nullptr);
+    if (_conditions.size() > 0) {
+        LOCAL_TRACE_ARROW_FILTER(&_vectorize_conditions, _limit);
+    }
     state->append_acero_declaration(dec);
 
     if (!_slot_order_exprs.empty()) {
@@ -656,7 +718,7 @@ arrow::Status ExchangeReceiverVectorizedReader::ReadNext(std::shared_ptr<arrow::
             _record_batch = record_batch;
         } else {
             if (VectorizeHelpper::change_arrow_record_batch_schema(
-                    _arrow_schema, record_batch, &_record_batch, true) != 0) {
+                    _arrow_schema, record_batch, &_record_batch, /*need_check_momery_limit=*/true) != 0) {
                 return arrow::Status::IOError("change arrow record batch schema fail");
             }
         }

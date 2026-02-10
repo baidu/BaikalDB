@@ -195,7 +195,7 @@ public:
     }
 
     bool allow_op(pb::OpType op_type, int64_t db, int64_t tbl, const std::string& table_name) {
-        if (acl_v2_is_valid()) { // 优先用v2版本权限控制
+        if (acl_v2_is_valid() && (acl_database.count(db) > 1 || acl_table.count(tbl) > 0)) { //防止用新方法加库后，权限全丢
             return allow_op_v2(op_type, db, tbl);
         } else { // 兼容v1版本权限控制
             return allow_op_v1(op_type, db, tbl, table_name);

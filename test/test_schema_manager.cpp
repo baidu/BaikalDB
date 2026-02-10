@@ -113,7 +113,7 @@ TEST_F(SchemaManagerTest, test_create_drop_modify) {
     //测试点：region 分离，分配一个新的region-id
     baikaldb::pb::MetaManagerRequest request_split_region_fc;
     request_split_region_fc.mutable_region_split()->set_region_id(1);
-    _schema_manager->split_region(request_split_region_fc, NULL);
+    _schema_manager->split_region(request_split_region_fc, 0, NULL);
     ASSERT_EQ(2, _schema_manager->_max_region_id);
     for (auto& table_id : _schema_manager->_table_id_map) {
         DB_WARNING("table_id:%ld, name:%s", table_id.second, table_id.first.c_str());
@@ -561,7 +561,7 @@ TEST_F(SchemaManagerTest, test_create_drop_modify) {
     }
     baikaldb::pb::MetaManagerRequest request_split_region_feed;
     request_split_region_feed.mutable_region_split()->set_region_id(3);
-    _schema_manager->split_region(request_split_region_feed, NULL);
+    _schema_manager->split_region(request_split_region_feed, 0, NULL);
     ASSERT_EQ(4, _schema_manager->_max_region_id);
     _schema_manager->load_snapshot();
     ASSERT_EQ(4, _schema_manager->_max_region_id);

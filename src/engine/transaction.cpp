@@ -24,7 +24,7 @@ DEFINE_bool(disable_wal, false, "disable rocksdb interanal WAL log, only use raf
 DECLARE_int32(rocks_transaction_lock_timeout_ms);
 DEFINE_int64(exec_1pc_out_fsm_timeout_ms, 5 * 1000, "exec 1pc out of fsm, timeout");
 DEFINE_int64(exec_1pc_in_fsm_timeout_ms, 100, "exec 1pc in fsm, timeout");
-DEFINE_bool(leader_merge_in_raft, false, "leader_merge_in_raft");
+DEFINE_bool(leader_merge_in_raft, false, "Enable leader merge in raft, default: false");
 
 /**
  * @brief 解码TTL
@@ -186,13 +186,13 @@ int Transaction::begin(const rocksdb::TransactionOptions& txn_opt) {
 
     _txn = new myrocksdb::Transaction(txn, _use_cold_db, _cold_data_cf);
     if (_pool != nullptr) {
-        _use_ttl = _pool->use_ttl();
+        _use_normal_ttl = _pool->use_normal_ttl();
         _online_ttl_base_expire_time_us = _pool->online_ttl_base_expire_time_us();
         DB_DEBUG();
     }
     last_active_time = butil::gettimeofday_us();
     begin_time = last_active_time;
-    if (_use_ttl) {
+    if (_use_normal_ttl) {
         _read_ttl_timestamp_us = last_active_time;
     }
     _in_process = true;
@@ -589,8 +589,8 @@ rocksdb::Status Transaction::put_kv_without_lock(const std::string& key, const s
     value_slices[0].size_ = sizeof(uint64_t);
     value_slices[1].data_ = value.data();
     value_slices[1].size_ = value.size();
-    DB_DEBUG("key:%s, v:%s, ,use_ttl:%d ttl_timestamp_us:%ld", str_to_hex(key).c_str(), str_to_hex(value).c_str(), _use_ttl, ttl_timestamp_us);
-    if (_use_ttl && ttl_timestamp_us > 0) {
+    DB_DEBUG("key:%s, v:%s, ,use_normal_ttl:%d ttl_timestamp_us:%ld", str_to_hex(key).c_str(), str_to_hex(value).c_str(), _use_normal_ttl, ttl_timestamp_us);
+    if (_use_normal_ttl && ttl_timestamp_us > 0) {
         value_slice_parts.parts = value_slices;
         value_slice_parts.num_parts = 2;
     } else {
@@ -748,7 +748,7 @@ int Transaction::get_update_primary(
         DB_DEBUG("lock ok and key exist");
         if (mode == GET_ONLY || mode == GET_LOCK) {
             rocksdb::Slice value_slice(pin_slice);
-            if (_use_ttl && _read_ttl_timestamp_us > 0) {
+            if (_use_normal_ttl && _read_ttl_timestamp_us > 0) {
                 int64_t row_ttl_timestamp_us = ttl_decode(value_slice, &pk_index, _online_ttl_base_expire_time_us);
                 if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
                     DB_DEBUG("expired _read_ttl_timestamp_us:%ld row_ttl_timestamp_us:%ld",
@@ -848,7 +848,7 @@ int Transaction::multiget_primary(
         if (statuses[i].ok()) {
             rocksdb::Slice value_slice(values[i]);
             read_disk_size += rocksdb_keys[i].size() + values[i].size();
-            if (_use_ttl && _read_ttl_timestamp_us > 0) {
+            if (_use_normal_ttl && _read_ttl_timestamp_us > 0) {
                 int64_t row_ttl_timestamp_us = ttl_decode(value_slice, &pk_index, _online_ttl_base_expire_time_us);
                 if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
                     DB_DEBUG("expired _read_ttl_timestamp_us:%ld row_ttl_timestamp_us:%ld",
@@ -867,7 +867,7 @@ int Transaction::multiget_primary(
                 if (0 != tuple_record.decode_fields(fields, &field_slot, nullptr, tuple_id,
                                                     use_memrow ? &mem_row : nullptr, 
                                                     row_batch->get_chunk())) {
-                    DB_WARNING("decode value failed: %ld, _use_ttl:%d", pk_index.id, _use_ttl);
+                    DB_WARNING("decode value failed: %ld, _use_normal_ttl:%d", pk_index.id, _use_normal_ttl);
                     continue;
                 }
             } else {
@@ -992,9 +992,8 @@ int Transaction::multiget_primary(
             DB_FATAL("Fail to append_index, reg:%ld, tab:%ld", region, pk_index.id);
             return -1;
         }
-        MutTableKey  _key;
+        MutTableKey& _key = raw_read_keys.emplace_back();
         _key.append_i64(region).append_i64(pk_index.id).append_index(pk_key);
-        raw_read_keys.emplace_back(_key);
         rocksdb_keys.emplace_back(_key.data());
         ++num_keys;
     }
@@ -1050,9 +1049,8 @@ int Transaction::multiget_primary(
                 continue;
             }
         }
-        MutTableKey _key;
+        MutTableKey& _key = raw_read_keys.emplace_back();
         _key.append_i64(region).append_i64(pk_index.id).append_index(left_key);
-        raw_read_keys.emplace_back(_key);
         rocksdb_keys.emplace_back(_key.data());
         ++num_keys;
     }
@@ -1158,9 +1156,8 @@ int Transaction::multiget_secondary(
     int64_t num_keys = 0;
     for (auto key : read_keys) {
         auto left_key = key->left_key();
-        MutTableKey _key;
+        MutTableKey& _key = raw_read_keys.emplace_back();
         _key.append_i64(region).append_i64(index.id).append_index(left_key);
-        raw_read_keys.emplace_back(_key);
         rocksdb_keys.emplace_back(_key.data());
         ++num_keys;
     }
@@ -1179,7 +1176,7 @@ int Transaction::multiget_secondary(
         if (statuses[i].ok()) {
             rocksdb::Slice value_slice(values[i]);
             read_disk_size += rocksdb_keys[i].size() + values[i].size();
-            if (_use_ttl && _read_ttl_timestamp_us > 0) {
+            if (_use_normal_ttl && _read_ttl_timestamp_us > 0) {
                 int64_t row_ttl_timestamp_us = ttl_decode(value_slice, &index, _online_ttl_base_expire_time_us);
                 if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
                     //expired
@@ -1325,7 +1322,7 @@ int Transaction::get_update_secondary(
 
     rocksdb::Slice value(pin_slice);
     read_disk_size = _key.size() + value.size();
-    if (_use_ttl && _read_ttl_timestamp_us > 0) {
+    if (_use_normal_ttl && _read_ttl_timestamp_us > 0) {
         int64_t row_ttl_timestamp_us = ttl_decode(value, &index, _online_ttl_base_expire_time_us);
         if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
             //expired

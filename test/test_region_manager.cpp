@@ -230,6 +230,8 @@ TEST_F(TestManagerTest, test_create_drop_modify) {
     request_create_table_fc.mutable_table_info()->set_table_name("userinfo");
     request_create_table_fc.mutable_table_info()->set_database("FC_Word");
     request_create_table_fc.mutable_table_info()->set_namespace_name("FengChao");
+    request_create_table_fc.mutable_table_info()->set_engine(baikaldb::pb::ROCKSDB);
+    request_create_table_fc.mutable_table_info()->set_partition_num(1);
     // request_create_table_fc.mutable_table_info()->add_init_store("127.0.0.1:8010");
     request_create_table_fc.mutable_table_info()->set_resource_tag("e0");
     baikaldb::pb::FieldInfo* field = request_create_table_fc.mutable_table_info()->add_fields();
@@ -253,6 +255,8 @@ TEST_F(TestManagerTest, test_create_drop_modify) {
     index->set_index_type(baikaldb::pb::I_KEY);
     index->add_field_names("username");
     index->add_field_names("type");
+    baikaldb::pb::MetaManagerResponse response_create_table;
+    EXPECT_EQ(_schema_manager->pre_process_for_create_table(&request_create_table_fc, &response_create_table, 0), 0);
     _table_manager->create_table(request_create_table_fc, 1, NULL);
     
     ASSERT_EQ(2, _namespace_manager->_max_namespace_id);
@@ -354,6 +358,8 @@ TEST_F(TestManagerTest, test_create_drop_modify) {
 	request_create_table_fc_level.mutable_table_info()->set_table_name("planinfo");
 	request_create_table_fc_level.mutable_table_info()->set_database("FC_Word");
 	request_create_table_fc_level.mutable_table_info()->set_namespace_name("FengChao");
+    request_create_table_fc_level.mutable_table_info()->set_engine(baikaldb::pb::ROCKSDB);
+    request_create_table_fc_level.mutable_table_info()->set_partition_num(1);
 	// request_create_table_fc_level.mutable_table_info()->add_init_store("127.0.0.1:8010");
 	request_create_table_fc_level.mutable_table_info()->set_resource_tag("e0");
 	field = request_create_table_fc_level.mutable_table_info()->add_fields();
@@ -378,6 +384,7 @@ TEST_F(TestManagerTest, test_create_drop_modify) {
 	index->set_index_type(baikaldb::pb::I_KEY);
 	index->add_field_names("planname");
 	index->add_field_names("type");
+    EXPECT_EQ(_schema_manager->pre_process_for_create_table(&request_create_table_fc_level, &response_create_table, 0), 0);
 	_table_manager->create_table(request_create_table_fc_level, 2, NULL);
 
     {
@@ -572,7 +579,7 @@ TEST_F(TestManagerTest, test_create_drop_modify) {
     baikaldb::pb::MetaManagerRequest split_region_request;
     split_region_request.set_op_type(baikaldb::pb::OP_SPLIT_REGION);
     split_region_request.mutable_region_split()->set_region_id(1);
-    _region_manager->split_region(split_region_request, NULL);
+    _region_manager->split_region(split_region_request, 0, NULL);
     ASSERT_EQ(3, _region_manager->get_max_region_id());
     _schema_manager->load_snapshot();
     ASSERT_EQ(3, _region_manager->get_max_region_id());

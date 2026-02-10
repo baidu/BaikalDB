@@ -77,11 +77,11 @@ public:
         const std::vector<FieldInfo>& fields, int64_t& userid) {
         return encode_row_key(record_batch, record_batch->num_rows() - 1, fields, userid);
     }
-
-    static std::shared_ptr<arrow::Field> make_schema(const std::string& name, arrow::Type::type type);
     static ExprValue get_vectorized_value(const std::shared_ptr<arrow::Array>& array, int row_idx);
-    static std::shared_ptr<arrow::Array> make_array_from_exprvalue(
-        const pb::PrimitiveType type, const ExprValue& expr_value, const int length);
+
+    static std::shared_ptr<ColumnSchemaInfo> make_column_schema(int64_t tableid, 
+            SmartTable table_info, SmartIndex pri_info, 
+            const std::unordered_map<int32_t, FieldInfo*>& field_id2info_map);
 
     int init();
 

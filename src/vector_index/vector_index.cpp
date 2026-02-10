@@ -21,16 +21,21 @@
 #include <faiss/IndexIDMap.h>
 #include <faiss/impl/IDSelector.h>
 #include <faiss/impl/HNSW.h>
+#include <faiss/IndexIVF.h>
+#include <faiss/IndexPQ.h>
 #include <boost/algorithm/string.hpp>
 #include <boost/algorithm/string/join.hpp>
 #include "arrow/vendored/fast_float/fast_float.h"
+#include <regex>
 
 namespace baikaldb {
 DEFINE_int32(efsearch_retry_pow, 4, "efsearch_retry_pow");
-DEFINE_int32(max_efsearch, 16384, "max_efsearch");
 DEFINE_int64(compaction_interval_s, 24 * 60 * 60, "vector compaction interval(s)");
 DEFINE_bool(need_brute_force_when_insufficient, true, "need brute force when sufficient");
 DEFINE_double(table_lines_compaction_threshold, 0.7, "compaction threshold");
+DEFINE_int32(first_train_vector_num, 10000, "first train vector num");
+DEFINE_int32(retraining_set_ratio, 10, "vector index retraining set ratio");
+DECLARE_int64(print_time_us);
 
 class IDSelectorBitmap : public faiss::IDSelectorBitmapUserDefine {
 public:
@@ -74,6 +79,20 @@ private:
     std::shared_ptr<Roaring> _del_bitmap;
 };
 
+int mres_to_int(const std::ssub_match& mr, int deflt = -1, int begin = 0) {
+    if (mr.length() == 0) {
+        return deflt;
+    }
+    int res = -1;
+    try {
+        res = std::stoi(mr.str().substr(begin));
+    } catch (std::exception& e) {
+        DB_WARNING("Fail to mres_to_int: %s", e.what());
+        return -1;
+    }
+    return res;
+}
+
 int VectorIndex::init(const pb::RegionInfo& region_info, int64_t region_id, int64_t index_id, int64_t table_id) {
     _rocksdb = RocksWrapper::get_instance();
     _region_id = region_id;
@@ -95,28 +114,89 @@ int VectorIndex::init(const pb::RegionInfo& region_info, int64_t region_id, int6
         DB_WARNING("dimension fail:%d", _dimension);
         return -1;
     }
-    // TODO: 后续可以用正则匹配
-    if (info.vector_description.empty()) {
-        _vector_description = "IDMap2,HNSW16";
-        _is_hnsw = true;
-    } else if (info.vector_description == "Flat") {
-        _vector_description = "IDMap2,Flat";
-        _is_flat = true;
-    } else if (info.vector_description == "L2norm,Flat") {
-        _vector_description = "IDMap2,L2norm,Flat";
-        _is_flat = true;
+    std::string desc = info.vector_description;
+    _vector_description = "IDMap2";
+    // metric_type
+    if (boost::istarts_with(desc, "L2norm")) {
         _is_l2norm = true;
-    } else if (boost::istarts_with(info.vector_description, "HNSW")) {
-        _vector_description = "IDMap2," + info.vector_description;
-        _is_hnsw = true;
-    } else if (boost::istarts_with(info.vector_description, "L2norm,HNSW")) {
-        _vector_description = "IDMap2," + info.vector_description;
-        _is_l2norm = true;
+        _vector_description += ",L2norm";
+        desc = desc.substr(7);
+    }
+    // index type
+    if (desc.empty()) {
+        _vector_description += ",HNSW16";
         _is_hnsw = true;
     } else {
-        DB_WARNING("not support description:%s", info.vector_description.c_str());
-        return -1;
+        // SUPPORTED:
+        // decode by Flat: Flat \ HNSW \ IVF
+        // decode by PQ: PQmxn \ HNSW,PQmx8 \ IVF,PQmxn
+        // decode by PQFS: PQmx4fs \ IVF,PQmx4fs 
+        std::smatch sm;
+        std::string code_string = desc;
+        if (std::regex_match(desc, sm, std::regex("HNSW([0-9]*)([,_].*)?"))) {
+            _is_hnsw = true;
+            int hnsw_M = mres_to_int(sm[1], 16);
+            if (hnsw_M <= 0) {
+                DB_WARNING("hnsw_M must be greater than 0: %d", hnsw_M);
+                return -1;
+            }
+            code_string = sm[2].length() > 0 ? sm[2].str().substr(1) : "Flat";
+            _vector_description += ",HNSW" + std::to_string(hnsw_M);
+        } else if (std::regex_match(desc, sm, std::regex("IVF([0-9]*)([,_].*)?"))) {
+            _is_ivf = true;
+            _ivf_nlist = mres_to_int(sm[1], 16);
+            if (_ivf_nlist <= 0) {
+                DB_WARNING("ivf_nlist must be greater than 0: %d", _ivf_nlist);
+                return -1;
+            }
+            code_string = sm[2].length() > 0 ? sm[2].str().substr(1) : "Flat";
+            _train_vec_size = std::max(_ivf_nlist, FLAGS_first_train_vector_num);
+            _vector_description += ",IVF" + std::to_string(_ivf_nlist);
+        } 
+        // code, include PQ, PQFS, FLAT
+        if (std::regex_match(code_string, sm, std::regex("PQ([0-9]+)x4fs?"))) {
+            int M = mres_to_int(sm[1]);
+            if (M <= 0) {
+                DB_WARNING("PQ_M must be greater than 0: %d", M);
+                return -1;
+            }
+            _is_pqfs = true;
+            _train_vec_size = FLAGS_first_train_vector_num;
+            _vector_description += ",PQ" + std::to_string(M) + "x4fs";
+            if (_is_hnsw) {
+                // faiss高版本支持
+                DB_WARNING("not support HNSW+PQFS, desc: %s", _vector_description.c_str());
+                return -1;
+            }
+        } else if (std::regex_match(code_string, sm, std::regex("PQ([0-9]+)(x[0-9]+)?"))) {
+            int M = mres_to_int(sm[1]);
+            int nbit = mres_to_int(sm[2], 8, 1);
+            if (M <= 0 || nbit <= 0) {
+                DB_WARNING("PQ_M and nbit must be greater than 0: %d, %d", M, nbit);
+                return -1;
+            }
+            _is_pq = true;
+            _train_vec_size = FLAGS_first_train_vector_num;
+            
+            if (_is_hnsw) {
+                if (nbit != 8) {
+                    // faiss高版本支持
+                    DB_WARNING("faiss 1.7.4 only support PQx8 for hnsw, but defined nbit: %d, desc: %s", nbit, _vector_description.c_str());
+                    return -1;
+                }
+                _vector_description += ",PQ" + std::to_string(M);
+            } else {
+                _vector_description += ",PQ" + std::to_string(M) + "x" + std::to_string(nbit);
+            }
+        } else {
+            _is_flat = !_is_hnsw && !_is_ivf;
+            if (!_is_hnsw) {
+                // "HNSW"后不能加Flat, "IVF16"后必须带Flat
+                _vector_description += ",Flat";
+            }
+        }
     }
+    DB_WARNING("info.vector_description: %s -> _vector_description: %s", info.vector_description.c_str(), _vector_description.c_str());
     _metrix_type = static_cast<faiss::MetricType>(info.metric_type);
     if (_metrix_type == faiss::METRIC_INNER_PRODUCT) {
         _metric_compare = std::greater<float>();
@@ -380,6 +460,12 @@ int VectorIndex::insert_vector(
                    SmartRecord record) {
     int64_t cache_idx = 0;
     SmartFaissIndex faiss_index;
+    // if (_begin_train && _faiss_index->index != nullptr && !_faiss_index->index->is_trained) {
+    //     // slow down for first vtrain -> [50ms, 1s]
+    //     int64_t slow_down_us = std::max(_train_begin_time.get_time() / 10, (int64_t)50000);
+    //     slow_down_us = std::min(slow_down_us, (int64_t)1000000);
+    //     bthread_usleep(slow_down_us);
+    // }
     ScopeGuard auto_decrease([this, &faiss_index] () {
         if (_is_separate && faiss_index != nullptr) {
             faiss_index->dec_ref();
@@ -410,14 +496,15 @@ int VectorIndex::insert_vector(
     if (ret != 0) {
         return ret;
     }
-    return add_to_faiss(faiss_index, word, cache_idx, record);
+    return add_to_faiss(faiss_index, word, cache_idx, record, false);
 }
 
 int VectorIndex::delete_vector(
                    SmartTransaction& txn,
                    const std::string& word, 
                    const std::string& pk,
-                   SmartRecord record) {
+                   SmartRecord record,
+                   pb::IndexState index_status) {
     SmartFaissIndex faiss_index;
     if (_is_separate) {
         uint64_t separate_value = 0;
@@ -439,7 +526,7 @@ int VectorIndex::delete_vector(
     ScopeGuard write_auto_decrease([&faiss_index]() {
         faiss_index->real_writing_cond.decrease_signal();
     });
-    return del_to_rocksdb(txn->get_txn(), faiss_index, pk, V_DELETE);
+    return del_to_rocksdb(txn->get_txn(), faiss_index, pk, V_DELETE, index_status);
 }
 
 int VectorIndex::search_vector(
@@ -449,7 +536,7 @@ int VectorIndex::search_vector(
             SmartTable& table_info,
             const std::string& search_data,
             int64_t topk,
-            int32_t efsearch,
+            VectorSearchParam& param,
             std::vector<SmartRecord>& records,
             std::vector<ExprNode*>& vector_filter_exprs,
             std::vector<ExprNode*>& scan_filter_exprs,
@@ -464,7 +551,7 @@ int VectorIndex::search_vector(
     } else {
         faiss_index = _faiss_index;
     }
-    return search(txn, faiss_index, pk_info, table_info, search_data, topk, efsearch, 
+    return search(txn, faiss_index, pk_info, table_info, search_data, topk, param, 
                   records, vector_filter_exprs, scan_filter_exprs, pre_filter_exprs);
 }
 
@@ -525,7 +612,8 @@ int VectorIndex::del_to_rocksdb(
         myrocksdb::Transaction* txn, 
         SmartFaissIndex faiss_index,
         const std::string& pk, 
-        VFlag flag) {
+        VFlag flag,
+        pb::IndexState index_status) {
     if (faiss_index == nullptr) {
         DB_WARNING("faiss_index is nullptr");
         return -1;
@@ -543,6 +631,10 @@ int VectorIndex::del_to_rocksdb(
     std::string value;
     res = txn->Get(read_opt, data_cf, key, &value);
     if (!res.ok()) {
+        // TODO: 是否IsNotFound都能直接返回成功? 无论什么索引状态
+        if (index_status != pb::IS_PUBLIC && res.IsNotFound()) {
+            return 0;
+        } 
         DB_WARNING("rocksdb get error: code=%d, msg=%s",
                     res.code(), res.ToString().c_str());
         return -1;
@@ -631,7 +723,8 @@ void from_chars_to_float_vec(const std::string& str, std::vector<float>& vec) {
 int VectorIndex::add_to_faiss(SmartFaissIndex faiss_index, 
                               const std::string& word, 
                               int64_t cache_idx,
-                              SmartRecord record) {
+                              SmartRecord record,
+                              bool enable_train) {
     if (faiss_index == nullptr) {
         DB_WARNING("faiss_index is nullptr");
         return -1;
@@ -660,12 +753,20 @@ int VectorIndex::add_to_faiss(SmartFaissIndex faiss_index,
         // 从标量缓存中删除不需要缓存的列，对这些列采用后过滤方式
         std::shared_ptr<arrow::RecordBatch> scalar_data;
         std::shared_ptr<arrow::RecordBatch> flat_scalar_data;
-        if (VectorizeHelpper::change_arrow_record_batch_schema(arrow_record_batch->schema(), faiss_index->scalar_data, &scalar_data, true) != 0){
+        if (VectorizeHelpper::change_arrow_record_batch_schema(
+                    arrow_record_batch->schema(), 
+                    faiss_index->scalar_data, 
+                    &scalar_data, 
+                    /*need_check_momery_limit=*/false) != 0){
             DB_WARNING("Fail to change arrow record batch schema");
             return -1;
         }
         if (faiss_index->flat_scalar_data != nullptr &&
-                VectorizeHelpper::change_arrow_record_batch_schema(arrow_record_batch->schema(), faiss_index->flat_scalar_data, &flat_scalar_data, true) != 0) {
+                VectorizeHelpper::change_arrow_record_batch_schema(
+                    arrow_record_batch->schema(), 
+                    faiss_index->flat_scalar_data, 
+                    &flat_scalar_data, 
+                    /*need_check_momery_limit=*/false) != 0) {
             DB_WARNING("Fail to change arrow record batch schema");
             return -1;
         }
@@ -707,7 +808,27 @@ int VectorIndex::add_to_faiss(SmartFaissIndex faiss_index,
             DB_WARNING("concatenate_record_batches failed");
             return -1;
         }
-        if (faiss_index->flat_index->ntotal >= 1000) {
+
+        bool index_need_train = need_train();
+        bool trigger_train = false;
+        if (enable_train 
+                && index_need_train 
+                && !faiss_index->index->is_trained 
+                && _trigger_retrain_vector_num > 0
+                && faiss_index->flat_index->ntotal > _trigger_retrain_vector_num) {
+            _begin_train = true;
+            trigger_train = true;
+            _train_begin_time.reset();
+        }
+
+        /* 三种情况:
+         *  1. 不需要train的向量类型, 如HNSW,Flat: 
+         *      a. 正常dml写入过程, 每满1000个向量，就将一级Flat添加到二级索引里
+         *  2. 需要train的向量类型, 如IVF1000,Flat:
+         *      a. 已经trained: 正常dml写入过程, 每满1000个向量，就将一级Flat添加到二级索引里
+         *      b. 还没trained: 索引重建过程, 到达_trigger_retrain_vector_num个向量时，触发train，然后将一级Flat添加到二级索引里
+         */
+        if (faiss_index->flat_index->ntotal >= 1000 && (!index_need_train || faiss_index->index->is_trained || trigger_train)) {
             // reconstruct from faiss_index, 减少缓存，降低内存占用
             faiss::IndexIDMap2* idmap2_index = static_cast<faiss::IndexIDMap2*>(faiss_index->flat_index);
             std::vector<int64_t> origin_cache_idxs;
@@ -730,6 +851,19 @@ int VectorIndex::add_to_faiss(SmartFaissIndex faiss_index,
             }
             cache_idxs.insert(cache_idxs.end(), origin_cache_idxs.begin(), origin_cache_idxs.end());
             cache_vectors.insert(cache_vectors.end(), origin_cache_vectors.begin(), origin_cache_vectors.end());
+            if (trigger_train) {
+                try {
+                    TimeCost cost;
+                    faiss_index->index->train(cache_idxs.size(), &cache_vectors[0]);
+                    _train_vec_size = cache_idxs.size();
+                    DB_WARNING("region_id: %ld, index: %s, dim: %d, index_size: %ld, train cost: %ld using vec size: %ld",
+                        _region_id, _vector_description.c_str(), _dimension, cache_idxs.size(), cost.get_time(), _train_vec_size);
+                    _begin_train = false;
+                } catch (std::exception& e) {
+                    DB_WARNING("Fail to train faiss index: %s", e.what());
+                    return -1;
+                }
+            } 
             // 合并flat层标量数据
             record_batches = {faiss_index->scalar_data, flat_concat_record_batch};
             std::shared_ptr<arrow::RecordBatch> concat_record_batch;
@@ -777,7 +911,7 @@ int VectorIndex::search(
                    SmartTable& table_info,
                    const std::string& search_data,
                    int64_t topk,
-                   int32_t efsearch,
+                   VectorSearchParam& param,
                    std::vector<SmartRecord>& records,
                    std::vector<ExprNode*>& vector_filter_exprs,
                    std::vector<ExprNode*>& scan_filter_exprs,
@@ -800,6 +934,7 @@ int VectorIndex::search(
     std::vector<float> dis;
     int64_t least = 10;
     int64_t search_count = k;
+    TimeCost total_cost;
     {
         bthread::RWLockRdGuard lock(faiss_index->rwlock);
 
@@ -876,92 +1011,123 @@ int VectorIndex::search(
                 DB_WARNING("Fail to search, maybe not support search_params");
                 return -1;
             }
-            DB_WARNING("flat search:%ld, prefilter_cost:%ld", mink, prefilter_cost);
+            if (total_cost.get_time() > FLAGS_print_time_us) {
+                DB_WARNING("flat search:%ld, prefilter_cost:%ld", mink, prefilter_cost);
+            }
         } else {
-            if (faiss_index->index == nullptr || faiss_index->flat_index == nullptr) {
-                DB_WARNING("faiss_index->index/faiss_index->flat_index is nullptr");
-                return -1;
-            }
-            int64_t mink = std::max(std::min(k, faiss_index->flat_index->ntotal), least);
-            flat_idxs.resize(mink, -1);
-            flat_dis.resize(mink, -1);
-            faiss::SearchParameters flat_search_params;
-            std::shared_ptr<IDSelectorBitmap> flat_bitmap_sel;
-            int64_t flat_prefilter_cost = 0;
-            if (has_filter) {
-                TimeCost tm;
-                auto arrow_res = arrow::compute::ExecuteScalarExpression(
-                        arrow_filter_expr, *(faiss_index->flat_scalar_data->schema()), faiss_index->flat_scalar_data);
-                if (!arrow_res.status().ok()) {
-                    DB_WARNING("Fail to ExecuteScalarExpression, %s", arrow_res.status().message().c_str());
+            do {
+                if (faiss_index->index == nullptr || faiss_index->flat_index == nullptr) {
+                    DB_WARNING("faiss_index->index/faiss_index->flat_index is nullptr");
                     return -1;
                 }
-                flat_prefilter_cost = tm.get_time();
-                auto flat_datum_array = (*arrow_res).array_as<arrow::BooleanArray>();
-                flat_bitmap_sel = std::make_shared<IDSelectorBitmap>(flat_datum_array, faiss_index->flat_del_bitmap);
-            } else {
-                flat_bitmap_sel = std::make_shared<IDSelectorBitmap>(nullptr, faiss_index->flat_del_bitmap);
-            }
-            flat_search_params.sel = flat_bitmap_sel.get();
-            try {
-                faiss_index->flat_index->search(1, &search_vector[0], mink, &flat_dis[0], &flat_idxs[0], &flat_search_params);
-            } catch (...) {
-                DB_WARNING("Fail to search, maybe not support search_params");
-                return -1;
-            }
-            int64_t flat_search_cnt = 0;
-            for (int64_t i : flat_idxs) {
-                if (i == -1) {
-                    break;
+                // search flat vector index first
+                int64_t mink = std::max(std::min(k, faiss_index->flat_index->ntotal), least);
+                flat_idxs.resize(mink, -1);
+                flat_dis.resize(mink, -1);
+                faiss::SearchParameters flat_search_params;
+                std::shared_ptr<IDSelectorBitmap> flat_bitmap_sel;
+                int64_t flat_prefilter_cost = 0;
+                if (has_filter) {
+                    TimeCost tm;
+                    auto arrow_res = arrow::compute::ExecuteScalarExpression(
+                            arrow_filter_expr, *(faiss_index->flat_scalar_data->schema()), faiss_index->flat_scalar_data);
+                    if (!arrow_res.status().ok()) {
+                        DB_WARNING("Fail to ExecuteScalarExpression, %s", arrow_res.status().message().c_str());
+                        return -1;
+                    }
+                    flat_prefilter_cost = tm.get_time();
+                    auto flat_datum_array = (*arrow_res).array_as<arrow::BooleanArray>();
+                    flat_bitmap_sel = std::make_shared<IDSelectorBitmap>(flat_datum_array, faiss_index->flat_del_bitmap);
                 } else {
-                    ++flat_search_cnt;
+                    flat_bitmap_sel = std::make_shared<IDSelectorBitmap>(nullptr, faiss_index->flat_del_bitmap);
                 }
-            }
-            mink = std::max(std::min(k, faiss_index->index->ntotal), least);
-            idxs.resize(mink, -1);
-            dis.resize(mink, -1);
-            bool do_brute_force = false;
-            faiss::SearchParametersHNSW search_params;
-            search_params.efSearch = std::max(_efsearch, efsearch);
-            search_params.need_brute_force = true; // 如果过滤数量大于faiss索引数量的93%，则退化成暴搜；
-            search_params.need_brute_force_when_insufficient = FLAGS_need_brute_force_when_insufficient; // hnsw搜索结果不足topK时退化成暴搜；
-            search_params.do_brute_force = &do_brute_force; // hnsw搜索过程中是否退化暴搜
-            std::shared_ptr<IDSelectorBitmap> bitmap_sel;
-            int64_t prefilter_cost = 0;
-            if (has_filter) {
-                TimeCost tm;
-                auto arrow_res = arrow::compute::ExecuteScalarExpression(
-                        arrow_filter_expr, *(faiss_index->scalar_data->schema()), faiss_index->scalar_data);
-                if (!arrow_res.status().ok()) {
-                    DB_WARNING("Fail to ExecuteScalarExpression, %s", arrow_res.status().message().c_str());
+                flat_search_params.sel = flat_bitmap_sel.get();
+                try {
+                    faiss_index->flat_index->search(1, &search_vector[0], mink, &flat_dis[0], &flat_idxs[0], &flat_search_params);
+                } catch (...) {
+                    DB_WARNING("Fail to search, maybe not support search_params");
                     return -1;
                 }
-                prefilter_cost = tm.get_time();
-                auto datum_array = (*arrow_res).array_as<arrow::BooleanArray>();
-                bitmap_sel = std::make_shared<IDSelectorBitmap>(datum_array, faiss_index->del_bitmap);
-            } else {
-                bitmap_sel = std::make_shared<IDSelectorBitmap>(nullptr, faiss_index->del_bitmap);
-            }
-            search_params.sel = bitmap_sel.get();
-            try {
-                faiss_index->index->search(1, &search_vector[0], mink, &dis[0], &idxs[0], &search_params);
-            } catch (...) {
-                DB_WARNING("Fail to search, maybe not support search_params");
-                return -1;
-            }
-            int64_t search_cnt = 0;
-            for (int64_t i : idxs) {
-                if (i == -1) {
-                    break;
-                } else {
-                    ++search_cnt;
+                int64_t flat_search_cnt = 0;
+                for (int64_t i : flat_idxs) {
+                    if (i == -1) {
+                        break;
+                    } else {
+                        ++flat_search_cnt;
+                    }
                 }
-            }
-            DB_WARNING("region_id: %ld, index_id: %ld, separate_value: %lu, search:%ld, faiss.ntotal:%lu,%lu, "
-                        "search_cnt: %ld,%ld, prefilter_time_cost: %ld, %ld, efsearch: %d, do_brute_force: %d", 
-                        _region_id, _index_id, faiss_index->separate_value, mink, faiss_index->flat_index->ntotal, faiss_index->index->ntotal, 
-                        flat_search_cnt, search_cnt, flat_prefilter_cost, prefilter_cost, search_params.efSearch, do_brute_force);
-            search_count = flat_search_cnt + search_cnt;
+                // search real vector index
+                if (faiss_index->index->ntotal == 0) {
+                    break;
+                }
+                mink = std::max(std::min(k, faiss_index->index->ntotal), least);
+                idxs.resize(mink, -1);
+                dis.resize(mink, -1);
+                std::shared_ptr<IDSelectorBitmap> bitmap_sel;
+                int64_t prefilter_cost = 0;
+                if (has_filter) {
+                    TimeCost tm;
+                    auto arrow_res = arrow::compute::ExecuteScalarExpression(
+                            arrow_filter_expr, *(faiss_index->scalar_data->schema()), faiss_index->scalar_data);
+                    if (!arrow_res.status().ok()) {
+                        DB_WARNING("Fail to ExecuteScalarExpression, %s", arrow_res.status().message().c_str());
+                        return -1;
+                    }
+                    prefilter_cost = tm.get_time();
+                    auto datum_array = (*arrow_res).array_as<arrow::BooleanArray>();
+                    bitmap_sel = std::make_shared<IDSelectorBitmap>(datum_array, faiss_index->del_bitmap);
+                } else {
+                    bitmap_sel = std::make_shared<IDSelectorBitmap>(nullptr, faiss_index->del_bitmap);
+                }
+                bool do_brute_force = false;
+                try {
+                    if (_is_hnsw) {
+                        // HNSW + Flat/PQ
+                        faiss::SearchParametersHNSW search_params;
+                        search_params.efSearch = std::max(_efsearch, param.efsearch);
+                        search_params.need_brute_force = true; // 如果过滤数量大于faiss索引数量的93%，则退化成暴搜；
+                        search_params.need_brute_force_when_insufficient = FLAGS_need_brute_force_when_insufficient; // hnsw搜索结果不足topK时退化成暴搜；
+                        search_params.do_brute_force = &do_brute_force; // hnsw搜索过程中是否退化暴搜
+                        search_params.sel = bitmap_sel.get();
+                        faiss_index->index->search(1, &search_vector[0], mink, &dis[0], &idxs[0], &search_params);
+                    } else if (_is_ivf) {
+                        // IVF + Flat/PQ/PQFS
+                        faiss::SearchParametersIVF search_params;
+                        search_params.nprobe = std::max(_nprobe, param.nprobe);
+                        search_params.sel = bitmap_sel.get();
+                        faiss_index->index->search(1, &search_vector[0], mink, &dis[0], &idxs[0], &search_params);
+                    } else if (_is_pq) {
+                        // PQ
+                        faiss::SearchParametersPQ search_params;
+                        search_params.search_type = faiss::IndexPQ::Search_type_t::ST_PQ;
+                        search_params.sel = bitmap_sel.get();
+                        faiss_index->index->search(1, &search_vector[0], mink, &dis[0], &idxs[0], &search_params);
+                    } else {
+                        // PQFS
+                        faiss::SearchParameters search_params;
+                        search_params.sel = bitmap_sel.get();
+                        faiss_index->index->search(1, &search_vector[0], mink, &dis[0], &idxs[0], &search_params);
+                    }
+                } catch (...) {
+                    DB_WARNING("Fail to search, maybe not support search_params");
+                    return -1;
+                }
+                int64_t search_cnt = 0;
+                for (int64_t i : idxs) {
+                    if (i == -1) {
+                        break;
+                    } else {
+                        ++search_cnt;
+                    }
+                }
+                if (total_cost.get_time() > FLAGS_print_time_us) {
+                    DB_WARNING("region_id: %ld, index_id: %ld, separate_value: %lu, search:%ld, faiss.ntotal:%lu,%lu, "
+                            "search_cnt: %ld,%ld, prefilter_time_cost: %ld, %ld, do_brute_force: %d", 
+                            _region_id, _index_id, faiss_index->separate_value, mink, faiss_index->flat_index->ntotal, faiss_index->index->ntotal, 
+                            flat_search_cnt, search_cnt, flat_prefilter_cost, prefilter_cost, do_brute_force);
+                }
+                search_count = flat_search_cnt + search_cnt;
+            } while (0);
         }
     }
     std::vector<int64_t> result_idxs;
@@ -1012,8 +1178,11 @@ int VectorIndex::construct_records(myrocksdb::Transaction* txn,
     keys.reserve(idxs.size());
     std::vector<rocksdb::Slice> rocksdb_keys;
     rocksdb_keys.reserve(idxs.size());
+    std::vector<std::string> str_rocksdb_keys;
+    str_rocksdb_keys.reserve(idxs.size());
     for (int64_t id : idxs) {
-        std::string key = _key_prefix;
+        std::string& key = str_rocksdb_keys.emplace_back();
+        key = _key_prefix;
         uint8_t level = 0;
         key.append((char*)&level, sizeof(uint8_t));
         if (_is_separate) {
@@ -1282,7 +1451,13 @@ int VectorIndex::init_faiss_index(SmartFaissIndex faiss_index) {
         DB_WARNING("faiss_index is nullptr");
         return -1;
     }
-    faiss_index->index = faiss::index_factory(_dimension, _vector_description.c_str(), _metrix_type);
+    try {
+        faiss_index->index = faiss::index_factory(_dimension, _vector_description.c_str(), _metrix_type);
+    } catch (std::exception& e) {
+        DB_FATAL("faiss_index->index init fail, _dimension: %d, _vector_description: %s, _metrix_type: %d, err: %s",
+                    _dimension, _vector_description.c_str(), _metrix_type, e.what());
+        return -1;
+    }
     if (faiss_index->index == nullptr) {
         DB_WARNING("faiss_index->index init fail");
         return -1;
@@ -1290,6 +1465,9 @@ int VectorIndex::init_faiss_index(SmartFaissIndex faiss_index) {
     if (_is_hnsw) {
         faiss::ParameterSpace().set_index_parameter(faiss_index->index, "efSearch", _efsearch);
         faiss::ParameterSpace().set_index_parameter(faiss_index->index, "efConstruction", _efconstruction);
+    }
+    if (_is_ivf) {
+        faiss::ParameterSpace().set_index_parameter(faiss_index->index, "nprobe", _nprobe);
     }
     if (!_is_flat) {
         if (_is_l2norm) {
@@ -1490,7 +1668,7 @@ int VectorIndex::restore_faiss_index(const pb::RegionInfo& region_info, SmartFai
                     return ret;
                 }
                 bthread::RWLockWrGuard lock(faiss_index->rwlock);
-                ret = add_to_faiss(faiss_index, word, cache_idx, record);
+                ret = add_to_faiss(faiss_index, word, cache_idx, record, true);
                 if (ret < 0) {
                     DB_WARNING("add_to_faiss fail, index_id: %ld", _index_id);
                     return ret;
@@ -1562,9 +1740,9 @@ int VectorIndex::restore_faiss_index(const pb::RegionInfo& region_info, SmartFai
         }
     }
     DB_WARNING("restore_index success, region_id: %ld, faiss dump_idx: %ld, "
-               "faiss cache_idx:%ld, del_cnt:%ld, separate_value: %lu", 
+               "faiss cache_idx:%ld, del_cnt:%ld, separate_value: %lu, train_vec_size: %ld", 
                 region_info.region_id(), faiss_index->dump_idx, faiss_index->cache_idx.load(),
-                del_cnt, faiss_index->separate_value);
+                del_cnt, faiss_index->separate_value, _train_vec_size);
     return 0;
 }
 
@@ -1590,12 +1768,20 @@ int VectorIndex::schema_change_faiss_index(SmartFaissIndex faiss_index) {
         std::shared_ptr<arrow::RecordBatch> scalar_data;
         std::shared_ptr<arrow::RecordBatch> flat_scalar_data;
         if (faiss_index->scalar_data != nullptr && 
-                VectorizeHelpper::change_arrow_record_batch_schema(arrow_schema, faiss_index->scalar_data, &scalar_data, true) != 0){
+                VectorizeHelpper::change_arrow_record_batch_schema(
+                    arrow_schema, 
+                    faiss_index->scalar_data, 
+                    &scalar_data, 
+                    /*need_check_momery_limit=*/false) != 0){
             DB_WARNING("Fail to change arrow record batch schema");
             return -1;
         }
         if (faiss_index->flat_scalar_data != nullptr &&
-                VectorizeHelpper::change_arrow_record_batch_schema(arrow_schema, faiss_index->flat_scalar_data, &flat_scalar_data, true) != 0) {
+                VectorizeHelpper::change_arrow_record_batch_schema(
+                    arrow_schema, 
+                    faiss_index->flat_scalar_data, 
+                    &flat_scalar_data, 
+                    /*need_check_momery_limit=*/false) != 0) {
             DB_WARNING("Fail to change arrow record batch schema");
             return -1;
         }
@@ -1603,6 +1789,19 @@ int VectorIndex::schema_change_faiss_index(SmartFaissIndex faiss_index) {
         faiss_index->flat_scalar_data = flat_scalar_data;
     }
     return 0;
+}
+
+void VectorIndex::cal_new_train_vec_size(int64_t valid_vec_size) {
+    if (!need_train()) {
+        _trigger_retrain_vector_num = -1;
+        return;
+    }
+    int64_t cal_train_vec_size = valid_vec_size * FLAGS_retraining_set_ratio / 100;
+    int64_t min_train_vec_size = FLAGS_first_train_vector_num;
+    if (_is_ivf) {
+        min_train_vec_size = std::max(min_train_vec_size, (int64_t)_ivf_nlist);
+    } 
+    _trigger_retrain_vector_num = std::max(min_train_vec_size, cal_train_vec_size);
 }
 
 int VectorIndex::compact_faiss_index(const pb::RegionInfo& region_info, SmartFaissIndex faiss_index, bool is_force) {
@@ -1686,23 +1885,46 @@ bool VectorIndex::need_compact_faiss_index(SmartFaissIndex faiss_index) {
     if (faiss_index->flat_index != nullptr) {
         ntotal += faiss_index->flat_index->ntotal;
     }
+
+    int64_t vec_ntotal = ntotal - faiss_index->del_count;
+    if (faiss_index->index != nullptr && need_train()) {
+        int64_t trigger_train_vec_ntotal = _train_vec_size;  // first train
+        if (faiss_index->index->is_trained) {
+            trigger_train_vec_ntotal = _train_vec_size * FLAGS_retraining_set_ratio * 2;
+        }
+        
+        if (vec_ntotal >= trigger_train_vec_ntotal) {
+            cal_new_train_vec_size(vec_ntotal);
+            DB_WARNING("triger train: vector_description: %s, vec_ntotal: %ld, trained: %d, _train_vec_size: %ld, trigger_train_vec_ntotal: %ld",
+                _vector_description.c_str(), 
+                vec_ntotal, 
+                faiss_index->index->is_trained, 
+                _train_vec_size, 
+                trigger_train_vec_ntotal);
+            return true;
+        }
+    }
     if (ntotal > 10 && faiss_index->del_count * 100 / ntotal > 30) {
+        cal_new_train_vec_size(vec_ntotal);
         DB_WARNING(
-                "region_id: %ld, _index_id: %ld, ntotal:%ld, _del_count:%ld",
+                "region_id: %ld, _index_id: %ld, ntotal:%ld, _del_count:%ld, trigger_retrain_vector_num: %ld",
                 _region_id,
                 _index_id,
                 ntotal,
-                faiss_index->del_count.load());
+                faiss_index->del_count.load(),
+                _trigger_retrain_vector_num);
         return true;
     }
     if (faiss_index->last_compaction_ts.get_time() > FLAGS_compaction_interval_s * 1000 * 1000LL
             && ntotal > 0 && faiss_index->del_count * 100 / ntotal > 5) {
+        cal_new_train_vec_size(vec_ntotal);
         DB_WARNING(
-                "region_id: %ld, _index_id: %ld, ntotal:%ld, _del_count:%ld",
+                "region_id: %ld, _index_id: %ld, ntotal:%ld, _del_count:%ld, trigger_retrain_vector_num: %ld",
                 _region_id,
                 _index_id,
                 ntotal,
-                faiss_index->del_count.load());
+                faiss_index->del_count.load(), 
+                _trigger_retrain_vector_num);
         return true;
     }
     // 用于向量隔离索引删除空FaissIndex
@@ -1964,7 +2186,20 @@ int VectorIndex::read_not_cache_fields_from_file(SmartFaissIndex faiss_index, co
     ScopeGuard auto_decrease([&extra_fs] () {
         extra_fs.close();
     });
-    std::string not_cache_fileds_str((std::istreambuf_iterator<char>(extra_fs)), std::istreambuf_iterator<char>());
+    std::string file_str((std::istreambuf_iterator<char>(extra_fs)), std::istreambuf_iterator<char>());
+    std::string not_cache_fileds_str = file_str;
+    std::vector<std::string> vecs;
+    vecs.reserve(2);
+    boost::split(vecs, file_str, boost::is_any_of(";"));
+    if (vecs.size() == 2) {
+        try {
+            _train_vec_size = std::stoi(vecs[1]);
+            not_cache_fileds_str = vecs[0];
+        } catch (...) {
+            DB_WARNING("Invalid _train_vec_size: %s", vecs[1].c_str());
+            return -1;
+        }
+    } 
     std::vector<std::string> vec;
     vec.reserve(8);
     boost::split(vec, not_cache_fileds_str, boost::is_any_of(","));
@@ -1976,8 +2211,8 @@ int VectorIndex::read_not_cache_fields_from_file(SmartFaissIndex faiss_index, co
             return -1;
         }
     }
-    DB_WARNING("succ read_not_cache_fields_from_file, need_not_cache_fields: size: %lu, str: %s", 
-                faiss_index->need_not_cache_fields.size(), not_cache_fileds_str.c_str());
+    DB_WARNING("succ read_not_cache_fields_from_file, _train_vec_size: %ld, need_not_cache_fields: size: %lu, str: %s", 
+                _train_vec_size, faiss_index->need_not_cache_fields.size(), file_str.c_str());
     return 0;
 }
 
@@ -2055,6 +2290,8 @@ int VectorIndex::write_not_cache_fields_to_file(SmartFaissIndex faiss_index, con
     if (!not_cache_fields_str.empty()) {
         not_cache_fields_str.pop_back();
     }
+    // 减少文件数, 上次train向量数复用
+    not_cache_fields_str += ";" + std::to_string(_train_vec_size);
     extra_fs << not_cache_fields_str;
     DB_WARNING("success write_not_cache_fields_to_file, file_name: %s, not_cache_fields_str: %s", 
                 full_file_name.c_str(), not_cache_fields_str.c_str());

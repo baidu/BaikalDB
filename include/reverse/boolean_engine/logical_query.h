@@ -45,9 +45,15 @@ template <typename Schema>
 class LogicalQuery {
 public:
     typedef typename Schema::Parser Parser;
-    LogicalQuery(Schema *schema) : _schema(schema) {}
+    using ReverseListSptr = typename ReverseIndex<Schema>::ReverseListSptr;
+    using ReverseList = typename ReverseIndex<Schema>::ReverseList;
+
+    LogicalQuery(Schema *schema, myrocksdb::Transaction* txn, bool is_fast = false)
+            : _schema(schema), _txn(txn), _is_fast(is_fast) {
+        _rocksdb = RocksWrapper::get_instance();
+    }
     ~LogicalQuery(){}
-    BooleanExecutor* create_executor();  
+    BooleanExecutor* create_executor();
     ExecutorNode _root;
 private:
     BooleanExecutor* parse_executor_node(const ExecutorNode& node);
@@ -55,7 +61,18 @@ private:
     BooleanExecutor* parse_op_node(const ExecutorNode& node);
     void and_or_add_subnode(const ExecutorNode&, OperatorBooleanExecutor*);
     void weight_add_subnode(const ExecutorNode&, OperatorBooleanExecutor*);
+    int _multi_get_reverse_list_two(
+        std::vector<ReverseListSptr>& list_new_ptrs,
+        std::vector<ReverseListSptr>& list_old_ptrs);
+
+    // input and ouput are both stored in _delay_init_context
+    int _multi_get_level_reverse_list(uint8_t level, std::vector<ReverseListSptr>& list_ptrs);
+
     Schema *_schema;
+    bool _is_fast;
+    RocksWrapper* _rocksdb;
+    myrocksdb::Transaction* _txn;
+    std::shared_ptr<ReverseDelayInitContext<Schema>> _delay_init_context = nullptr;
 };
 
 } // namespace logical_query

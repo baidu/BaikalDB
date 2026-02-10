@@ -131,8 +131,10 @@ arrow::Status RocksdbBaseReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* o
     _read_times++;
     if (_is_finish) {
         out->reset();
-        DB_NOTICE("read base rocksdb is finish, region_id: %ld, need_index[%ld, %ld], read times: %d, total rows: %d, cost: %ld", 
-            _options.region_id, _options.start_index, _options.end_index, _read_times, _total_row_nums, _cost.get_time());
+        DB_NOTICE("read base rocksdb is finish, region_id: %ld, need_index[%ld, %ld], "
+            "read times: %d, total rows: %d, cost: %ld", 
+            _options.region_id, _options.start_index, _options.end_index, 
+            _read_times, _total_row_nums, _cost.get_time());
         return arrow::Status::OK();
     }
     std::string prefix;
@@ -168,8 +170,10 @@ arrow::Status RocksdbBaseReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* o
 
     if (_column_record->size() == 0) {
         out->reset();
-        DB_NOTICE("read base rocksdb is finish, region_id: %ld, need_index[%ld, %ld], read times: %d, total rows: %d, cost: %ld", 
-            _options.region_id, _options.start_index, _options.end_index, _read_times, _total_row_nums, _cost.get_time());
+        DB_NOTICE("read base rocksdb is finish, region_id: %ld, need_index[%ld, %ld], "
+            "read times: %d, total rows: %d, cost: %ld", 
+            _options.region_id, _options.start_index, _options.end_index, 
+            _read_times, _total_row_nums, _cost.get_time());
         return arrow::Status::OK();
     }
 
@@ -191,14 +195,12 @@ int RaftLogReader::init() {
         return -1;
     }
     TimeCost cost;
-    std::string log_entry;
     MutTableKey log_data_key;
     log_data_key.append_i64(_options.region_id).append_u8(MyRaftLogStorage::LOG_DATA_IDENTIFY).append_i64(_options.start_index);
     MutTableKey prefix;
     MutTableKey end;
     prefix.append_i64(_options.region_id).append_u8(MyRaftLogStorage::LOG_DATA_IDENTIFY);
     end.append_i64(_options.region_id).append_u8(MyRaftLogStorage::LOG_DATA_IDENTIFY).append_i64(_options.end_index + 1);
-    std::string log_value;
     rocksdb::ReadOptions options;
     rocksdb::Slice upper_bound_slice = end.data();
     options.iterate_upper_bound = &upper_bound_slice;
@@ -211,14 +213,17 @@ int RaftLogReader::init() {
     }
     std::unique_ptr<rocksdb::Iterator> iter(iter_ptr);
     iter->Seek(log_data_key.data());
+    RocksdbVars::get_instance()->raft_log_scan_times_count << 1;
     for (; iter->Valid(); iter->Next()) {
         if (!iter->key().starts_with(prefix.data())) {
-            DB_WARNING("read end info, region_id: %ld, key:%s", _options.region_id, iter->key().ToString(true).c_str());
+            DB_WARNING("read end info, region_id: %ld, key:%s", 
+                _options.region_id, iter->key().ToString(true).c_str());
             return -1;
         }
         int64_t log_index = TableKey(iter->key()).extract_i64(sizeof(int64_t) + 1);
         if (log_index > _options.end_index) {
-            DB_WARNING("region_id:%ld, log_index:%ld, end_log_index:%ld", _options.region_id, log_index, _options.end_index);
+            DB_WARNING("region_id:%ld, log_index:%ld, end_log_index:%ld", 
+                _options.region_id, log_index, _options.end_index);
             break;
         }
 
@@ -235,7 +240,8 @@ int RaftLogReader::init() {
         value_slice.remove_prefix(MyRaftLogStorage::LOG_HEAD_SIZE); 
         if (head.type != braft::ENTRY_TYPE_DATA) {
             ++_skip_count;
-            DB_WARNING("log entry is not data, region_id: %ld head.type: %d, raft index: %ld", _options.region_id, head.type, log_index);
+            DB_WARNING("log entry is not data, region_id: %ld head.type: %d, raft index: %ld", 
+                _options.region_id, head.type, log_index);
             continue;
         }
 
@@ -245,6 +251,12 @@ int RaftLogReader::init() {
             return -1;
         }
 
+        int64_t txn_id = 0;
+        bool optimize_1pc = false;
+        if (request.txn_infos_size() > 0) {
+            txn_id = request.txn_infos(0).txn_id();
+            optimize_1pc = request.txn_infos(0).optimize_1pc();
+        }
         if (request.op_type() == pb::OP_KV_BATCH) {
             auto s = MetaWriter::get_instance()->get_skip_watt_stats_version(_options.region_id, log_index);
             if (s.ok()) {
@@ -253,8 +265,43 @@ int RaftLogReader::init() {
                 // 找到说明已经这个点被跳过
                 continue;
             }
+            if (txn_id != 0) {
+                insert(txn_id, log_index, request);
+                continue;
+            } else {
+                insert(txn_id, log_index, request);
+                commit(txn_id, log_index);
+            }
+        } else if (request.op_type() == pb::OP_PREPARE) {
+            if (optimize_1pc) {
+                commit(txn_id, log_index);
+            } else {
+                continue;
+            }
+        } else if (request.op_type() == pb::OP_COMMIT) {
+            commit(txn_id, log_index);
+        } else if (request.op_type() == pb::OP_ROLLBACK) {
+            rollback(txn_id, log_index);
+            continue;
+        } else if (request.op_type() == pb::OP_PARTIAL_ROLLBACK) {
+            // TODO: 暂时不处理partial rollback
+            DB_COLUMN_FATAL("column read raft log is partial rollback, region_id: %ld", _options.region_id);
+            continue;
+        } else {
+            DB_WARNING("column read raft log is not kv batch, region_id: %ld, op_type: %s", 
+                _options.region_id, pb::OpType_Name(request.op_type()).c_str());
+            continue;
+        }
+
+        std::map<int64_t, pb::StoreReq> log_index_req_map;
+        ret = get(txn_id, log_index_req_map);
+        if (ret < 0) {
+            DB_COLUMN_FATAL("get raft log fail, region_id: %ld", _options.region_id);
+            return -1;
+        }
+        for (const auto& iter : log_index_req_map) {
             int idx = 0;
-            for (auto& kv_op : request.kv_ops()) {
+            for (auto& kv_op : iter.second.kv_ops()) {
                 int ret = 0;
                 pb::OpType op_type = kv_op.op_type();
                 int prefix_len = 2 * sizeof(int64_t);
@@ -268,13 +315,13 @@ int RaftLogReader::init() {
                 key.remove_prefix(prefix_len);
                 if (op_type == pb::OP_PUT_KV) {
                     ++_put_count;
-                    ret = row2col(key, kv_op.value(), COLUMN_KEY_PUT, log_index, idx++);
+                    ret = row2col(key, kv_op.value(), COLUMN_KEY_PUT, iter.first, idx++);
                 } else if (op_type == pb::OP_MERGE_KV) {
                     ++_merge_count;
-                    ret = row2col(key, kv_op.value(), COLUMN_KEY_MERGE, log_index, idx++);
+                    ret = row2col(key, kv_op.value(), COLUMN_KEY_MERGE, iter.first, idx++);
                 } else {
                     ++_delete_count;
-                    ret = row2col(key, kv_op.value(), COLUMN_KEY_DELETE, log_index, idx++);
+                    ret = row2col(key, kv_op.value(), COLUMN_KEY_DELETE, iter.first, idx++);
                 }
                 if (ret < 0) {
                     DB_FATAL("row2col fail, region_id: %ld", _options.region_id);
@@ -291,7 +338,7 @@ int RaftLogReader::init() {
                 return -1;
             }
             _batchs.push_back(out);
-            if ( _total_row_nums >= FLAGS_column_minor_compact_read_raft_rows) {
+            if (_total_row_nums >= FLAGS_column_minor_compact_read_raft_rows) {
                 break;
             }
         }
@@ -309,13 +356,75 @@ int RaftLogReader::init() {
 
     if (_first_index != _options.start_index && _total_row_nums > 0) {
         // 可能丢数据，报警
-        DB_COLUMN_FATAL("column read raft log is not start index, region_id: %ld, start_index: %ld, first_index: %ld", _options.region_id, _options.start_index, _first_index);
+        DB_COLUMN_FATAL("column read raft log is not start index, region_id: %ld, start_index: %ld, first_index: %ld", 
+            _options.region_id, _options.start_index, _first_index);
     }
 
-    DB_NOTICE("read raft log is finish, region_id: %ld, need_index[%ld, %ld], read_index[%ld, %ld], total rows: %d, cost: %ld, skip_count: %ld", 
-            _options.region_id, _options.start_index, _options.end_index, _first_index, _last_index, _total_row_nums, cost.get_time(), _skip_count);
+    DB_NOTICE("read raft log is finish, region_id: %ld, need_index[%ld, %ld], read_index[%ld, %ld], "
+            "total rows: %d, cost: %ld, skip_count: %ld", 
+            _options.region_id, _options.start_index, _options.end_index, 
+            _first_index, _last_index, _total_row_nums, cost.get_time(), _skip_count);
 
     _init = true;
+    return 0;
+}
+
+int RaftLogReader::get_raft_log(int64_t start_index, int64_t end_index, uint64_t txn_id, std::map<int64_t, pb::StoreReq>& pre_reqs) {
+    TimeCost cost;
+    MutTableKey log_data_key;
+    log_data_key.append_i64(_options.region_id).append_u8(MyRaftLogStorage::LOG_DATA_IDENTIFY).append_i64(start_index);
+    MutTableKey prefix;
+    MutTableKey end;
+    prefix.append_i64(_options.region_id).append_u8(MyRaftLogStorage::LOG_DATA_IDENTIFY);
+    end.append_i64(_options.region_id).append_u8(MyRaftLogStorage::LOG_DATA_IDENTIFY).append_i64(end_index + 1);
+    rocksdb::ReadOptions options;
+    rocksdb::Slice upper_bound_slice = end.data();
+    options.iterate_upper_bound = &upper_bound_slice;
+    options.prefix_same_as_start = true;
+    options.total_order_seek = false;
+    options.fill_cache = false;
+    auto iter_ptr = RocksWrapper::get_instance()->new_iterator(options, RocksWrapper::RAFT_LOG_CF);
+    if (iter_ptr == nullptr) {
+        return -1;
+    }
+    std::unique_ptr<rocksdb::Iterator> iter(iter_ptr);
+    iter->Seek(log_data_key.data());
+    RocksdbVars::get_instance()->raft_log_scan_times_count << 1;
+    for (; iter->Valid(); iter->Next()) {
+        if (!iter->key().starts_with(prefix.data())) {
+            DB_WARNING("read end info, region_id: %ld, key:%s", 
+                _options.region_id, iter->key().ToString(true).c_str());
+            return -1;
+        }
+        int64_t log_index = TableKey(iter->key()).extract_i64(sizeof(int64_t) + 1);
+        if (log_index > end_index) {
+            DB_WARNING("region_id:%ld, log_index:%ld, end_log_index:%ld", 
+                _options.region_id, log_index, end_index);
+            break;
+        }
+
+        rocksdb::Slice value_slice(iter->value());
+        LogHead head(value_slice);
+        value_slice.remove_prefix(MyRaftLogStorage::LOG_HEAD_SIZE); 
+        if (head.type != braft::ENTRY_TYPE_DATA) {
+            DB_WARNING("log entry is not data, region_id: %ld head.type: %d, raft index: %ld", 
+                _options.region_id, head.type, log_index);
+            continue;
+        }
+
+        pb::StoreReq request;
+        if (!request.ParseFromArray(value_slice.data(), value_slice.size())) {
+            DB_FATAL("Fail to parse request fail, region_id: %ld", _options.region_id);
+            return -1;
+        }
+
+        if (request.txn_infos_size() > 0 && txn_id == request.txn_infos(0).txn_id() && request.op_type() == pb::OP_KV_BATCH) {
+            pre_reqs[log_index].Swap(&request);
+            DB_NOTICE("find pre request, region_id: %ld, log_index: %ld, txn_id: %lu", 
+                _options.region_id, log_index, txn_id);
+        }
+    }
+
     return 0;
 }
 
@@ -336,4 +445,109 @@ arrow::Status RaftLogReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* out) 
     return arrow::Status::OK();
 }
 
+void RaftLogReader::commit(int64_t txn_id, int64_t raft_index) {
+    if (txn_id != 0) {
+        _txn_ids.emplace_back(txn_id);
+    }
+
+    auto iter = _raft_log_cache->txn_id_raft_log_map.find(txn_id);
+    if (iter != _raft_log_cache->txn_id_raft_log_map.end()) {
+        iter->second->commit_index = raft_index;
+    } else {
+        DB_COLUMN_FATAL("txn_id not exist, region_id: %ld, txn_id: %ld, raft_index: %ld", 
+            _region_id, txn_id, raft_index);
+        auto logiter = std::make_shared<RaftLogCacheIter>();
+        logiter->commit_index = raft_index;
+        _raft_log_cache->txn_id_raft_log_map[txn_id] = logiter;
+    }
+    _commited_txn_id = txn_id;
+}
+
+void RaftLogReader::rollback(int64_t txn_id, int64_t raft_index) {
+    if (txn_id != 0) {
+        _txn_ids.emplace_back(txn_id);
+    }
+
+    auto iter = _raft_log_cache->txn_id_raft_log_map.find(txn_id);
+    if (iter != _raft_log_cache->txn_id_raft_log_map.end()) {
+        _raft_log_cache->txn_id_raft_log_map.erase(iter);
+        DB_WARNING("txn rollbacked, region_id: %ld, txn_id: %ld, raft_index: %ld", 
+            _region_id, txn_id, raft_index);
+    } else {
+        DB_COLUMN_FATAL("txn_id not exist, region_id: %ld, txn_id: %ld, raft_index: %ld", 
+            _region_id, txn_id, raft_index);
+    }
+}
+
+void RaftLogReader::insert(int64_t txn_id, int64_t raft_index, pb::StoreReq& request) {
+    auto iter = _raft_log_cache->txn_id_raft_log_map.find(txn_id);
+    if (iter != _raft_log_cache->txn_id_raft_log_map.end()) {
+        iter->second->log_index_req_map[raft_index].Swap(&request);
+        return;
+    }
+
+    auto logiter = std::make_shared<RaftLogCacheIter>();
+    logiter->log_index_req_map[raft_index].Swap(&request);
+    _raft_log_cache->txn_id_raft_log_map[txn_id] = logiter;
+}
+
+int RaftLogReader::get(int64_t txn_id, std::map<int64_t, pb::StoreReq>& log_index_req_map) {
+    if (txn_id != _commited_txn_id) {
+        DB_COLUMN_FATAL("txn_id not commited, region_id: %ld, txn_id: %ld, commited_txn_id: %ld", 
+            _region_id, txn_id, _commited_txn_id);
+        return -1;
+    }
+
+    auto iter = _raft_log_cache->txn_id_raft_log_map.find(txn_id);
+    if (iter == _raft_log_cache->txn_id_raft_log_map.end()) {
+        DB_COLUMN_FATAL("txn_id not exist, region_id: %ld, txn_id: %ld", _region_id, txn_id);
+        return -1;
+    }
+
+    if (txn_id == 0) {
+        log_index_req_map.swap(iter->second->log_index_req_map);
+        _raft_log_cache->txn_id_raft_log_map.erase(iter);
+        return 0;
+    }
+
+    int64_t txn_begin_index = -1;
+    if (iter->second->log_index_req_map.empty()) {
+        txn_begin_index = iter->second->commit_index;
+    } else {
+        txn_begin_index = iter->second->log_index_req_map.begin()->first;
+    }
+    
+    int64_t begin_index = MetaWriter::get_instance()->read_meta_begin_index(_region_id, txn_id);
+    if (begin_index < 0) {
+        DB_COLUMN_FATAL("read begin index failed, region_id: %ld, txn_id: %ld, begin_index: %ld", 
+            _region_id, txn_id, begin_index);
+        return -1;
+    }
+
+    if (begin_index < txn_begin_index) {
+        DB_WARNING("begin index not match, region_id: %ld, txn_id: %ld, begin_index: %ld, txn_begin_index: %ld", 
+            _region_id, txn_id, begin_index, txn_begin_index);
+        std::map<int64_t, pb::StoreReq> pre_reqs;
+        int ret = get_raft_log(begin_index, txn_begin_index, txn_id, pre_reqs);
+        if (ret < 0) {
+            DB_COLUMN_FATAL("get raft log failed, region_id: %ld, txn_id: %ld", _region_id, txn_id);
+            return -1;
+        }
+        for (auto& req : pre_reqs) {
+            iter->second->log_index_req_map[req.first].Swap(&req.second);
+        }
+    }
+
+    log_index_req_map.swap(iter->second->log_index_req_map);
+    _raft_log_cache->txn_id_raft_log_map.erase(iter);
+
+    std::ostringstream os;
+    for (auto& req : log_index_req_map) {
+        os << req.first << ",";
+    }
+
+    DB_WARNING("region_id: %ld, txn_id: %ld, get success req_size: %ld, raft_index: %s", 
+        _region_id, txn_id, log_index_req_map.size(), os.str().c_str());
+    return 0;
+}
 } // namespace baikaldb

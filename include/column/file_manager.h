@@ -187,7 +187,7 @@ public:
 
         // 获取每个parquet文件中符合条件的rowgroup和rowranges
     int get_qualified_rowgroup_and_rowranges(
-            const std::vector<pb::PossibleIndex::Range>& key_ranges,
+            const pb::PossibleIndex& possible_index,
             std::vector<int>& rowgroup_indices,
             std::vector<std::vector<std::pair<int64_t, int64_t>>>& rowranges);
 
@@ -229,7 +229,8 @@ public:
 
     ::arrow::Status GetRecordBatchReader(std::unique_ptr<::arrow::RecordBatchReader>* out);
     static bool check_interval_overlapped(
-            const pb::PossibleIndex::Range& index_range, const std::string& file_start_key, const std::string& file_end_key);
+            const pb::PossibleIndex::Range& index_range, bool is_eq, bool is_left_open, bool is_right_open, 
+            const std::string& file_start_key, const std::string& file_end_key);
 
 private:
     std::shared_ptr<ColumnFileInfo> _file_info;
@@ -243,22 +244,19 @@ private:
 };
 
 struct ParquetFileReaderOptions {
-    bool                                need_order_info = true;
-    int64_t                             raftindex   = 0;
-    std::shared_ptr<ColumnSchemaInfo>   schema_info = nullptr;
-    std::shared_ptr<ColumnFileInfo>     file_info   = nullptr;
+    pb::PossibleIndex* pos_index = nullptr;
+    std::map<std::string, FieldInfo>    lower_short_name_fields;
+    std::shared_ptr<arrow::Schema>      schema = nullptr; 
 };
 
 class ParquetFileReader : public ::arrow::RecordBatchReader {
 public:
-    ParquetFileReader(ParquetFileReaderOptions& options) : _options(options) {
-        _parquet_file = std::make_shared<ParquetFile>(_options.file_info);
-    }
+    ParquetFileReader(ParquetFileReaderOptions& options, std::shared_ptr<ParquetFile> file) : _options(options), _parquet_file(file) { }
     virtual ~ParquetFileReader() { }
 
     int init();
 
-    std::shared_ptr<arrow::Schema> schema() const override { return nullptr; }
+    std::shared_ptr<arrow::Schema> schema() const override { return _options.schema; }
 
     virtual ::arrow::Status ReadNext(std::shared_ptr<::arrow::RecordBatch>* batch) override;
 private:
@@ -266,6 +264,9 @@ private:
     std::shared_ptr<ParquetFile> _parquet_file;
     std::unique_ptr<::arrow::RecordBatchReader> _reader;
     bool _init = false;
+    int64_t _raftindex = 0;
+    std::shared_ptr<ReadContents> _read_contents = nullptr;
+    
 };
 
 class ParquetFileManager {
@@ -273,6 +274,11 @@ public:
     static ParquetFileManager* get_instance() {
         static ParquetFileManager instance;
         return &instance;
+    }
+
+    void close() {
+        std::unique_lock<std::mutex> l(_mutex);
+        _lru_cache.clear();
     }
 
     bool link_file(const std::string& old_path, const std::string& new_path) {
@@ -335,7 +341,7 @@ public:
     int load_snapshot(bool restart);
     int pick_minor_compact_file(int64_t applied_index, int64_t& start_version);
     int pick_major_compact_file(std::vector<std::shared_ptr<ColumnFileInfo>>& file_infos);
-    int pick_base_compact_file(std::vector<std::shared_ptr<ColumnFileInfo>>& file_infos);
+    int pick_base_compact_file(std::vector<std::shared_ptr<ColumnFileInfo>>& file_infos, bool only_read_base);
     int finish_minor_compact(const std::shared_ptr<ColumnFileInfo>& new_file, int64_t last_max_version);
     int finish_major_compact(const std::vector<std::shared_ptr<ColumnFileInfo>>& old_files, 
                             const std::vector<std::shared_ptr<ColumnFileInfo>>& new_files, bool is_base);

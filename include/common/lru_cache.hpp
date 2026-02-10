@@ -97,6 +97,23 @@ int Cache<ItemKey, ItemType, HashType>::del(const ItemKey& key) {
     return 0;
 }
 
+template <typename ItemKey, typename ItemType, typename HashType>
+int Cache<ItemKey, ItemType, HashType>::clear() {
+    std::lock_guard<std::mutex> lock(_mutex);
+    std::vector<LruNode<ItemKey, ItemType>*> nodes;
+    nodes.reserve(_lru_map.size());
+    for (auto& pair : _lru_map) {
+        LruNode<ItemKey, ItemType>* node = pair.second;
+        node->RemoveFromList();
+        nodes.emplace_back(node);
+    }
+    _lru_map.clear();
+    for (auto& node : nodes) {
+        delete node;
+    }
+    return 0;
+}
+
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

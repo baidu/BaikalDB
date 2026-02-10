@@ -60,7 +60,7 @@
 #include "concurrency.h"
 #include "backup.h"
 #include "file_manager.h"
-#include "region_column.h"
+#include "dml_node.h"
 
 #ifdef BAIDU_INTERNAL
 #else
@@ -128,6 +128,41 @@ struct BinlogDesc {
     int64_t txn_id;
     BinlogType binlog_type;
     TimeCost time;
+};
+
+struct BinlogReadFields {
+    FieldInfo* ts_field = nullptr;
+    FieldInfo* binlog_type_field = nullptr;
+    FieldInfo* start_ts_field = nullptr;
+    FieldInfo* binlog_row_cnt_field = nullptr;
+    int64_t get_ts(SmartRecord& record) {
+        if (ts_field != nullptr) {
+            auto f = record->get_field_by_idx(ts_field->pb_idx);
+            return record->get_value(f).get_numberic<int64_t>();
+        }
+        return 0;
+    }
+    BinlogType get_binlog_type(SmartRecord& record) {
+        if (binlog_type_field != nullptr) {
+            auto f = record->get_field_by_idx(binlog_type_field->pb_idx);
+            return  static_cast<BinlogType>(record->get_value(f).get_numberic<int64_t>());
+        }
+        return FAKE_BINLOG;
+    }
+    int64_t get_start_ts(SmartRecord& record) {
+        if (start_ts_field != nullptr) {
+            auto f = record->get_field_by_idx(start_ts_field->pb_idx);
+            return record->get_value(f).get_numberic<int64_t>();
+        }
+        return 0;
+    }
+    int64_t get_binlog_row_cnt(SmartRecord& record) {
+        if (binlog_row_cnt_field != nullptr) {
+            auto f = record->get_field_by_idx(binlog_row_cnt_field->pb_idx);
+            return record->get_value(f).get_numberic<int64_t>();
+        }
+        return 0;
+    }
 };
 
 struct ApproximateInfo {
@@ -686,7 +721,7 @@ public:
     void reverse_merge_doing_ddl();
     // other thread
     void ttl_remove_expired_data();
-    void vector_schema_change();
+    void vector_schema_change(std::unordered_map<int64_t, pb::IndexState>& vector_indexs);
 
     int restore_faiss(const std::string& path, const std::vector<std::string>& files);
 
@@ -884,10 +919,10 @@ public:
         std::lock_guard<std::mutex> lock(_region_lock);
         return _region_info.used_size();
     }
-    int64_t get_table_id() {
+    int64_t get_table_id() const {
         return _table_id;
     }
-    int64_t get_global_index_id() {
+    int64_t get_global_index_id() const {
         return _global_index_id;
     }
     bool is_leader() {
@@ -1070,24 +1105,18 @@ public:
         _txn_pool.clear_transactions(this);
         _multi_thread_cond.decrease_signal();
     }
-    void update_ttl_info() {
-        if (_shutdown || !_init_success || get_version() <= 0) {
-            return;
-        }
 
-        TTLInfo ttl_info = _factory->get_ttl_duration(get_table_id());
-        if (ttl_info.ttl_duration_s > 0 && ttl_info.online_ttl_expire_time_us > 0) {
-            // online TTL 
-            if (ttl_info.online_ttl_expire_time_us != _online_ttl_base_expire_time_us) {
-                _online_ttl_base_expire_time_us = ttl_info.online_ttl_expire_time_us;
-                _use_ttl = true;
-                _txn_pool.update_ttl_info(_use_ttl, _online_ttl_base_expire_time_us);
-                DB_WARNING("table_id: %ld, region_id: %ld, ttl_duration_s: %ld, online_ttl_expire_time_us: %ld, %s", 
-                    get_table_id(), _region_id, ttl_info.ttl_duration_s, 
-                    ttl_info.online_ttl_expire_time_us, timestamp_to_str(ttl_info.online_ttl_expire_time_us/1000000).c_str());
-            }
-        }
-    }
+    // no side effect
+    int get_ttl_timestamp(IndexInfo &index_info,
+                          const rocksdb::Slice &rocksdb_key,
+                          const rocksdb::Slice &rocksdb_value,
+                          const SmartRecord &record_template,
+                          uint64_t &ttl_timestamp) const;
+
+    int update_ttl_info();
+
+    SmartState create_ttl_delete_runtime_status();
+
     //blacklist中新增的sign全部cancel
     void cancel_all_blacklist_sign() {
         if (_shutdown || !_init_success || get_version() <= 0) {
@@ -1190,7 +1219,7 @@ public:
 
     int add_reverse_index(int64_t table_id, const std::set<int64_t>& index_ids);
 
-    void process_download_sst(brpc::Controller* controller, 
+    void process_download_sst(brpc::Controller* controller,
         std::vector<std::string>& req_vec, SstBackupType type);
     void process_upload_sst(brpc::Controller* controller, bool is_ingest);
 
@@ -1330,7 +1359,7 @@ public:
     void column_on_snapshot_save(braft::SnapshotWriter* writer, braft::Closure* done);
     void column_snapshot_save();
     int column_snapshot_save(const std::string& snapshot_path, std::vector<std::string>& files);
-    int get_column_files(const std::vector<pb::PossibleIndex::Range>& key_ranges, std::vector<std::shared_ptr<ParquetFile>>& files);
+    int get_column_files(const pb::PossibleIndex& pos_index, std::vector<std::shared_ptr<ParquetFile>>& files);
     bool use_column_storage(const pb::Plan& plan, SmartTable table);
     bool use_userid_statis(bool is_eq, const google::protobuf::RepeatedPtrField<pb::PossibleIndex::Range>& key_ranges);
     std::vector<std::shared_ptr<ColumnFileInfo>> column_link_files(const std::vector<ColumnFileMeta>& file_infos, int64_t min_version, int64_t max_version);
@@ -1450,7 +1479,6 @@ private:
     int write_binlog_record(SmartRecord record);
     int write_binlog_value(const std::map<std::string, ExprValue>& field_value_map);
     int64_t binlog_get_int64_val(const std::string& name, const std::map<std::string, ExprValue>& field_value_map);
-    int64_t read_data_cf_oldest_ts();
     bool flash_back_need_read(const pb::StoreReq* request, 
                             const std::map<std::string, ExprValue>& field_value_map,
                             const std::set<std::string>& req_db_tables,
@@ -1458,8 +1486,8 @@ private:
     
     std::string binlog_get_str_val(const std::string& name, const std::map<std::string, ExprValue>& field_value_map);
     
-    void binlog_get_scan_fields(std::map<int32_t, FieldInfo*>& field_ids, std::vector<int32_t>& field_slot, 
-    SmartTable& binlog_table, SmartIndex& binlog_pri);
+    void binlog_get_scan_fields(std::map<int32_t, FieldInfo*>& field_ids, BinlogReadFields& binlog_fields, std::vector<int32_t>& field_slot, 
+    SmartTable& binlog_table, SmartIndex& binlog_pri, bool read_all = true);
     void binlog_get_field_values(std::map<std::string, ExprValue>& field_value_map, SmartRecord& record, SmartTable& binlog_table);
     int binlog_reset_on_snapshot_load_restart();
     
@@ -1512,7 +1540,7 @@ private:
         } else {
             SplitCompactionFilter::get_instance()->set_filter_region_info(
                     _region_id, region_info.end_key(), 
-                    _use_ttl, _online_ttl_base_expire_time_us);
+                    use_normal_ttl(), _online_ttl_base_expire_time_us);
         }
         DB_WARNING("region_id: %ld, start_key: %s, end_key: %s", _region_id, 
             rocksdb::Slice(region_info.start_key()).ToString(true).c_str(), 
@@ -1609,7 +1637,11 @@ private:
         const pb::ExchangeSenderNode& pb_exchange_sender_node, const bool is_merge, const int64_t region_id,
         const ::google::protobuf::RepeatedPtrField<pb::RegionInfo>& region_infos);
 
+    bool need_decode_ttl_field() const { return _ttl_field_type >= TTLFieldType::T_FIELD_KEY; }
+
 private:
+    static constexpr int KEY_PREFIX_LENGTH = sizeof(int64_t) * 2;
+
     //Singleton
     RocksWrapper*       _rocksdb;
     SchemaFactory*      _factory;
@@ -1654,8 +1686,6 @@ private:
     bool                                _restart = false;
     //计算存储分离开关，在store定时任务中更新，避免每次dml都访问schema factory
     bool                                _storage_compute_separate = false;
-    bool                                _use_ttl = false; // online TTL会更新，只会false 变为true
-    int64_t                             _online_ttl_base_expire_time_us = 0; // 存量数据过期时间，仅online TTL的表使用
     std::atomic<bool>                   _need_vector_compact{false}; //split的数据，把vector compact一次
     std::atomic<bool>                   _reverse_remove_range{false}; //split的数据，把拉链过滤一遍, safe reverse index合并
     std::atomic<bool>                   _reverse_unsafe_remove_range{false};//unsafe reverse index合并
@@ -1722,6 +1752,7 @@ private:
     bthread::Mutex  _commit_ts_map_lock;
     bthread::Mutex  _binlog_param_mutex;
     BinlogParam _binlog_param;
+    Cache<int64_t, pb::StoreRes> _binlog_cache;
     // offline binlog, only for binlog_backup_days>0 binlog tables
     bthread::Mutex  _offline_binlog_param_mutex;
     OfflineBinlogParam  _offline_binlog_param;
@@ -1751,12 +1782,44 @@ private:
     bool _ready_for_follower_read = true;
     // 解决零星写时主从延迟高,有写入时每100ms发一条NO OP, 停写5min后不再发NO OP
     NoOpTimer _no_op_timer; 
+    bool _raft_status_error = false;
+
 
     // olap
     std::atomic<pb::OlapRegionStat> _olap_state  {pb::OLAP_ACTIVE};
     ColumnFileManager _column_mgr;
     std::mutex _snapshot_closure_mutex;
     std::unique_ptr<ColumnSnapshotClosure> _snapshot_closure = nullptr; // 使用
+
+    // ttl 相关
+    enum class TTLFieldType {
+        // 请勿更改顺序，部分判断依赖于大小比较
+        T_NON_TTL = 0,          // region 没有ttl
+        T_NORMAL_TTL = 1,       // 常规ttl，时间戳在value前缀里，为过期时间
+        T_FIELD_KEY = 2,        // 指定字段ttl, 时间戳在索引的field内
+        T_FIELD_PK_VALUE = 3,   // 指定字段ttl, region是主键索引，时间戳在value内
+        T_FIELD_GI_KEY = 4,     // 指定字段ttl, region是全局索引，时间戳在pk_fields内，在rocksdb的key内
+        T_FIELD_GUI_VALUE = 5,  // 指定字段ttl, region是全局唯一索引，时间戳在pk_fields内，在value内
+    };
+
+    bool is_field_ttl() const {
+        return _ttl_field_type > TTLFieldType::T_NORMAL_TTL;
+    }
+
+    bool use_normal_ttl() const {
+        return _ttl_field_type == TTLFieldType::T_NORMAL_TTL;
+    }
+
+    bool use_ttl() const {
+        return _ttl_field_type > TTLFieldType::T_NON_TTL;
+    }
+
+    TTLFieldType                _ttl_field_type = TTLFieldType::T_NON_TTL;
+    int64_t                     _online_ttl_base_expire_time_us = 0; // 存量数据过期时间，仅online TTL的表使用
+    int64_t                     _ttl_duration_s;
+    std::map<int, FieldInfo*>   _decode_ttl_field_map; // field ttl时只有一个ttl字段，其他情况下为空
+    std::shared_ptr<FieldInfo>  _ttl_field = nullptr;
+    bthread::Mutex              _ttl_mutex;
 
     //NOT_LEADER分类报警
     struct NotLeaderAlarm {

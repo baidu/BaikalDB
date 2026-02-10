@@ -373,7 +373,6 @@ void TSOStateMachine::update_timestamp() {
 }
 
 void TSOStateMachine::on_leader_start() {
-    start_check_bns();
     DB_WARNING("tso leader start");
     int64_t now = tso::clock_realtime_ms();
     pb::TsoTimestamp current;
@@ -395,6 +394,7 @@ void TSOStateMachine::on_leader_start() {
         DB_WARNING("sync timestamp ok");
         _is_leader.store(true);
         _tso_update_timer.start();
+        start_check_bns();
     };
     Bthread bth;
     bth.run(func);

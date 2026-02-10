@@ -156,6 +156,7 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
                 _topk = std::max(topk, _topk);
                 _separate_value = range.separate_value();
                 _efsearch = std::max(range.efsearch(), _efsearch);
+                _nprobe = std::max(range.nprobe(), _nprobe);
             }
         }
         _vector_index = state->vector_index_map()[_index_id];
@@ -205,6 +206,7 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
         check_memory = true;
     }
     bool has_global_param = false;
+    // 这个兼容性需要长期保留，比如watt基准等很多地方还会使用旧逻辑
     if (pos_index.has_left_field_cnt() || pos_index.has_right_field_cnt()) {
         has_global_param = true;
         _is_eq = pos_index.is_eq();
@@ -217,17 +219,13 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
     for (auto& range : pos_index.ranges()) {
         if (!has_global_param) {
             has_global_param = true;
-            if (range.left_key() == range.right_key()) {
-                _is_eq = true;
-            }
             _left_field_cnt = range.left_field_cnt();
             _right_field_cnt = range.right_field_cnt();
             _left_open = range.left_open();
             _right_open = range.right_open();
             _like_prefix = range.like_prefix();
-            if (_is_eq) {
-                _right_field_cnt = _left_field_cnt;
-                _right_open = _left_open;
+            if (range.left_key() == range.right_key() && _left_field_cnt == _right_field_cnt && _left_open == _right_open) {
+                _is_eq = true;
             }
         }
         if (!_is_eq) {
@@ -299,6 +297,7 @@ int RocksdbScanNode::init(const pb::PlanNode& node) {
             return -1;
         }
     } else if (_ddl_work_type == pb::DDL_COLUMN) {
+        // ddl delete和ddl update的区别是update slot是否为空
         for (auto& slot : node.derive_node().scan_node().column_ddl_info().update_slots()) {
             _update_slots.emplace_back(slot);
         }
@@ -332,6 +331,7 @@ int RocksdbScanNode::init(const pb::PlanNode& node) {
                 return ret;
             }
         }
+        _is_ddl_update = !_update_exprs.empty();
     }
     return 0;
 }
@@ -645,13 +645,16 @@ int RocksdbScanNode::open(RuntimeState* state) {
     auto reverse_index_map = state->reverse_index_map();
     //DB_WARNING_STATE(state, "_is_covering_index:%d", _is_covering_index);
     if (_vector_index != nullptr) {
+        VectorSearchParam search_param;
+        search_param.efsearch = _efsearch;
+        search_param.nprobe = _nprobe;
         int ret = _vector_index->search_vector(txn->get_txn(), 
                                                _separate_value,
                                                _pri_info, 
                                                _table_info, 
                                                _vector_word, 
                                                _topk,
-                                               _efsearch,
+                                               search_param,
                                                _left_records, 
                                                _vector_filter_conjuncts,
                                                _scan_conjuncts,
@@ -666,7 +669,7 @@ int RocksdbScanNode::open(RuntimeState* state) {
                 return -1;
             }
         }
-        DB_WARNING("vector_index search, index:%ld, table:%ld, size:%lu", _index_info->id, _table_info->id, _left_records.size());
+        //DB_WARNING("vector_index search, index:%ld, table:%ld, size:%lu", _index_info->id, _table_info->id, _left_records.size());
     } else if (_reverse_infos.size() > 1) {
         //TODO 为不影响原流程暂时保留，后续删除。
         for (auto& info : _reverse_infos) {
@@ -688,7 +691,7 @@ int RocksdbScanNode::open(RuntimeState* state) {
                 _m_index.search(txn->get_txn(), _pri_info, _table_info,
                     reverse_index_map, !FLAGS_reverse_seek_first_level, 
                     _pb_node.derive_node().scan_node().fulltext_index());
-                //DB_FATAL("fulltext: %s", _pb_node.derive_node().scan_node().fulltext_index().DebugString().c_str());
+                // DB_FATAL("fulltext: %s", _pb_node.derive_node().scan_node().fulltext_index().DebugString().c_str());
             } else {
                 DB_FATAL("fulltext storage type error");
                 return -1;
@@ -1148,11 +1151,12 @@ int RocksdbScanNode::column_ddl_work(RuntimeState* state, MemRow* row) {
         record->set_value(record->get_field_by_tag(slot.field_id()),
                 expr->get_value(row).cast_to(slot.slot_type()));
     }
-
-    ret = txn->put_primary(_region_id, *_pri_info, record, nullptr);
-    if (ret < 0) {
-        DB_WARNING_STATE(state, "put table:%ld fail:%d", _table_id, ret);
-        return -1;
+    if (is_ddl_update()) {
+        ret = txn->put_primary(_region_id, *_pri_info, record, nullptr);
+        if (ret < 0) {
+            DB_WARNING_STATE(state, "put table:%ld fail:%d", _table_id, ret);
+            return -1;
+        }
     }
     return 0;
 }
@@ -1225,6 +1229,45 @@ int RocksdbScanNode::index_ddl_work(RuntimeState* state, MemRow* row) {
             DB_WARNING("DDL_LOG record [%s] insert_reverse failed[%d], index_id: %ld.", 
                 record->to_string().c_str(), ret, _ddl_index_info->id);
             return -1;
+        }
+        return 0;
+    }
+    if (_ddl_index_info->type == pb::I_VECTOR) {
+        int64_t index_id = _ddl_index_info->id;
+        auto& vector_index_map = state->vector_index_map();
+        if (vector_index_map.count(index_id) == 0) {
+            DB_WARNING_STATE(state, "DDL_LOG vector ddl info not found index_id:%ld.", index_id);
+            return -1;
+        }
+        if (_ddl_index_info->fields.size() != 1 && _ddl_index_info->fields.size() != 2) {
+            DB_WARNING_STATE(state, "DDL_LOG vector ddl fields size error:%ld.", _ddl_index_info->fields.size());
+            return -1;
+        }
+        MutTableKey pk_key;
+        ret = record->encode_key(*_pri_info, pk_key, -1, false, false);
+        if (ret < 0) {
+            DB_WARNING_STATE(state, "DDL_LOG record [%s] encode key failed[%d].", record->to_string().c_str(), ret);
+            return -1;
+        }
+        int field_idx = 0;
+        if (_ddl_index_info->fields.size() > 1) {
+            field_idx = 1;
+        }
+        auto field = record->get_field_by_idx(_ddl_index_info->fields[field_idx].pb_idx);
+        if (record->is_null(field)) {
+            return 0;
+        }
+        std::string word;
+        ret = record->get_reverse_word(*_ddl_index_info, word);
+        if (ret < 0) {
+            DB_WARNING_STATE(state, "index_info to word fail for index_id: %ld", index_id);
+            return ret;
+        }
+        //DB_NOTICE("word:%s", str_to_hex(word).c_str());
+        ret = vector_index_map[index_id]->insert_vector(txn, word, pk_key.data(), record);
+        if (ret < 0) {
+            DB_WARNING_STATE(state, "vector_index fail insert, index_id: %ld", index_id);
+            return ret;
         }
         return 0;
     }
@@ -1417,15 +1460,24 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
                         }
                     }
                 }
+                bool need_return = true;
                 if (_lock == pb::LOCK_GET &&
-                    (_ddl_work_type == pb::DDL_COLUMN || _ddl_work_type == pb::DDL_LOCAL_INDEX)) {
+                    (is_ddl_update() || _ddl_work_type == pb::DDL_LOCAL_INDEX)) {
                         // local index or column返回最大一条数据
                         batch->replace_row(std::move(row), 0);
+                } else if (is_ddl_delete()) {
+                    if (need_copy(row.get(), _scan_conjuncts)) {
+                        batch->move_row(std::move(row));
+                    } else {
+                        need_return = false;
+                    }
                 } else {
                     batch->move_row(std::move(row));
                 }
-                ++_num_rows_returned;
-                ++_num_rows_returned_by_range;
+                if (need_return) {
+                    ++_num_rows_returned;
+                    ++_num_rows_returned_by_range;
+                }
             } else {
                 ret = batch->add_chunk_row();
                 if (ret != 0) {
@@ -1508,15 +1560,24 @@ int RocksdbScanNode::get_next_by_table_seek(RuntimeState* state, RowBatch* batch
                         }
                     }
                 }
+                bool need_return = true;
                 if (_lock == pb::LOCK_GET &&
-                    (_ddl_work_type == pb::DDL_COLUMN || _ddl_work_type == pb::DDL_LOCAL_INDEX)) {
+                    (is_ddl_update() || _ddl_work_type == pb::DDL_LOCAL_INDEX)) {
                         // local index or column返回最大一条数据
                         batch->replace_row(std::move(row), 0);
+                } else if (is_ddl_delete()) {
+                    if (filter == nullptr || filter != nullptr && !filter->test(row_batch.index())) {
+                        batch->move_row(std::move(row));
+                    } else {
+                        need_return = false;
+                    }
                 } else {
                     batch->move_row(std::move(row));
                 }
-                ++_num_rows_returned;
-                ++_num_rows_returned_by_range;
+                if (need_return) {
+                    ++_num_rows_returned;
+                    ++_num_rows_returned_by_range;
+                }
             }
         }
     }

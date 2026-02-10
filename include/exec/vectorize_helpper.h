@@ -19,6 +19,11 @@
 #include <arrow/acero/options.h>
 #include <arrow/compute/cast.h>
 #include <arrow/stl_iterator.h>
+#include <arrow/ipc/writer.h>
+#include <arrow/io/memory.h>
+#include <arrow/ipc/reader.h>
+#include "arrow_function.h"
+#include "arrow_io_excutor.h"
 namespace baikaldb {
 class VectorizeHelpper {
 public:
@@ -80,6 +85,26 @@ public:
                 return nullptr;
             }
             fields.emplace_back(field);
+        }
+        return std::make_shared<arrow::Schema>(fields);
+    }
+
+    static std::shared_ptr<arrow::Schema> get_arrow_schema(const std::vector<const pb::TupleDescriptor*>& tuples) {
+        std::vector<std::shared_ptr<arrow::Field>> fields;
+        fields.reserve(5);
+        for (auto tuple : tuples) {
+            if (tuple == nullptr) {
+                continue;
+            }
+            for (auto& slot : tuple->slots()) {
+                std::string name = std::to_string(slot.tuple_id()) + "_" + std::to_string(slot.slot_id());
+                std::shared_ptr<arrow::Field> field = construct_arrow_field(name, slot.slot_type());
+                if (field == nullptr) {
+                    DB_WARNING("Fail to construct arrow field, name: %s", name.c_str());
+                    return nullptr;
+                }
+                fields.emplace_back(field);
+            }
         }
         return std::make_shared<arrow::Schema>(fields);
     }
@@ -262,8 +287,13 @@ public:
     // in: store 返回的recordbatch
     static int change_arrow_record_batch_schema(std::shared_ptr<arrow::Schema> schema, 
             std::shared_ptr<arrow::RecordBatch> in, std::shared_ptr<arrow::RecordBatch>* out,
-            bool need_cast = false) {
+            bool need_check_memory_limit = false) {
         std::vector<std::shared_ptr<arrow::Array>> columns;
+        arrow::MemoryPool* pool = arrow::default_memory_pool();
+        if (need_check_memory_limit) {
+            pool = GetMemoryPoolForRead();
+        }
+        arrow::compute::ExecContext exec_ctx(pool);
         for (auto& f : schema->fields()) {
             std::shared_ptr<arrow::Array> array = in->GetColumnByName(f->name());
             if (array == nullptr) {
@@ -276,7 +306,7 @@ public:
                     auto get_res = f->metadata()->Get("default_value");
                     if (get_res.status().ok()) {
                         const std::string& default_value = *get_res;
-                        default_array = make_array_from_str(f->type(), default_value, in->num_rows());
+                        default_array = make_array_from_str(f->type(), default_value, in->num_rows(), &exec_ctx);
                         if (default_array == nullptr) {
                             DB_WARNING("Fail to make_array_from_str");
                             return -1;
@@ -294,11 +324,9 @@ public:
                 array = default_array;
                 columns.emplace_back(array);
             } else {
-                if (need_cast && array->type()->id() != f->type()->id()) {
+                if (array->type()->id() != f->type()->id()) {
                     // 整数大类型转小类型，比如int32转int8，需要避免溢出返回错误
-                    ::arrow::compute::CastOptions cast_options;
-                    cast_options.allow_int_overflow = true;
-                    auto cast_array_ret = ::arrow::compute::Cast(*array, f->type(), cast_options);
+                    auto cast_array_ret = ::arrow::compute::Cast(*array, f->type(), arrow::compute::CastOptions::Unsafe(f->type()), &exec_ctx);
                     if (!cast_array_ret.ok()) {
                         DB_WARNING("cast array fail, %s", cast_array_ret.status().ToString().c_str());
                         return -1;
@@ -314,15 +342,21 @@ public:
         return 0;
     }
 
-    static int change_arrow_record_batch_schema(const std::unordered_map<std::string, std::string>& column_name_map, 
-                                                std::shared_ptr<arrow::Schema> schema, 
-                                                std::shared_ptr<arrow::RecordBatch> in, 
-                                                std::shared_ptr<arrow::RecordBatch>* out) {
+    static int change_arrow_record_batch_schema(
+            const std::unordered_map<std::string, std::string>& column_name_map, 
+            const std::unordered_map<std::string, pb::PrimitiveType>& column_type_map,
+            std::shared_ptr<arrow::Schema> schema, 
+            std::shared_ptr<arrow::RecordBatch> in, 
+            std::shared_ptr<arrow::RecordBatch>* out) {
         std::vector<std::shared_ptr<arrow::Array>> columns;
         for (const auto& f : schema->fields()) {
             std::shared_ptr<arrow::Array> array;
             if (column_name_map.find(f->name()) != column_name_map.end()) {
                 array = in->GetColumnByName(column_name_map.at(f->name()));
+            }
+            pb::PrimitiveType to_baikaldb_type = pb::INVALID_TYPE;
+            if (column_type_map.find(f->name()) != column_type_map.end()) {
+                to_baikaldb_type = column_type_map.at(f->name());
             }
             if (array == nullptr) {
                 // 兼容加列场景db/store心跳不一致
@@ -336,10 +370,7 @@ public:
             } else {
                 // 新schema的列类型和旧schema的列类型可能需要转换，比如列类型发生变更
                 if (array->type()->id() != f->type()->id()) {
-                    // 整数大类型转小类型，比如int32转int8，需要避免溢出返回错误
-                    ::arrow::compute::CastOptions cast_options;
-                    cast_options.allow_int_overflow = true;
-                    auto cast_array_ret = ::arrow::compute::Cast(*array, f->type(), cast_options);
+                    auto cast_array_ret = Cast(array, array->type(), f->type(), to_baikaldb_type);
                     if (!cast_array_ret.ok()) {
                         DB_WARNING("cast array fail, %s", cast_array_ret.status().ToString().c_str());
                         return -1;
@@ -357,7 +388,8 @@ public:
 
     static int vectorize_filter(std::shared_ptr<arrow::RecordBatch> record_batch, 
                 arrow::Expression* conjuncts,
-                std::shared_ptr<arrow::RecordBatch>* out) {
+                std::shared_ptr<arrow::RecordBatch>* out,
+                bool* recordbatch_memory_cross = nullptr) {
         if (conjuncts == nullptr) {
             return -1;
         }
@@ -371,20 +403,39 @@ public:
             const auto& mask_scalar = filter_mask->scalar_as<arrow::BooleanScalar>();
             if (mask_scalar.is_valid && mask_scalar.value == true) {
                 *out = record_batch;
+                if (recordbatch_memory_cross != nullptr) {
+                    *recordbatch_memory_cross = true;
+                }
             } else {
-                *out = record_batch->Slice(0, 0);
+                //*out = record_batch->Slice(0, 0);
+                auto empty_batch = arrow::RecordBatch::MakeEmpty(record_batch->schema(), GetMemoryPoolForRead());
+                if (!empty_batch.ok()) {
+                    DB_FATAL("arrow make empty batch fail, %s", empty_batch.status().ToString().c_str());
+                    return -1;
+                }
+                *out = *empty_batch;
+                if (recordbatch_memory_cross != nullptr) {
+                    *recordbatch_memory_cross = false;
+                }
             }
             return 0;
         }
         auto mask = filter_mask->array_as<arrow::BooleanArray>();
         arrow::Datum record_batch_datum(record_batch);
-        arrow::Result<arrow::Datum> filter_data = arrow::compute::Filter(record_batch_datum, mask->data());
+        arrow::compute::ExecContext exec_ctx(GetMemoryPoolForRead());
+        arrow::Result<arrow::Datum> filter_data = arrow::compute::Filter(record_batch_datum, 
+            mask->data(), 
+            arrow::compute::FilterOptions::Defaults(), 
+            &exec_ctx);
         if (!filter_data.ok()) {
             // TODO 类似 where a这种会filter会报错: Filter argment不是boolean类型, 加上is true
             DB_FATAL("arrow filter fail, %s", filter_data.status().ToString().c_str());
             return -1;
         }
         *out = filter_data->record_batch();
+        if (recordbatch_memory_cross != nullptr) {
+            *recordbatch_memory_cross = false;
+        }
         return 0;
     }
 
@@ -394,7 +445,7 @@ public:
                         std::shared_ptr<arrow::Buffer>& data_buffer,
                         arrow::Compression::type compression_type = arrow::Compression::UNCOMPRESSED) {
         arrow::Result<std::shared_ptr<arrow::Buffer>> schema_ret =
-                arrow::ipc::SerializeSchema(*(concatenate_record_batch->schema()), arrow::default_memory_pool());
+                arrow::ipc::SerializeSchema(*(concatenate_record_batch->schema()), GetMemoryPoolForRead());
         if (!schema_ret.ok()) {
             DB_FATAL("Fail to SerializeSchema");
             return -1;
@@ -427,10 +478,15 @@ public:
     static int concatenate_record_batches(
             std::shared_ptr<arrow::Schema> schema, 
             std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
-            std::shared_ptr<arrow::RecordBatch>& out) {
+            std::shared_ptr<arrow::RecordBatch>& out,
+            bool need_check_memory_limit = false) {
         if (schema == nullptr) {
             DB_WARNING("schema is nullptr");
             return -1;
+        }
+        arrow::MemoryPool* pool = arrow::default_memory_pool();
+        if (need_check_memory_limit) {
+            pool = GetMemoryPoolForRead();
         }
         arrow::Result<std::shared_ptr<arrow::Table>> build_table = arrow::Table::FromRecordBatches(schema, batches);
         if (!build_table.ok()) {
@@ -438,7 +494,7 @@ public:
             return -1;
         }
         std::shared_ptr<arrow::Table> table = *build_table;
-        arrow::Result<std::shared_ptr<arrow::RecordBatch>> record_batch_result = table->CombineChunksToBatch();
+        arrow::Result<std::shared_ptr<arrow::RecordBatch>> record_batch_result = table->CombineChunksToBatch(pool);
         if (!record_batch_result.ok()) {
             DB_FATAL("CombineChunksToBatch fail: %s", record_batch_result.status().ToString().c_str());
             return -1;
@@ -496,9 +552,7 @@ public:
                 return nullptr;
             }
             std::shared_ptr<arrow::Array> array = *array_ret;
-            ::arrow::compute::CastOptions cast_options;
-            cast_options.allow_int_overflow = true;
-            auto cast_array_ret = ::arrow::compute::Cast(*array, field->type(), cast_options);
+            auto cast_array_ret = ::arrow::compute::Cast(*array, field->type(), arrow::compute::CastOptions::Unsafe(field->type()));
             if (!cast_array_ret.ok()) {
                 DB_WARNING("arrow cast array fail, %s", cast_array_ret.status().message().c_str());
                 return nullptr;
@@ -541,21 +595,357 @@ public:
     }
 
     static std::shared_ptr<arrow::Array> make_array_from_str(
-            std::shared_ptr<arrow::DataType> type, const std::string& str, const int32_t length) {
+            std::shared_ptr<arrow::DataType> type, const std::string& str, const int32_t length, arrow::compute::ExecContext* exec_ctx) {
         auto array_ret = arrow::MakeArrayFromScalar(arrow::LargeBinaryScalar(arrow::Buffer::FromString(str)), length);
         if (!array_ret.ok()) {
             DB_WARNING("arrow make array from scalar fail, %s", array_ret.status().ToString().c_str());
             return nullptr;
         }
         std::shared_ptr<arrow::Array> array = *array_ret;
-        ::arrow::compute::CastOptions cast_options;
-        cast_options.allow_int_overflow = true;
-        auto cast_array_ret = ::arrow::compute::Cast(*array, type, cast_options);
+        auto cast_array_ret = ::arrow::compute::Cast(*array, type, arrow::compute::CastOptions::Unsafe(type), exec_ctx);
         if (!cast_array_ret.ok()) {
             DB_WARNING("arrow cast array fail, %s", cast_array_ret.status().message().c_str());
             return nullptr;
         }
         return *cast_array_ret;
+    }
+    static std::shared_ptr<arrow::Schema> make_schema(const pb::TupleDescriptor* tuple_desc) {
+        if (tuple_desc == nullptr) {
+            DB_WARNING("tuple_desc is nullptr");
+            return nullptr;
+        }
+        std::vector<std::shared_ptr<arrow::Field>> arrow_fields;
+        arrow_fields.reserve(tuple_desc->slots().size());
+        for (const auto& slot : tuple_desc->slots()) {
+            const std::string& field_name = std::to_string(slot.tuple_id()) + "_" + std::to_string(slot.slot_id());
+            std::shared_ptr<arrow::Field> arrow_field = 
+                make_field(field_name, arrow::Type::type(primitive_to_arrow_type(slot.slot_type())));
+            if (arrow_field == nullptr) {
+                DB_WARNING("Fail to make arrow field");
+                return nullptr;
+            }
+            arrow_fields.emplace_back(arrow_field);
+        }
+        return arrow::schema(arrow_fields);
+    }
+    static std::shared_ptr<arrow::Field> make_field(const std::string& name, arrow::Type::type type) {
+        switch (type) {
+        case arrow::Type::type::BOOL:
+            return std::make_shared<arrow::Field>(name, arrow::boolean());
+        case arrow::Type::type::INT8:
+            return std::make_shared<arrow::Field>(name, arrow::int8());
+        case arrow::Type::type::UINT8:
+            return std::make_shared<arrow::Field>(name, arrow::uint8());
+        case arrow::Type::type::INT16:
+            return std::make_shared<arrow::Field>(name, arrow::int16());
+        case arrow::Type::type::UINT16:
+            return std::make_shared<arrow::Field>(name, arrow::uint16());
+        case arrow::Type::type::INT32:
+            return std::make_shared<arrow::Field>(name, arrow::int32());
+        case arrow::Type::type::UINT32:
+            return std::make_shared<arrow::Field>(name, arrow::uint32());
+        case arrow::Type::type::INT64:
+            return std::make_shared<arrow::Field>(name, arrow::int64());
+        case arrow::Type::type::UINT64:
+            return std::make_shared<arrow::Field>(name, arrow::uint64());
+        case arrow::Type::type::FLOAT:
+            return std::make_shared<arrow::Field>(name, arrow::float32());
+        case arrow::Type::type::DOUBLE:
+            return std::make_shared<arrow::Field>(name, arrow::float64());
+        case arrow::Type::type::LARGE_BINARY:
+            return std::make_shared<arrow::Field>(name, arrow::large_binary());
+        default:
+            return nullptr;
+        }
+    }
+    static std::shared_ptr<arrow::Array> make_array_from_exprvalue(
+            const pb::PrimitiveType type, const ExprValue& expr_value, const int length) {
+        bool is_null = expr_value.is_null();
+        switch (type) {
+        case pb::BOOL: {
+            arrow::BooleanScalar scalar;
+            if (!is_null) {
+                scalar = arrow::BooleanScalar(expr_value.get_numberic<bool>());
+            }
+            auto array_ret = arrow::MakeArrayFromScalar(scalar, length);
+            if (!array_ret.ok()) {
+                DB_WARNING("arrow make array from scalar fail, %s", array_ret.status().ToString().c_str());
+                return nullptr;
+            } else {
+                return *array_ret;
+            }
+            break;
+        }
+        case pb::INT8: {
+            arrow::Int8Scalar scalar;
+            if (!is_null) {
+                scalar = arrow::Int8Scalar(expr_value.get_numberic<int8_t>());
+            }
+            auto array_ret = arrow::MakeArrayFromScalar(scalar, length);
+            if (!array_ret.ok()) {
+                DB_WARNING("arrow make array from scalar fail, %s", array_ret.status().ToString().c_str());
+                return nullptr;
+            } else {
+                return *array_ret;
+            }
+            break;
+        }
+        case pb::UINT8: {
+            arrow::UInt8Scalar scalar;
+            if (!is_null) {
+                scalar = arrow::UInt8Scalar(expr_value.get_numberic<uint8_t>());
+            }
+            auto array_ret = arrow::MakeArrayFromScalar(scalar, length);
+            if (!array_ret.ok()) {
+                DB_WARNING("arrow make array from scalar fail, %s", array_ret.status().ToString().c_str());
+                return nullptr;
+            } else {
+                return *array_ret;
+            }
+            break;
+        }
+        case pb::INT16: {
+            arrow::Int16Scalar scalar;
+            if (!is_null) {
+                scalar = arrow::Int16Scalar(expr_value.get_numberic<int16_t>());
+            }
+            auto array_ret = arrow::MakeArrayFromScalar(scalar, length);
+            if (!array_ret.ok()) {
+                DB_WARNING("arrow make array from scalar fail, %s", array_ret.status().ToString().c_str());
+                return nullptr;
+            } else {
+                return *array_ret;
+            }
+            break;
+        }
+        case pb::UINT16: {
+            arrow::UInt16Scalar scalar;
+            if (!is_null) {
+                scalar = arrow::UInt16Scalar(expr_value.get_numberic<uint16_t>());
+            }
+            auto array_ret = arrow::MakeArrayFromScalar(scalar, length);
+            if (!array_ret.ok()) {
+                DB_WARNING("arrow make array from scalar fail, %s", array_ret.status().ToString().c_str());
+                return nullptr;
+            } else {
+                return *array_ret;
+            }
+            break;
+        }
+        case pb::INT32:
+        case pb::TIME: {
+            arrow::Int32Scalar scalar;
+            if (!is_null) {
+                scalar = arrow::Int32Scalar(expr_value.get_numberic<int32_t>());
+            }
+            auto array_ret = arrow::MakeArrayFromScalar(scalar, length);
+            if (!array_ret.ok()) {
+                DB_WARNING("arrow make array from scalar fail, %s", array_ret.status().ToString().c_str());
+                return nullptr;
+            } else {
+                return *array_ret;
+            }
+            break;
+        }
+        case pb::UINT32:
+        case pb::DATE:
+        case pb::TIMESTAMP: {
+            arrow::UInt32Scalar scalar;
+            if (!is_null) {
+                scalar = arrow::UInt32Scalar(expr_value.get_numberic<uint32_t>());
+            }
+            auto array_ret = arrow::MakeArrayFromScalar(scalar, length);
+            if (!array_ret.ok()) {
+                DB_WARNING("arrow make array from scalar fail, %s", array_ret.status().ToString().c_str());
+                return nullptr;
+            } else {
+                return *array_ret;
+            }
+            break;
+        }
+        case pb::INT64: {
+            arrow::Int64Scalar scalar;
+            if (!is_null) {
+                scalar = arrow::Int64Scalar(expr_value.get_numberic<int64_t>());
+            }
+            auto array_ret = arrow::MakeArrayFromScalar(scalar, length);
+            if (!array_ret.ok()) {
+                DB_WARNING("arrow make array from scalar fail, %s", array_ret.status().ToString().c_str());
+                return nullptr;
+            } else {
+                return *array_ret;
+            }
+            break;
+        }
+        case pb::UINT64:
+        case pb::DATETIME: {
+            arrow::UInt64Scalar scalar;
+            if (!is_null) {
+                scalar = arrow::UInt64Scalar(expr_value.get_numberic<uint8_t>());
+            }
+            auto array_ret = arrow::MakeArrayFromScalar(scalar, length);
+            if (!array_ret.ok()) {
+                DB_WARNING("arrow make array from scalar fail, %s", array_ret.status().ToString().c_str());
+                return nullptr;
+            } else {
+                return *array_ret;
+            }
+            break;
+        }
+        case pb::FLOAT: {
+            arrow::FloatScalar scalar;
+            if (!is_null) {
+                scalar = arrow::FloatScalar(expr_value.get_numberic<float>());
+            }
+            auto array_ret = arrow::MakeArrayFromScalar(scalar, length);
+            if (!array_ret.ok()) {
+                DB_WARNING("arrow make array from scalar fail, %s", array_ret.status().ToString().c_str());
+                return nullptr;
+            } else {
+                return *array_ret;
+            }
+            break;
+        }
+        case pb::DOUBLE: {
+            arrow::DoubleScalar scalar;
+            if (!is_null) {
+                scalar = arrow::DoubleScalar(expr_value.get_numberic<double>());
+            }
+            auto array_ret = arrow::MakeArrayFromScalar(scalar, length);
+            if (!array_ret.ok()) {
+                DB_WARNING("arrow make array from scalar fail, %s", array_ret.status().ToString().c_str());
+                return nullptr;
+            } else {
+                return *array_ret;
+            }
+            break;
+        }
+        case pb::STRING:
+        case pb::HLL:
+        case pb::BITMAP:
+        case pb::TDIGEST: {
+            auto array_ret = arrow::MakeArrayFromScalar(
+                    is_null ? arrow::LargeBinaryScalar(): 
+                            arrow::LargeBinaryScalar(arrow::Buffer::FromString(expr_value.get_string())), 
+                    length);
+            if (!array_ret.ok()) {
+                DB_WARNING("arrow make array from scalar fail, %s", array_ret.status().ToString().c_str());
+                return nullptr;
+            } else {
+                return *array_ret;
+            }
+            break;
+        }
+        default:
+            DB_WARNING("Invalid type: %d", type);
+            return nullptr;
+        }
+        return nullptr;
+    }
+    static arrow::Result<std::shared_ptr<arrow::Array>> Cast(
+            const std::shared_ptr<arrow::Array>& array, 
+            const std::shared_ptr<arrow::DataType>& type,
+            const std::shared_ptr<arrow::DataType>& to_type, 
+            const pb::PrimitiveType to_baikaldb_type = pb::INVALID_TYPE) {
+        bool is_string_type = false;
+        switch (type->id()) {
+            case arrow::Type::type::BINARY:
+            case arrow::Type::type::LARGE_BINARY:
+            case arrow::Type::type::STRING:
+            case arrow::Type::type::LARGE_STRING:
+                is_string_type = true;
+                break;
+            default:
+                break;
+        }
+        std::string cast_func_name;
+        if (is_string_type) {
+            switch (to_baikaldb_type) {
+            case pb::DATE:
+                cast_func_name = "expr_value_to_date";
+                break;
+            case pb::DATETIME:
+                cast_func_name = "expr_value_to_datetime";
+                break;
+            case pb::TIME:
+                cast_func_name = "expr_value_to_time";
+                break;
+            case pb::TIMESTAMP:
+                cast_func_name = "expr_value_to_timestamp";
+                break;
+            default:
+                break;
+            }
+        }
+        arrow::compute::ExecContext exec_ctx(GetMemoryPoolForRead());
+        if (!cast_func_name.empty()) {
+            ExprValueCastFunctionOptions options(pb::STRING);
+            auto cast_array_ret = ::arrow::compute::CallFunction(cast_func_name, {array}, &options, &exec_ctx);
+            if (!cast_array_ret.ok()) {
+                DB_WARNING("cast array fail, %s", cast_array_ret.status().ToString().c_str());
+                return arrow::Status::Invalid("cast array fail");;
+            }
+            return (*cast_array_ret).make_array();
+        } else {
+            // 整数大类型转小类型，比如int32转int8，需要避免溢出返回错误
+            return ::arrow::compute::Cast(*array, to_type, arrow::compute::CastOptions::Unsafe(to_type), &exec_ctx);
+        }
+    }
+
+    static int init_conditions(RuntimeState* state, 
+                               std::vector<ExprNode*>& conditions, 
+                               arrow::compute::Expression& vectorize_conditions,
+                               int32_t scan_tuple_id, 
+                               std::shared_ptr<arrow::Schema> schema_ptr,
+                               pb::TraceNode* trace_node = nullptr) {
+        if (conditions.empty()) {
+            return 0;
+        }
+        for (auto condition : conditions) {
+            if (condition == nullptr) {
+                DB_FATAL_STATE(state, "condition is nullptr");
+                return -1;
+            }
+            int ret = condition->open();
+            if (ret < 0) {
+                DB_FATAL_STATE(state, "expr open fail, ret:%d", ret);
+                return ret;
+            }
+        }
+        if (state->execute_type == pb::EXEC_ARROW_ACERO) {
+            std::vector<arrow::compute::Expression> sub_exprs;
+            sub_exprs.reserve(conditions.size());
+            for (auto condition : conditions) {
+                if (0 != condition->transfer_to_arrow_expression()) {
+                    DB_FATAL_STATE(state, "transfer to arrow expr fail");
+                    return -1;
+                }
+                sub_exprs.emplace_back(condition->arrow_expr());
+            }
+            vectorize_conditions = arrow::compute::and_(sub_exprs);
+            std::shared_ptr<arrow::Schema> schema;
+            if (schema_ptr != nullptr) {
+                schema = schema_ptr; // exchange_receiver
+            } else {
+                auto tuple = state->get_tuple_desc(scan_tuple_id);  // select_manager_node
+                if (tuple == nullptr) {
+                    DB_FATAL_STATE(state, "no such scan_tuple id: %d", scan_tuple_id);
+                    return -1;
+                }
+                schema = VectorizeHelpper::get_arrow_schema({tuple}); 
+            }
+            if (schema == nullptr) {
+                DB_FATAL_STATE(state, "get arrow schema fail for filter condition");
+                return -1;
+            }
+            arrow::Result<arrow::compute::Expression> bind_expr = vectorize_conditions.Bind(*schema);
+            if (!bind_expr.ok()) {
+                DB_FATAL_STATE(state, "bind expr fail:%s", bind_expr.status().ToString().c_str());
+                return -1;
+            }
+            vectorize_conditions = *bind_expr;
+        }
+        return 0;
     }
 };
 

@@ -31,15 +31,27 @@ typedef std::string PrimaryIdT;
 
 typedef int (*MergeFuncT)(PostingNodeT&, const PostingNodeT&, BoolArg*);
 
+template <typename Schema>
+class RindexNodeParser;
+
+template <typename Schema>
+struct ReverseDelayInitContext {
+    std::vector<RindexNodeParser<Schema>*> children;
+    std::vector<std::string> reverse_rocksdb_keys;
+    std::vector<std::string> terms;
+};
+
 // 获取并遍历倒排链表的接口
 template <typename Schema>
 class RindexNodeParser {
 public:
+    using ReverseListSptr = typename Schema::ReverseListSptr;
+
     RindexNodeParser(Schema* schema) : _schema(schema) {
     } 
     virtual ~RindexNodeParser() {
     }
-    virtual int init(const std::string& term) = 0;
+    virtual int init(const std::string& term, ReverseDelayInitContext<Schema>* delay_init_context = nullptr) = 0;
     //第一次调用返回第一个元素
     virtual const PostingNodeT* current_node() = 0;
     virtual const PrimaryIdT* current_id() = 0;
@@ -47,7 +59,8 @@ public:
     virtual const PostingNodeT* next() = 0;
     //如果倒排链表是有序数组，用二分查找优化
     //大于等于target_id的第一个元素（包括当前元素）
-    virtual const PostingNodeT* advance(const PrimaryIdT& target_id) = 0; 
+    virtual const PostingNodeT* advance(const PrimaryIdT& target_id) = 0;
+    virtual int delay_init(const std::string& term, ReverseListSptr new_list_ptr, ReverseListSptr old_list_ptr) = 0;
 protected:
     Schema* _schema;
 };

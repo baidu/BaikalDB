@@ -29,6 +29,7 @@ struct HashPartitionColumns {
             }
         }
     }
+    pb::PartitionPropertyType type = pb::HashPartitionType;
     // // arrow_name(tupleid_slotid / tmp_1(agg产生的临时列) / hash_1) -> ColumnInfo
     // std::unordered_map<std::string, ColumnInfo> hash_columns;
     // 需要额外加projection产生hash列, hash_1 -> expr(a+b)
@@ -113,7 +114,7 @@ struct NodePartitionProperty {
         std::string ret = "type: " + pb::PartitionPropertyType_Name(type)
                              + ", hash_partition_propertys size: " + std::to_string(hash_partition_propertys.size());
         for (auto m : hash_partition_propertys) {
-            ret += "\n hash_cols: [";
+            ret += "\n type: " + pb::PartitionPropertyType_Name(m->type) + "  hash_cols: [";
             for (auto c : m->hash_columns) {
                 ret += c.first + ":" + pb::ExprNodeType_Name(c.second->node_type());
             }

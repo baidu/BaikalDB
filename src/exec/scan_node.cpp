@@ -25,6 +25,7 @@
 #include "rocksdb_scan_node.h"
 #include "information_schema_scan_node.h"
 #include "redis_scan_node.h"
+#include "file_scan_node.h"
 
 namespace baikaldb {
 int64_t AccessPathMgr::select_index_common() {
@@ -55,7 +56,8 @@ int64_t AccessPathMgr::select_index_common() {
                 index_id, pb::IndexState_Name(index_state).c_str());
             continue;
         }
-        int field_count = path->hit_index_field_ids.size();
+        // 确保不影响存量索引选择
+        int field_count = std::min(path->hit_index_field_ids.size(), info_ptr->fields.size());
         if (info.fields.size() == 0) {
             continue;
         }
@@ -229,8 +231,8 @@ int ScanNode::show_explain(QueryContext* ctx, std::vector<std::map<std::string, 
         explain_info["type"] = "range";
         auto& pos_index = _main_path.path(index_id)->pos_index;
         if (pos_index.ranges_size() == 1) {
-            int field_cnt = pos_index.has_left_field_cnt() ? pos_index.left_field_cnt() : pos_index.ranges(0).left_field_cnt();
-            if (field_cnt == (int)index_info.fields.size() && pos_index.is_eq()) {
+            int field_cnt = pos_index.left_field_cnt();
+            if (field_cnt >= (int)index_info.fields.size() && pos_index.is_eq()) {
                 explain_info["type"] = "eq_ref";
                 if (index_info.type == pb::I_UNIQ || index_info.type == pb::I_PRIMARY) {
                     explain_info["type"] = "const";
@@ -759,6 +761,8 @@ ScanNode* ScanNode::create_scan_node(const pb::PlanNode& node, const CreateExecO
                 }
                 if (table_info->dblink_info.type() == pb::LT_MYSQL) {
                     return new MysqlScanNode;
+                } else if (table_info->dblink_info.type() == pb::LT_FILE) {
+                    return new FileScanNode;
                 }
                 break;
             }
@@ -929,7 +933,7 @@ bool ScanNode::need_index_merge() {
     _conjuncts_without_or.clear();
     for (auto conjunct : _filter_node->conjuncts()) {
         if (_or_conjunct != conjunct) {
-            _conjuncts_without_or.push_back(conjunct);
+            _conjuncts_without_or.emplace_back(conjunct);
         }
     }
     _or_sub_conjuncts.clear();

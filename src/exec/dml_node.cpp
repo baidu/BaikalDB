@@ -63,7 +63,7 @@ int DMLNode::init_schema_info(RuntimeState* state) {
     }
 
     int64_t ttl_duration = _row_ttl_duration > 0 ? _row_ttl_duration : _table_info->ttl_info.ttl_duration_s;
-    if (ttl_duration > 0) {
+    if (ttl_duration > 0 && _table_info->ttl_info.ttl_field == nullptr) {
         _ttl_timestamp_us = butil::gettimeofday_us() + ttl_duration * 1000 * 1000LL;
     }
     DB_DEBUG("table_id: %ld, region_id: %ld, _row_ttl_duration: %ld, table ttl duration: %ld", 
@@ -634,7 +634,8 @@ int DMLNode::remove_row(RuntimeState* state, SmartRecord record,
                 return ret;
             }
             ret = vector_index_map[info.id]->delete_vector(_txn,
-                                                           word, pk_str, record);
+                                                           word, pk_str, record,
+                                                           info.state);
             if (ret < 0) {
                 DB_WARNING_STATE(state, "vector_index fail delete, index_id: %ld", info.id);
                 return ret;
@@ -759,7 +760,7 @@ int DMLNode::update_row(RuntimeState* state, SmartRecord record, MemRow* row) {
         if (field == nullptr) {
             state->error_code = ER_BAD_FIELD_ERROR;
             state->error_msg << "Unknown column id " << slot.field_id() << " in 'field list'";
-            DB_WARNING_STATE(state, "Unknown column, table_id: %d, field_id: %d", slot.table_id(), slot.field_id());
+            DB_WARNING_STATE(state, "Unknown column, table_id: %ld, field_id: %d", slot.table_id(), slot.field_id());
             return -1;
         }
         if (field->type == pb::FLOAT || field->type == pb::DOUBLE || field->type == pb::DATETIME) {

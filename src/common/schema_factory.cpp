@@ -30,13 +30,16 @@
 
 using google::protobuf::FileDescriptor;
 namespace baikaldb {
-DEFINE_bool(need_health_check, true, "need_health_check");
+DEFINE_bool(need_health_check, true, "Enable health checking, default: true");
 DECLARE_int32(baikal_faulty_interval_times);
 DECLARE_int32(baikal_heartbeat_interval_us);
 DECLARE_string(meta_server_bns);
 DECLARE_int32(baikal_port);
 DECLARE_int64(mpp_min_statistics_rows);
 DECLARE_int64(mpp_min_statistics_bytes);
+DEFINE_int64(broadcast_table_max_rows, 500000, "broadcast_table_max_rows, -1 mean no use broadcast join");
+DEFINE_int64(broadcast_table_max_mb, 4, "broadcast_table_max_mb, -1 mean no use broadcast join");
+
 BthreadLocal<bool> SchemaFactory::use_backup;
 int SchemaFactory::init(bool is_db, bool is_backup) {
     if (_is_inited) {
@@ -475,6 +478,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         tbl_info.arrow_reverse_fields.clear();
         tbl_info.has_global_not_none = false;
         tbl_info.has_rollup_index = false;
+        tbl_info.rollup_indexs.clear();
         tbl_info.has_index_write_only_or_write_local = false;
         tbl_info.sign_blacklist.clear();
         tbl_info.sign_forcelearner.clear();
@@ -616,18 +620,6 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         tbl_info.region_num = table.region_num();
     }
 
-    if (table.has_ttl_duration()) {
-        tbl_info.ttl_info.ttl_duration_s = table.ttl_duration();
-        if (table.has_online_ttl_expire_time_us()) {
-            tbl_info.ttl_info.online_ttl_expire_time_us = table.online_ttl_expire_time_us();
-        }
-
-        DB_WARNING("table:%s ttl_duration:%ld, online_ttl_expire_time_us:%ld, %s", 
-            tbl_info.name.c_str(), tbl_info.ttl_info.ttl_duration_s, 
-            tbl_info.ttl_info.online_ttl_expire_time_us,
-            timestamp_to_str(tbl_info.ttl_info.online_ttl_expire_time_us / 1000000).c_str());
-    }
-
     tbl_info.learner_resource_tags.clear();
     for (auto& learner_resource : table.learner_resource_tags()) {
         tbl_info.learner_resource_tags.emplace_back(learner_resource);
@@ -741,6 +733,35 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         tbl_info.fields.push_back(field_info);
         //DB_WARNING("field_name:%s, field_id:%d", field_info.name.c_str(), field_info.id);
     }
+
+    if (table.has_ttl_duration()) {
+        // 只有第一次设置ttl info允许修改ttl field
+        if (table.has_ttl_field() && !table.ttl_field().field_name().empty()
+                && tbl_info.ttl_info.ttl_duration_s <= 0 && tbl_info.ttl_info.ttl_field == nullptr) {
+            std::string ttl_field_name = table.ttl_field().field_name();
+            auto iter = std::find_if(tbl_info.fields.begin(), tbl_info.fields.end(),
+                       [ttl_field_name](const FieldInfo& field_info) {return field_info.short_name == ttl_field_name;});
+            if (iter == tbl_info.fields.end()) {
+                // should never happen
+                DB_FATAL("ttl field not exist! table_id: %ld, field_name: %s", table_id, ttl_field_name.c_str());
+                return -1;
+            }
+            tbl_info.ttl_info.ttl_field = std::make_shared<FieldInfo>(*iter);
+        }
+
+        tbl_info.ttl_info.ttl_duration_s = table.ttl_duration();
+        if (table.has_online_ttl_expire_time_us()) {
+            tbl_info.ttl_info.online_ttl_expire_time_us = table.online_ttl_expire_time_us();
+        }
+
+        int ttl_field_id = tbl_info.ttl_info.ttl_field == nullptr ? -1 : tbl_info.ttl_info.ttl_field->id;
+
+        DB_WARNING("table:%s ttl_duration:%ld, ttl_field_id: %d, online_ttl_expire_time_us:%ld, %s",
+            tbl_info.name.c_str(), tbl_info.ttl_info.ttl_duration_s, ttl_field_id,
+            tbl_info.ttl_info.online_ttl_expire_time_us,
+            timestamp_to_str(tbl_info.ttl_info.online_ttl_expire_time_us / 1000000).c_str());
+    }
+
     tbl_info.link_field_map.clear();
     tbl_info.binlog_target_ids.clear();
     tbl_info.is_linked = false;
@@ -921,6 +942,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
             tbl_info.has_fulltext = true;
         } else if (cur.index_type() == pb::I_ROLLUP) {
             tbl_info.has_rollup_index = true;
+            tbl_info.rollup_indexs.insert(index_id);
         } else if (cur.index_type() == pb::I_VECTOR) {
             tbl_info.has_vector_index = true;
         }
@@ -1721,9 +1743,15 @@ void SchemaFactory::update_statistics(const StatisticsVec& statistics) {
 
 int SchemaFactory::update_statistics_internal(SchemaMapping& background, const std::map<int64_t, SmartStatistics>& mapping) {
     auto& table_statistics_mapping = background.table_statistics_mapping;
+    auto& tables = background.table_info_mapping;
 
     for (auto iter = mapping.begin(); iter != mapping.end(); iter++) {
         auto origin_iter = table_statistics_mapping.find(iter->first);
+        auto table_ptr_pair = tables.find(iter->first);
+        if (table_ptr_pair == tables.end()) {
+            DB_WARNING("update table statistics but table not found, table_id: %ld", iter->first);
+            continue;
+        }
         if (origin_iter != table_statistics_mapping.end()) {
             if (iter->second->version() > origin_iter->second->version()) {
                 table_statistics_mapping[iter->first] = iter->second;
@@ -1731,6 +1759,7 @@ int SchemaFactory::update_statistics_internal(SchemaMapping& background, const s
         } else {
             table_statistics_mapping[iter->first] = iter->second;
         }
+        table_ptr_pair->second->have_statistics = table_statistics_mapping[iter->first]->is_valid();
     }
 
     return 1;
@@ -1824,7 +1853,7 @@ double SchemaFactory::get_eq_field_ratio(int64_t table_id, int field_id, const E
     auto& table_statistics_mapping = table_ptr->table_statistics_mapping;
     auto iter = table_statistics_mapping.find(table_id);
     if (iter != table_statistics_mapping.end()) {
-        if (iter->second->is_cms_exist()) {
+        if (iter->second->is_cms_exist(field_id)) {
             return iter->second->get_cmsketch_ratio(field_id, value);
         } else {
             return iter->second->get_hll_ratio(field_id);
@@ -1879,6 +1908,9 @@ void SchemaFactory::table_with_statistics_info(std::vector<std::string>& databas
     for (auto& st : table_statistics_mapping) {
         const int64_t meta_id = ::baikaldb::get_meta_id(st.first);
         if (meta_id != 0) {
+            continue;
+        }
+        if (!st.second->is_valid()) {
             continue;
         }
         auto table = table_info_mapping.find(st.first);
@@ -2598,6 +2630,9 @@ void SchemaFactory::get_table_by_filter(std::vector<std::string>& database_table
                     dblink_info = table.second->dblink_info.mysql_info().addr() + "/" +
                                   table.second->dblink_info.mysql_info().database_name() + "." +
                                   table.second->dblink_info.mysql_info().table_name();
+                } else if (table.second->dblink_info.type() == pb::LT_FILE) {
+                    dblink_info = table.second->dblink_info.file_info().cluster() + "/" +
+                                  table.second->dblink_info.file_info().path();
                 } else {
                     DB_WARNING("Invalid dblink type: %d, table: %s", 
                                 table.second->dblink_info.type(), table.second->name.c_str());
@@ -2937,6 +2972,27 @@ int SchemaFactory::get_partition_regions(int64_t table_id, const std::vector<int
     
     return 0;
 }
+
+int SchemaFactory::get_all_partition_ids(
+        int64_t table_id, std::vector<int64_t>& partition_ids) {
+    DoubleBufferedTableRegionInfo::ScopedPtr table_region_mapping_ptr;
+    if (_table_region_mapping.Read(&table_region_mapping_ptr) != 0) {
+        DB_WARNING("DoubleBufferedTableRegion read scoped ptr error."); 
+        return -1; 
+    }
+    auto it = table_region_mapping_ptr->find(table_id);
+    if (it == table_region_mapping_ptr->end()) {
+        DB_WARNING("index id[%ld] not in table_region_mapping", table_id);
+        return -1;
+    }
+    auto frontground = it->second;
+    auto& key_region_mapping = frontground->key_region_mapping;
+    for (const auto& [partition_id, _] : key_region_mapping) {
+        partition_ids.emplace_back(partition_id);
+    }
+    return 0;
+}
+
 // 检测table下region范围是否连续没有空洞
 int SchemaFactory::check_region_ranges_consecutive(int64_t table_id) {
     DoubleBufferedTableRegionInfo::ScopedPtr table_region_mapping_ptr;
@@ -3049,9 +3105,9 @@ int SchemaFactory::get_region_by_key(int64_t main_table_id,
     int range_size = primary->ranges_size();
     for (int i = 0; i < range_size; ++i) {
         const auto& range = primary->ranges(i);
-        bool like_prefix = template_primary.has_like_prefix() ? template_primary.like_prefix() : range.like_prefix();
-        bool left_open = template_primary.has_left_open() ? template_primary.left_open() : range.left_open();
-        bool right_open = template_primary.has_right_open() ? template_primary.right_open() : range.right_open();
+        bool like_prefix = template_primary.has_like_prefix() ?  template_primary.like_prefix() : range.like_prefix();
+        bool left_open = template_primary.has_left_open() ?  template_primary.left_open() : range.left_open();
+        bool right_open = template_primary.has_right_open() ?  template_primary.right_open() : range.right_open();
         MutTableKey  start;
         MutTableKey  end;
         if (!range.left_key().empty()) {
@@ -3825,6 +3881,37 @@ int SchemaFactory::get_binlog_regions(int64_t binlog_id, int64_t partition_index
             DB_WARNING("not find table %ld partition %ld region info.", binlog_id, partition_index);
             return -1;
         }
+}
+
+bool SchemaFactory::table_suitable_for_broadcast_join(int64_t table_id) {
+    if (FLAGS_broadcast_table_max_rows <= 0 && FLAGS_broadcast_table_max_mb <= 0) {
+        return false;
+    }
+    DoubleBufferedTableRegionInfo::ScopedPtr table_region_mapping_ptr;
+    if (_table_region_mapping.Read(&table_region_mapping_ptr) != 0) {
+        DB_WARNING("DoubleBufferedTableRegion read scoped ptr error."); 
+        return false; 
+    }
+    auto it = table_region_mapping_ptr->find(table_id);
+    if (it == table_region_mapping_ptr->end()) {
+        DB_WARNING("table id[%ld] not in table_region_mapping.", table_id);
+        return false;
+    }
+    auto& region_map = it->second->region_info_mapping;
+    if (region_map.size() > 1) {
+        return false;
+    }
+    // TODO, 下面不是实时同步, 启动/version变更才会同步, 后期可以考虑如何同步小表的统计信息
+    int64_t total_rows = 0;
+    int64_t total_bytes = 0;
+    for (auto& [_, region] : region_map) {
+        total_rows += region.region_info.num_table_lines();
+        total_bytes += region.region_info.used_size();
+    }
+    if (total_rows <= FLAGS_broadcast_table_max_rows || total_bytes <= FLAGS_broadcast_table_max_mb * 1024 * 1024ULL) {
+        return true;
+    }
+    return false;
 }
 }//namespace
 

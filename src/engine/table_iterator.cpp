@@ -17,7 +17,7 @@
 #include "tuple_record.h"
 
 namespace baikaldb {
-DEFINE_bool(cstore_scan_fill_cache, true, "cstore_scan_fill_cache");
+DEFINE_bool(cstore_scan_fill_cache, true, "Fill cache during column store scan, default: true");
 DEFINE_bool(scan_fill_cache, true, "iterator_prefix_same_as_start");
 
 TableIterator* Iterator::scan_binlog_primary(
@@ -96,7 +96,7 @@ int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& field
     _fields      = fields;
     _field_slot  = field_slot;
     if (txn != nullptr) {
-        _use_ttl = txn->use_ttl();
+        _use_normal_ttl = txn->use_normal_ttl();
         _read_ttl_timestamp_us = txn->read_ttl_timestamp_us();
         _online_ttl_base_expire_time_us = txn->online_ttl_base_expire_time_us();
         _txn = txn->get_txn();
@@ -453,10 +453,10 @@ int TableIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std:
         return -1;
     }
     rocksdb::Slice value_slice;
-    if (_use_ttl || _mode != KEY_ONLY) {
+    if (_use_normal_ttl || _mode != KEY_ONLY) {
         value_slice = _iter->value();
     }
-    if (_use_ttl) {
+    if (_use_normal_ttl) {
         int64_t row_ttl_timestamp_us = ttl_decode(value_slice, _index_info, _online_ttl_base_expire_time_us);
         if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
             //expired
@@ -475,7 +475,7 @@ int TableIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std:
             TupleRecord tuple_record(value_slice);
             // only decode the required field (field_ids stored in fields)
             if (0 != tuple_record.decode_fields(_fields, &_field_slot, record, tuple_id, mem_row, chunk)) {
-                DB_WARNING("decode value failed: %ld, _use_ttl:%d", _index_info->id, _use_ttl);
+                DB_WARNING("decode value failed: %ld, _use_normal_ttl:%d", _index_info->id, _use_normal_ttl);
                 _valid = false;
                 return -1;
             }
@@ -606,10 +606,10 @@ int IndexIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std:
             return -1;
         }
         rocksdb::Slice iter_value;
-        if (_idx_type == pb::I_UNIQ || _use_ttl) {
+        if (_idx_type == pb::I_UNIQ || _use_normal_ttl) {
             iter_value = _iter->value();
         }
-        if (_use_ttl) {
+        if (_use_normal_ttl) {
             int64_t row_ttl_timestamp_us = ttl_decode(iter_value, _index_info, _online_ttl_base_expire_time_us);
             if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
                 //expired

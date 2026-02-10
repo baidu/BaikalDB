@@ -43,6 +43,7 @@ message Function {
     repeated PrimitiveType arg_types = 3;
     optional PrimitiveType return_type = 4;
     optional bool has_var_args = 5;
+    optional string origin_name = 6; // 原始函数名
 };
 
 message DeriveExprNode {

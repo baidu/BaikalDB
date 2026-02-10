@@ -304,7 +304,7 @@ void FunctionManager::register_operators() {
     register_object_ret("cast_to_datetime", cast_to_datetime, pb::DATETIME);
     register_object_ret("cast_to_string", cast_to_string, pb::STRING);
     register_object_ret("cast_to_signed", cast_to_signed, pb::INT64);
-    register_object_ret("cast_to_unsigned", cast_to_unsigned, pb::INT64);
+    register_object_ret("cast_to_unsigned", cast_to_unsigned, pb::UINT64);
     register_object_ret("cast_to_double", cast_to_double, pb::DOUBLE);
 }
 

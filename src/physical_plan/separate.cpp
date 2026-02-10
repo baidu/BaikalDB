@@ -320,7 +320,8 @@ int Separate::separate_join(QueryContext* ctx, const std::vector<ExecNode*>& joi
         for (auto& scan_node_ptr : scan_nodes) {
             // INFORMATION_SCHEMA
             if (!static_cast<ScanNode*>(scan_node_ptr)->is_rocksdb_scan_node() && 
-                    !static_cast<ScanNode*>(scan_node_ptr)->is_mysql_scan_node()) {
+                    !static_cast<ScanNode*>(scan_node_ptr)->is_mysql_scan_node() &&
+                    !static_cast<ScanNode*>(scan_node_ptr)->is_file_scan_node()) {
                 continue;
             }
             bool is_rocksdb_scan_node = static_cast<ScanNode*>(scan_node_ptr)->is_rocksdb_scan_node();

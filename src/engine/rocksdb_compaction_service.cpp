@@ -26,7 +26,6 @@ void set_rocksdb_flags(pb::RocksdbGFLAGS* rocksdb_gflags) {
     rocksdb_gflags->set_rocks_use_partitioned_index_filters(FLAGS_rocks_use_partitioned_index_filters);
     rocksdb_gflags->set_rocks_use_ribbon_filter(FLAGS_rocks_use_ribbon_filter);
     rocksdb_gflags->set_olap_table_only(FLAGS_olap_table_only);
-    rocksdb_gflags->set_olap_import_mode(FLAGS_olap_import_mode); 
     rocksdb_gflags->set_rocks_use_sst_partitioner_fixed_prefix(FLAGS_rocks_use_sst_partitioner_fixed_prefix);
     rocksdb_gflags->set_key_point_collector_interval(FLAGS_key_point_collector_interval);
     rocksdb_gflags->set_rocks_block_cache_size_mb(FLAGS_rocks_block_cache_size_mb);
@@ -108,6 +107,7 @@ rocksdb::CompactionServiceScheduleResponse MyCompactionService::Schedule(const r
         _time_cost_map[remote_compaction_id_str] = TimeCost();
         _doing_map[remote_compaction_id_str] = closure;
     }
+    DB_WARNING("start remote_compaction: %s", remote_compaction_id_str.c_str());
     // 异步调用 RPC，并传入 OnRPCDone 回调
     stub.do_compaction(&closure->cntl, &request, &closure->_response, closure.get());
 #endif
@@ -165,12 +165,14 @@ rocksdb::CompactionServiceJobStatus MyCompactionService::Wait(const std::string&
         }
     });
 
-    brpc::CallId call_id;
+    brpc::CallId call_id = {0};
     pb::RemoteCompactionResponse response;
     {
         BAIDU_SCOPED_LOCK(_mutex);
         if (_doing_map.find(remote_compaction_id_str) != _doing_map.end()) {
             call_id = _doing_map[remote_compaction_id_str]->cntl.call_id();
+        } else {
+            DB_FATAL("not find remote_compaction_id: %s", remote_compaction_id_str.c_str());
         }
     }
 

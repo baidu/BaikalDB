@@ -57,6 +57,7 @@ int UpdateManagerNode::init_update_info(UpdateNode* update_node) {
     std::vector<int64_t> g_non_unique_indexs;
     std::vector<int64_t> g_affected_unique_indexs;
     std::vector<int64_t> g_affected_non_unique_indexs;
+    std::shared_ptr<FieldInfo> ttl_field_ptr = _table_info->get_ttl_field();
     for (auto index_id : _table_info->indices) {
         auto info_ptr = SchemaFactory::get_instance()->get_index_info_ptr(index_id);
         if (info_ptr == nullptr) {
@@ -106,8 +107,8 @@ int UpdateManagerNode::init_update_info(UpdateNode* update_node) {
     global_affected_indices.insert(global_affected_indices.end(), g_affected_unique_indexs.begin(), g_affected_unique_indexs.end());
     global_affected_indices.insert(global_affected_indices.end(), g_affected_non_unique_indexs.begin(), g_affected_non_unique_indexs.end());
     
-    // 如果更新主键或者ttl，那么影响了全部索引
-    if (_affect_primary || (_table_info->ttl_info.ttl_duration_s > 0)) {
+    // 如果更新主键或者常规ttl，那么影响了全部索引
+    if (_affect_primary || (_table_info->ttl_info.ttl_duration_s > 0 && ttl_field_ptr == nullptr)) {
         _global_affected_index_ids.insert(_global_affected_index_ids.end(), g_unique_indexs.begin(), g_unique_indexs.end());
         _global_affected_index_ids.insert(_global_affected_index_ids.end(), g_non_unique_indexs.begin(), g_non_unique_indexs.end());
     } else {

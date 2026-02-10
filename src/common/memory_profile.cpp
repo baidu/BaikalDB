@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "memory_profile.h"
+#include "arrow/memory_pool.h"
 #ifdef BAIKAL_TCMALLOC
 #include <gperftools/malloc_extension.h>
 #endif
@@ -70,6 +71,10 @@ void MemoryGCHandler::memory_gc_thread() {
                 DB_WARNING("tcmalloc release memory about size: %ld cast: %ld", total_bytes_to_gc, cost.get_time());
             }
         }
+        
+        SQL_TRACE("arrow DefaultMemoryPool allocate: %ld, LimitMemoryPool allocate: %ld", 
+            arrow::default_memory_pool()->bytes_allocated(), 
+            arrow::system_memory_pool_with_limit()->bytes_allocated());
         bthread_usleep_fast_shutdown(FLAGS_memory_gc_interval_s * 1000 * 1000LL, _shutdown);
     }
 #endif

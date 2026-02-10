@@ -109,15 +109,39 @@ public:
             std::vector<int32_t>& tuple_order,
             std::vector<ExprNode*>& conditions);
 
+    void handle_join_equal_key_cast_type(ExprNode* outer_expr,
+            ExprNode* inner_expr,
+            std::string outer_tmp_col_name,
+            std::string inner_tmp_col_name,
+            std::vector<arrow::FieldRef>& outer_keys,
+            std::vector<arrow::FieldRef>& inner_keys,
+            std::unordered_map<std::string, arrow::compute::Expression>& outer_projection_temp_col,
+            std::unordered_map<std::string, arrow::compute::Expression>& inner_projection_temp_col);
+    int handle_join_filter_key_expressions(RuntimeState* state,
+            int idx,
+            ExprNode* condition,
+            bool left_child_is_outer,
+            std::vector<arrow::FieldRef>& outer_keys,
+            std::vector<arrow::FieldRef>& inner_keys,
+            std::vector<arrow::compute::Expression>& sub_exprs,
+            std::unordered_map<std::string, arrow::compute::Expression>& outer_projection_temp_col,
+            std::unordered_map<std::string, arrow::compute::Expression>& inner_projection_temp_col);
+    int try_transfer_filter_to_column_first(RuntimeState* state,
+            int idx,
+            ExprNode* condition, 
+            std::vector<arrow::FieldRef>& outer_keys,
+            std::vector<arrow::FieldRef>& inner_keys,
+            std::vector<arrow::compute::Expression>& sub_exprs,
+            std::unordered_map<std::string, arrow::compute::Expression>& outer_projection_temp_col,
+            std::unordered_map<std::string, arrow::compute::Expression>& inner_projection_temp_col);
     int build_table_arrow_declaration(RuntimeState* state, 
             arrow::acero::Declaration& dec,
             ExecNode* node, 
             std::unordered_set<int32_t>& tuple_ids, 
             std::vector<MemRow*>& mem_rows,
-            const std::unordered_map<int32_t, std::set<int32_t>>& cast_string_slot_ids,
+            std::unordered_map<std::string, arrow::compute::Expression>& projection_temp_col,
             bool need_add_index_colletor_node,
-            bool remove_useless_sort,
-            bool need_add_join_key);
+            bool remove_useless_sort);
 
     void get_need_add_index_collector_cond_nodes(ExecNode* node, std::set<ExecNode*>& need_add_nodes);
     virtual int build_arrow_declaration(RuntimeState* state);
@@ -126,26 +150,16 @@ public:
 
     virtual int set_partition_property_and_schema(QueryContext* ctx);
 
+    bool suitable_for_broadcast_join(QueryContext* ctx);
+
+    void make_broadcast_join_property(std::shared_ptr<HashPartitionColumns>* small_table_property, 
+            ExecNode* small_table_node,
+            std::shared_ptr<HashPartitionColumns>* other_property,
+            NodePartitionProperty* other_child_property);
+
     void get_hash_partitions(NodePartitionProperty& outer_property, 
                              NodePartitionProperty& inner_property, 
-                             const std::unordered_set<std::string>& cast_string_hash_columns) {
-        outer_property.type = _partition_property.type;
-        inner_property.type = _partition_property.type;
-        if (_partition_property.type == pb::HashPartitionType) {
-            outer_property.hash_partition_propertys.emplace_back(_partition_property.hash_partition_propertys[0]);
-            inner_property.hash_partition_propertys.emplace_back(_partition_property.hash_partition_propertys[1]);
-        }
-        outer_property.need_cast_string_columns = _partition_property.need_cast_string_columns;
-        inner_property.need_cast_string_columns = _partition_property.need_cast_string_columns;
-        for (auto& name : cast_string_hash_columns) {
-            outer_property.need_cast_string_columns.insert(name);
-            inner_property.need_cast_string_columns.insert(name);
-            if (_on_condition_column_map.count(name) > 0) {
-                outer_property.need_cast_string_columns.insert(_on_condition_column_map[name]);
-                inner_property.need_cast_string_columns.insert(_on_condition_column_map[name]);
-            }
-        }
-    }
+                             const std::unordered_set<std::string>& cast_string_hash_columns);
 };
 }
 

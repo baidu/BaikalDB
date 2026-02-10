@@ -42,6 +42,7 @@ DECLARE_int32(bthread_concurrency); //bthread.cpp
 namespace baikaldb {
 DEFINE_bool(enable_plan_cache, false, "enable plan cache");
 DEFINE_bool(enable_convert_charset, false, "enable convert charset");
+DEFINE_bool(sign_with_resouce_tag, true, "sign without resource tag");
 DECLARE_string(log_plat_name);
 DECLARE_bool(enable_dblink);
 
@@ -524,10 +525,16 @@ int LogicalPlanner::generate_sql_sign(QueryContext* ctx, parser::StmtNode* stmt)
         std::string str;
         if (stat_info->sign == 0) {
             stmt->set_print_sample(true);
-            stat_info->sample_sql << "family_table_tag_optype_plat=[" << stat_info->family << "\t"
-                << stat_info->table << "\t" << stat_info->resource_tag << "\t" << op_type << "\t"
-                << FLAGS_log_plat_name << "] sql=[" << stmt << "]";
             uint64_t out[2];
+            if (FLAGS_sign_with_resouce_tag) {
+                stat_info->sample_sql << "family_table_tag_optype_plat=[" << stat_info->family << "\t"
+                    << stat_info->table << "\t" << stat_info->resource_tag << "\t" << op_type << "\t"
+                    << FLAGS_log_plat_name << "] sql=[" << stmt << "]";
+            } else {
+                stat_info->sample_sql << "family_table_tag_optype_plat=[" << stat_info->family << "\t"
+                    << stat_info->table << "\t" << "" << "\t" << op_type << "\t"
+                    << FLAGS_log_plat_name << "] sql=[" << stmt << "]";
+            }
             str = stat_info->sample_sql.str();
             butil::MurmurHash3_x64_128(str.c_str(), str.size(), 0x1234, out);
             stat_info->sign = out[0];
@@ -612,6 +619,7 @@ int LogicalPlanner::gen_subquery_plan(parser::DmlNode* subquery, SmartPlanTableC
     _cur_sub_ctx->table_with_clause_mapping = _ctx->table_with_clause_mapping;
     _cur_sub_ctx->is_union_subquery = expr_params.is_union_subquery;
     _cur_sub_ctx->efsearch = _ctx->efsearch;
+    _cur_sub_ctx->nprobe = _ctx->nprobe;
     // from子查询完全ctx完全独立
     if (expr_params.is_from_subquery || expr_params.is_union_subquery) {
         plan_state.reset(new (std::nothrow)PlanTableContext);
@@ -831,6 +839,8 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
                 _plan_table_ctx->dblink_table_mapping[tableid] = orig_tbl_ptr;
             } else if (tbl_ptr->dblink_info.type() == pb::LT_MYSQL) {
                 _ctx->has_dblink_mysql = true;
+            } else if (tbl_ptr->dblink_info.type() == pb::LT_FILE) {
+                _ctx->has_dblink_file = true;
             } else {
                 DB_WARNING("unknown dblink type: %d", tbl_ptr->dblink_info.type());
                 return -1;
@@ -2955,9 +2965,12 @@ int LogicalPlanner::create_common_subquery_expr(const parser::SubqueryExpr* item
                                 pb::ExprNode* node = expr.add_nodes();
                                 construct_literal_expr(row, node);
                             }
-                        } else {
+                        } else if (rows.size() == 1) {
                             pb::ExprNode* node = expr.add_nodes();
                             construct_literal_expr(rows[0], node);
+                        } else {
+                            DB_WARNING("not data row_filed_number");
+                            return -1;
                         }
                     }
                 } else {
@@ -4432,8 +4445,8 @@ int LogicalPlanner::can_use_dblink(SmartTable table) {
             _ctx->stat_info.error_msg << "dblink table only supprt INSERT/DELETE/UPDATE/SELECT/UNION";
             return -1;
         }
-    } else if (table->dblink_info.type() == pb::LT_MYSQL){
-        // dblink MySQL表只支持SELECT/UNION
+    } else if (table->dblink_info.type() == pb::LT_MYSQL || table->dblink_info.type() == pb::LT_FILE){
+        // dblink MySQL/File表只支持SELECT/UNION
         if (_ctx->stmt_type != parser::NT_SELECT 
                 && _ctx->stmt_type != parser::NT_UNION) {
             DB_WARNING("dblink table not support stmt type: %d", _ctx->stmt_type);

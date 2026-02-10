@@ -92,6 +92,7 @@ private:
 
     // DBLINK
     int check_dblink_table_valid(const pb::SchemaInfo& table);
+    int check_alter_dblink_table_valid(const TableInfo& table, const parser::AlterTableStmt& stmt);
 
     std::map<std::string, bool> _column_can_null;
 

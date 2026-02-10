@@ -124,6 +124,7 @@ message SchemaConf {
     optional int32 olap_pre_split_cnt       = 23; // OLAP预分裂的个数
     optional bool cold_use_column_only      = 24; // 是否冷数据只使用列存
     optional bool force_column_storage      = 25; // 是否强制使用列存
+    optional bool column_only_read_base     = 26; // 列存只读base文件，可以避免merge on read
 };
 
 enum Engine {

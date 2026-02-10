@@ -67,6 +67,17 @@ struct WindowValueIntermediate {
     ExprValue value;
 };
 
+typedef std::variant<
+    WindowCountIntermediate,
+    WindowSumIntermediate,
+    WindowAvgIntermediate,
+    WindowMinMaxIntermediate,
+    WindowRowNumberIntermediate,
+    WindowRankIntermediate,
+    WindowNtileIntermediate,
+    WindowLeadLagIntermediate,
+    WindowValueIntermediate> Intermediate;
+
 class WindowFnCall : public ExprNode {
 public:
     enum WindowType {
@@ -127,7 +138,7 @@ private:
 
 private:
     WindowType _window_type;
-    std::string _window_intermediate; // 窗口函数中间结果
+    Intermediate _window_intermediate; // 窗口函数中间结果
     std::shared_ptr<MemRowCompare> _mem_row_compare;
 };
 

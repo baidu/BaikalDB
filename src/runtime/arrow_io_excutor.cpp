@@ -23,6 +23,9 @@
 #include <vector>
 #include "exchange_sender_node.h"
 
+namespace arrow {
+DECLARE_int64(refuse_if_exceed_max_malloc_gb);
+}
 namespace baikaldb {
 static bool validate_arrow_multi_threads(const char*, int32_t val) {
     return val >= 2;
@@ -262,11 +265,12 @@ int GlobalArrowExecutor::init() {
 void GlobalArrowExecutor::execute(RuntimeState* state, arrow::Result<std::shared_ptr<arrow::Table>>* result) {
     if (state->vectorlized_parallel_execution == false) {
         // 不开启pipeline并行
-        *result = arrow::acero::DeclarationToTable(arrow::acero::Declaration::Sequence(std::move(state->acero_declarations)), false); 
-        state->vectorlized_parallel_execution = false;
+        *result = arrow::acero::DeclarationToTable(arrow::acero::Declaration::Sequence(std::move(state->acero_declarations)), 
+            /*use_threads=*/false, 
+            GetMemoryPoolForRead()); 
     } else {
         // 开启pipeline并行, 异步模式
-        arrow::compute::ExecContext exec_context(arrow::default_memory_pool(), arrow::internal::GetCpuThreadPool());
+        arrow::compute::ExecContext exec_context(GetMemoryPoolForRead(), arrow::internal::GetCpuThreadPool());
         exec_context.set_use_threads(true);
         bthread::Mutex mu;
         bthread::ConditionVariable cond;
@@ -284,7 +288,20 @@ void GlobalArrowExecutor::execute(RuntimeState* state, arrow::Result<std::shared
                 cond.wait(lock);
             }
         }
-        state->vectorlized_parallel_execution = true;
     }
+}
+
+void GlobalArrowExecutor::shutdown() {
+    DB_WARNING("GlobalArrowExecutor begin shutdown");
+    // wait = false: 等待当前正在执行的task结束, 清空当前pending的task
+    arrow::internal::GetCpuThreadPool()->Shutdown(/*wait=*/false);
+    DB_WARNING("GlobalArrowExecutor shutdown finish");
+}
+
+arrow::MemoryPool* GetMemoryPoolForRead() {
+    if (arrow::FLAGS_refuse_if_exceed_max_malloc_gb > 0) {
+        return arrow::system_memory_pool_with_limit();
+    } 
+    return arrow::default_memory_pool();
 }
 }  // namespace baikaldb

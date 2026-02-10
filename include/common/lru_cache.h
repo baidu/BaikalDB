@@ -49,6 +49,7 @@ public:
     int find(const ItemKey& key, ItemType* value);
     int add(const ItemKey& key, const ItemType& value);
     int del(const ItemKey& key);
+    int clear();
 private:
     //双链表，从尾部插入数据，超过阈值数据从头部删除
     butil::LinkedList<LruNode<ItemKey, ItemType>> _lru_list;

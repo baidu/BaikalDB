@@ -70,7 +70,7 @@ public:
     virtual bool can_use_arrow_vector() {
         return false;
     }
-    virtual bool can_use_arrow_vector_for_compare_sclar_exrpr() {
+    virtual bool children_can_use_arrow_vector() {
         for (auto& c : _children) {
             if (!c->can_use_arrow_vector()) {
                 return false;

@@ -37,9 +37,9 @@ DEFINE_int64(1pc_out_fsm_interval_us, 20 * 1000 * 1000LL,
 DEFINE_int32(transaction_query_primary_region_interval_ms, 15 * 1000,
         "interval duration send request to primary region");
 
-int TransactionPool::init(int64_t region_id, bool use_ttl, int64_t online_ttl_base_expire_time_us) {
+int TransactionPool::init(int64_t region_id, bool use_normal_ttl, int64_t online_ttl_base_expire_time_us) {
     _region_id = region_id;
-    _use_ttl = use_ttl;
+    _use_normal_ttl = use_normal_ttl;
     _online_ttl_base_expire_time_us = online_ttl_base_expire_time_us;
     _meta_writer = MetaWriter::get_instance();
     return 0;

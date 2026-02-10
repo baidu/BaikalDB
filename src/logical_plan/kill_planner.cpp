@@ -19,7 +19,7 @@
 #include "state_machine.h"
 
 namespace baikaldb {
-
+DEFINE_bool(kill_select_out_txn_without_raft, false, "kill select out txn without raft");
 int KillPlanner::plan() {
     create_packet_node(pb::OP_KILL);
     auto client = _ctx->client_conn;
@@ -46,6 +46,12 @@ int KillPlanner::plan() {
             DB_WARNING("conn_id equal %ld is_query:%d", k->conn_id, k->is_query);
             _ctx->kill_ctx = sock->query_ctx;
             _ctx->kill_ctx->kill_all_ctx();
+            if (FLAGS_kill_select_out_txn_without_raft
+                    && sock->txn_id == 0 
+                    && sock->query_ctx != nullptr 
+                    && (sock->query_ctx->stmt_type == parser::NT_SELECT || sock->query_ctx->stmt_type == parser::NT_UNION)) {
+                _ctx->kill_without_raft = true;
+            }
             if (!k->is_query) {
                 sock->state = STATE_ERROR;
                 //client_free 会core

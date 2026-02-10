@@ -175,6 +175,15 @@ int SortNode::build_arrow_declaration(RuntimeState* state) {
     return 0;
 }
 
+bool SortNode::need_projection() {
+    for (auto& expr : _order_exprs) {
+        if (expr->node_type() != pb::SLOT_REF && expr->node_type() != pb::AGG_EXPR) {
+            return true;
+        }
+    }
+    return false;
+}
+
 int SortNode::build_sort_arrow_declaration(RuntimeState* state, pb::TraceNode* trace_node) {
     if (state->acero_declarations.size() > 0 
         && (state->acero_declarations.back().factory_name == "order_by"

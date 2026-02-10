@@ -18,6 +18,86 @@
 #include "expr_value.h"
 
 namespace baikaldb {
+inline bool is_leap(int y) {
+    return  y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+}
+
+static inline int64_t div_floor(int64_t a, int64_t b) {
+    return (a >= 0 ? a : a + 1 - b) / b;
+}
+// https://github.com/HowardHinnant/date
+// https://howardhinnant.github.io/date_algorithms.html#days_from_civil
+// 核心：将年月日转换为自 1970-01-01 起的天数（Howard Hinnant 算法）
+static inline int64_t days_from_civil(int64_t y, unsigned m, unsigned d) noexcept {
+    y -= m <= 2;
+    const int64_t era = div_floor(y, 400);
+    const unsigned yoe = static_cast<unsigned>(y - era * 400);
+    const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + static_cast<int64_t>(doe) - 719468;
+}
+
+// 将 struct tm（本地时间，不考虑 DST） 转为 time_t（UTC timestamp）
+time_t mktime_fixed_r(const struct tm* tm, int tz_offset_hours) {
+    int year = tm->tm_year + 1900;
+    unsigned mon = tm->tm_mon + 1;
+    unsigned mday = tm->tm_mday;
+    int64_t days = days_from_civil(year, mon, mday);
+    int64_t secs = days * 86400LL
+        + tm->tm_hour * 3600LL
+        + tm->tm_min * 60LL
+        + tm->tm_sec;
+    // 北京时间表示的时刻减去 tz_offset_hours 得到 UTC timestamp
+    return static_cast<time_t>(secs - tz_offset_hours * 3600LL);
+}
+
+struct tm* localtime_fixed_r(const time_t *timep,
+                                       struct tm *result,
+                                       int tz_offset_hours) {
+    int64_t t = (int64_t)*timep + tz_offset_hours * 3600LL;
+    int64_t days = t / 86400LL;
+    int64_t rem = t % 86400LL;
+    if (rem < 0) {
+        rem += 86400LL;
+        --days;
+    }
+
+    // 反向 civil from days => year, month, day
+    // Use days + 719468 to get proleptic civil day count since 0000‑03‑01
+    int64_t z = days + 719468;
+    const int64_t era = div_floor(z, 146097);
+    const unsigned doe = (unsigned)(z - era * 146097);
+    const unsigned yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365;
+    int year = (int)(yoe + era * 400);
+    const unsigned doy = doe - (365*yoe + yoe/4 - yoe/100);
+    const unsigned mp = (5*doy +2)/153;
+    unsigned day = doy - (153*mp+2)/5 +1;
+    unsigned month = mp + (mp < 10 ? 3 : -9);
+    year += (month <= 2);
+
+    result->tm_year = year - 1900;
+    result->tm_mon = month -1;
+    result->tm_mday = day;
+    // 预计算各月累积天数（平年/闰年）
+    static constexpr int kMonthDays[2][12] = {
+            {0,31,59,90,120,151,181,212,243,273,304,334},  // 平年
+            {0,31,60,91,121,152,182,213,244,274,305,335}   // 闰年
+    };
+    const int* month_days = kMonthDays[is_leap(year)];
+    result->tm_yday = month_days[result->tm_mon] + day - 1;
+    //result->tm_yday = days ? (doy + begin_days) - year_days : (doy + begin_days);
+
+    result->tm_wday = (int)(days >= -4 ? (days + 4) % 7 : (days + 5) % 7 + 6);
+
+    result->tm_hour = (int)(rem / 3600);
+    rem %= 3600;
+    result->tm_min = (int)(rem / 60);
+    result->tm_sec = (int)(rem % 60);
+    result->tm_isdst = 0;
+
+    return result;
+}
+
 std::string timestamp_to_str(time_t timestamp, bool is_utc) {
     // 内部存储采用了uint32，因此小于0的都不合法
     if (timestamp <= 0) {
@@ -25,14 +105,9 @@ std::string timestamp_to_str(time_t timestamp, bool is_utc) {
     }
     struct tm tm;
     if (is_utc) {
-        gmtime_r(&timestamp, &tm);
+        localtime_fixed_r(&timestamp, &tm, 0);
     } else {
-        localtime_r(&timestamp, &tm);  
-        // 夏令时影响
-        if (tm.tm_isdst == 1) {
-            timestamp = timestamp - 3600;
-            localtime_r(&timestamp, &tm);
-        }
+        localtime_fixed_r(&timestamp, &tm);  
     }
     char str_time[21] = {0};
     strftime(str_time, sizeof(str_time), "%Y-%m-%d %H:%M:%S", &tm);
@@ -251,7 +326,7 @@ time_t datetime_to_timestamp(uint64_t datetime) {
 
     tm.tm_year -= 1900;
     tm.tm_mon--;
-    time_t t = mktime(&tm);
+    time_t t = mktime_fixed_r(&tm);
     return t <= 0 ? 0 : t;
 }
 
@@ -270,7 +345,7 @@ time_t snapshot_to_timestamp(uint64_t snapshot) {
     tm.tm_sec = 0;
     tm.tm_isdst = 0;
 
-    time_t ts = mktime(&tm);
+    time_t ts = mktime_fixed_r(&tm);
     return ts;
 }
 
@@ -281,7 +356,7 @@ uint64_t timestamp_to_datetime(time_t timestamp) {
     uint64_t datetime = 0;
 
     struct tm tm;
-    localtime_r(&timestamp, &tm);
+    localtime_fixed_r(&timestamp, &tm);
     tm.tm_year += 1900;
     tm.tm_mon++;
     uint64_t year_month = tm.tm_year * 13 + tm.tm_mon;
@@ -312,12 +387,7 @@ void datetime_to_time_struct(uint64_t datetime, DateTime& time_struct, uint8_t t
     } else if (type == MYSQL_TYPE_TIMESTAMP) {
         struct tm tm;
         time_t timestamp = (time_t)datetime;
-        localtime_r(&timestamp, &tm);
-        // 夏令时影响
-        if (tm.tm_isdst == 1) {
-            timestamp = timestamp - 3600;
-            localtime_r(&timestamp, &tm);
-        }
+        localtime_fixed_r(&timestamp, &tm);
         time_struct.year = tm.tm_year + 1900;
         time_struct.month = tm.tm_mon + 1;
         time_struct.day = tm.tm_mday;
@@ -536,14 +606,14 @@ bool tz_to_second(const char* time_zone, int32_t& result) {
         struct tm tm_local;
         time(&time_utc);
  
-        localtime_r(&time_utc, &tm_local);
+        localtime_fixed_r(&time_utc, &tm_local);
  
         time_t time_local;
         struct tm tm_gmt;
  
-        time_local = mktime(&tm_local);
+        time_local = mktime_fixed_r(&tm_local);
  
-        gmtime_r(&time_utc, &tm_gmt);
+        localtime_fixed_r(&time_utc, &tm_gmt, 0);
         int hour = tm_local.tm_hour - tm_gmt.tm_hour;
         if (hour < -12) {
             hour += 24; 
@@ -584,16 +654,13 @@ size_t date_format_internal(char* s, size_t maxsize, const char* format, const s
     if (tp == nullptr || format == nullptr) {
         return 0;
     }
+    
     size_t i = 0;
     std::string f = "";
-    char tmp[20] = {0};
-    int hour12 = tp->tm_hour % 12;
-    if (hour12 == 0) {
-        hour12 = 12;
-    }
-    while (format[i] != '\0') {
+    bool need_convert = false;
+    while (format[i] != '\0' && !need_convert) {
         if (format[i] != '%' ) {
-            f += format[i++];
+            i++;
             continue;
         }
         i++;
@@ -602,104 +669,138 @@ size_t date_format_internal(char* s, size_t maxsize, const char* format, const s
         }
         switch (format[i]) {
             case 'c':
-                f += std::to_string(tp->tm_mon + 1);
-                break;
             case 'D':
-                f += std::to_string(tp->tm_mday);
-                if (tp->tm_mday == 1 || tp->tm_mday == 21 || tp->tm_mday == 31) {
-                    f += "st";
-                }
-                else if (tp->tm_mday == 2 || tp->tm_mday == 22) {
-                    f += "nd";
-                }
-                else if (tp->tm_mday == 3 || tp->tm_mday == 23) {
-                    f += "rd";
-                } else {
-                    f += "th";
-                }
-                break;
             case 'e':
-                //mysql为月的天，strftime中<10时会带个空格
-                f += std::to_string(tp->tm_mday);
-                break;
             case 'f':
-                //微妙数
-                f += "000000";
-                break;
             case 'h':
             case 'I':
-                if (hour12 < 10) {
-                    f += "0";
-                }
-                f += std::to_string(hour12);
-                break;
             case 'i':
-                f += "%M";
-                break;
             case 'l':
-                f += std::to_string(hour12);
-                break;
             case 'M':
-                f += "%B";
-                break;
             case 'p':
-                if (tp->tm_hour % 24 >= 12){
-                    f += "PM";
-                } else {
-                    f += "AM";
-                }
-                break;
             case 'r':
-                //02:12:00 AM，
-                memset(tmp, 0, sizeof(tmp));
-                snprintf(tmp, sizeof(tmp), "%02d:%02d:%02d ", hour12, tp->tm_min, tp->tm_sec);
-                f += tmp;
-                if (tp->tm_hour % 24 >= 12) {
-                    f += "PM";
-                } else {
-                    f += "AM";
-                }
-                break;
             case 'v':
-                f += "%V";
-                break;
             case 'W':
-                f += "%A";
-                break;
             case 'X':
             case 'x':
-                f += "%Y";
-                break;
             case 's':
-                f += "%S";
-                break;
             case 'k':
-                f += std::to_string(tp->tm_hour);
-                break;
             case 'u':
-                f += "%W";
+                need_convert = true;
                 break;
-            case 'Y':
-            case 'y':
-            case 'j':
-            case 'm':
-            case 'H':
-            default:
-                f += "%";
-                f += format[i];
         }
         i++;
     }
-    return strftime(s, maxsize, f.c_str(), tp);
+    if (need_convert) {
+        i = 0;
+        char tmp[20] = {0};
+        int hour12 = tp->tm_hour % 12;
+        if (hour12 == 0) {
+            hour12 = 12;
+        }
+        while (format[i] != '\0') {
+            if (format[i] != '%' ) {
+                f += format[i++];
+                continue;
+            }
+            i++;
+            if (format[i] == '\0') {
+                break;
+            }
+            switch (format[i]) {
+                case 'c':
+                    f += std::to_string(tp->tm_mon + 1);
+                    break;
+                case 'D':
+                    f += std::to_string(tp->tm_mday);
+                    if (tp->tm_mday == 1 || tp->tm_mday == 21 || tp->tm_mday == 31) {
+                        f += "st";
+                    }
+                    else if (tp->tm_mday == 2 || tp->tm_mday == 22) {
+                        f += "nd";
+                    }
+                    else if (tp->tm_mday == 3 || tp->tm_mday == 23) {
+                        f += "rd";
+                    } else {
+                        f += "th";
+                    }
+                    break;
+                case 'e':
+                    //mysql为月的天，strftime中<10时会带个空格
+                    f += std::to_string(tp->tm_mday);
+                    break;
+                case 'f':
+                    //微妙数
+                    f += "000000";
+                    break;
+                case 'h':
+                case 'I':
+                    if (hour12 < 10) {
+                        f += "0";
+                    }
+                    f += std::to_string(hour12);
+                    break;
+                case 'i':
+                    f += "%M";
+                    break;
+                case 'l':
+                    f += std::to_string(hour12);
+                    break;
+                case 'M':
+                    f += "%B";
+                    break;
+                case 'p':
+                    if (tp->tm_hour % 24 >= 12){
+                        f += "PM";
+                    } else {
+                        f += "AM";
+                    }
+                    break;
+                case 'r':
+                    //02:12:00 AM，
+                    memset(tmp, 0, sizeof(tmp));
+                    snprintf(tmp, sizeof(tmp), "%02d:%02d:%02d ", hour12, tp->tm_min, tp->tm_sec);
+                    f += tmp;
+                    if (tp->tm_hour % 24 >= 12) {
+                        f += "PM";
+                    } else {
+                        f += "AM";
+                    }
+                    break;
+                case 'v':
+                    f += "%V";
+                    break;
+                case 'W':
+                    f += "%A";
+                    break;
+                case 'X':
+                case 'x':
+                    f += "%Y";
+                    break;
+                case 's':
+                    f += "%S";
+                    break;
+                case 'k':
+                    f += std::to_string(tp->tm_hour);
+                    break;
+                case 'u':
+                    f += "%W";
+                    break;
+                default:
+                    f += "%";
+                    f += format[i];
+            }
+            i++;
+        }
+        format = f.c_str();
+    }
+    return strftime(s, maxsize, format, tp);
 }
 
 int64_t timestamp_to_ts(uint32_t  timestamp) {
     return (((int64_t)timestamp) * 1000 - tso::base_timestamp_ms) << 18;
 }
 
-bool is_leap_year(int year) {
-    return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-}
 // 判断字符串是否为YYYYMMDD(不包含hour)/YYYYMMDDHH(包含hour)格式
 bool is_valid_date(const std::string& date_str, const bool has_hour) {
     static const int32_t days_in_month[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
@@ -724,7 +825,7 @@ bool is_valid_date(const std::string& date_str, const bool has_hour) {
         return false;
     }
     int mday_max = days_in_month[mon - 1];
-    if (mon == 2 && is_leap_year(year)) {
+    if (mon == 2 && is_leap(year)) {
         mday_max++;
     }
     if (mday < 1 || mday > mday_max) {
@@ -751,7 +852,7 @@ int date_add_interval(time_t& ts, const int64_t interval, const TimeUnit time_un
     case TimeUnit::YEAR:
     case TimeUnit::MONTH: {
         struct tm tm;
-        localtime_r(&ts, &tm);
+        localtime_fixed_r(&ts, &tm);
         int year = tm.tm_year + 1900;
         int mon = tm.tm_mon;
         int day = tm.tm_mday;
@@ -761,7 +862,7 @@ int date_add_interval(time_t& ts, const int64_t interval, const TimeUnit time_un
             //      2024-02-29 -> 2023-02-28
             //      2024-02-20 -> 2023-02-20
             year += interval;
-            if (mon + 1 == 2 && day == 29 && !is_leap_year(year)) {
+            if (mon + 1 == 2 && day == 29 && !is_leap(year)) {
                 day = 28;
             }
         } else {
@@ -775,7 +876,7 @@ int date_add_interval(time_t& ts, const int64_t interval, const TimeUnit time_un
             mon = (mon % 12 + 12) % 12;
             if (day > days_in_month[mon]) {
                 day = days_in_month[mon];
-                if (mon + 1 == 2 && is_leap_year(year)) {
+                if (mon + 1 == 2 && is_leap(year)) {
                     day++;
                 }
             }
@@ -783,7 +884,7 @@ int date_add_interval(time_t& ts, const int64_t interval, const TimeUnit time_un
         tm.tm_year = year - 1900;
         tm.tm_mon = mon;
         tm.tm_mday = day;
-        ts = mktime(&tm);
+        ts = mktime_fixed_r(&tm);
         break;
     }
     case TimeUnit::DAY:
@@ -813,27 +914,27 @@ int get_current_day_timestamp(time_t& current_day_ts, time_t current_ts) {
     if (current_ts == -1) {
         current_ts = ::time(NULL);
     }
-    localtime_r(&current_ts, &tm);
+    localtime_fixed_r(&current_ts, &tm);
     
     tm.tm_hour = 0;
     tm.tm_min  = 0;
     tm.tm_sec  = 0;
 
-    current_day_ts = mktime(&tm);
+    current_day_ts = mktime_fixed_r(&tm);
     return 0;
 }
 
 int get_current_month_timestamp(const int start_day_of_month, time_t& current_month_ts) {
     struct tm tm;
     time_t current_ts = ::time(NULL);
-    localtime_r(&current_ts, &tm);
+    localtime_fixed_r(&current_ts, &tm);
     
     tm.tm_mday = start_day_of_month;
     tm.tm_hour = 0;
     tm.tm_min  = 0;
     tm.tm_sec  = 0;
 
-    current_month_ts = mktime(&tm);
+    current_month_ts = mktime_fixed_r(&tm);
     return 0;
 }
 
@@ -842,7 +943,7 @@ int timestamp_to_format_str(const time_t ts, const char* format, std::string& st
         return -1;
     }
     struct tm tm;
-    localtime_r(&ts, &tm);
+    localtime_fixed_r(&ts, &tm);
 
     char str_time[21] = {0};
     strftime(str_time, sizeof(str_time), format, &tm);

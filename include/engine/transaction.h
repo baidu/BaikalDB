@@ -31,6 +31,7 @@
 namespace baikaldb {
 DECLARE_bool(disable_wal);
 DECLARE_bool(leader_merge_in_raft);
+DECLARE_bool(enable_column_engine);
 class ReverseIndexBase;
 
 typedef std::map<int, pb::CachePlan> CachePlanMap;
@@ -459,8 +460,8 @@ public:
         _watt_stats_version = version;
     }
 
-    void set_use_ttl(bool use_ttl) { _use_ttl = use_ttl; }
-    bool use_ttl() const { return _use_ttl; }
+    void set_use_normal_ttl(bool use_normal_ttl) { _use_normal_ttl = use_normal_ttl; }
+    bool use_normal_ttl() const { return _use_normal_ttl; }
     bool use_cold_db() const { return _use_cold_db; }
     static int get_full_primary_key(
             rocksdb::Slice  index_bytes, 
@@ -568,6 +569,10 @@ public:
         _reverse_set.insert(base);
     }
 
+    bool has_column_engine() {
+        return FLAGS_enable_column_engine && _table_info->schema_conf.enable_column_engine();
+    }
+
 public:
     int64_t     num_increase_rows = 0;
     int64_t     last_active_time = 0;
@@ -672,7 +677,7 @@ private:
     std::set<int32_t>               _pri_field_ids; // for cstore
 
     bthread_mutex_t                 _txn_mutex;
-    bool                            _use_ttl = false;
+    bool                            _use_normal_ttl = false;
     bool                            _is_separate = false;
     int64_t                         _read_ttl_timestamp_us = 0; //ttl读取时间
     int64_t                         _write_ttl_timestamp_us = 0; //ttl写入时间

@@ -154,6 +154,44 @@ int arrow_repeat(std::vector<ExprNode*>& children, pb::Function* fn,
     return 0;
 }
 
+int arrow_substring_index(std::vector<ExprNode*>& children, pb::Function* fn, 
+                    const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
+    RETURN_NULL_IF_COLUMN_SATISFY_COND(children.size() != 3);
+    RETURN_NULL_IF_COLUMN_SATISFY_COND(children[1]->col_type() == pb::NULL_TYPE || children[2]->col_type() == pb::NULL_TYPE);
+
+    std::string index = children[1]->get_value(nullptr).get_string();
+    int64_t pos = children[2]->get_value(nullptr).get_numberic<int64_t>();
+    if (0 != build_arrow_expr_with_cast(children[0], pb::STRING)) {
+        return -1;
+    }
+    if (index.empty() || pos == 0) {
+        out = arrow::literal("");
+        return 0;
+    }
+    CommonFunctionOptions option(index, pos);
+    out = arrow::compute::call("baikal_substring_index", {children[0]->arrow_expr()}, std::move(option));
+    return 0;
+}
+
+int arrow_replace(std::vector<ExprNode*>& children, pb::Function* fn, 
+                    const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
+    RETURN_NULL_IF_COLUMN_SATISFY_COND(children.size() != 3);
+    RETURN_NULL_IF_COLUMN_SATISFY_COND(children[0]->col_type() == pb::NULL_TYPE);
+
+    if (0 != build_arrow_expr_with_cast(children[0], pb::STRING)) {
+        return -1;
+    }
+    std::string pattern = children[1]->get_value(nullptr).get_string();
+    std::string replacement = children[2]->get_value(nullptr).get_string();
+    if (pattern.empty()) {
+        out = children[0]->arrow_expr();
+        return 0;
+    }
+    arrow::compute::ReplaceSubstringOptions option(pattern, replacement);
+    out = arrow::compute::call("replace_substring", {children[0]->arrow_expr()}, std::move(option));
+    return 0;
+}
+
 template <typename O, typename I>
 struct UpperTransfer {
     using BuilderType = typename arrow::TypeTraits<O>::BuilderType;
@@ -200,6 +238,57 @@ struct LowerTransfer {
     }
 };
 
+template <typename O, typename I>
+struct SubstringIndex {
+    using BuilderType = typename arrow::TypeTraits<O>::BuilderType;
+    static arrow::Status Exec(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) {
+        BuilderType builder;
+        const arrow::ArraySpan& input = batch[0].array;
+        CommonState* state = static_cast<CommonState*>(ctx->state());
+        const std::string& sub = state->str_value;
+        int64_t pos = state->int_value;
+        
+        RETURN_NOT_OK(arrow::compute::internal::VisitArrayValuesInline<I>(
+        input,
+        [&](std::string_view v) {
+            std::vector<size_t> pos_vec;
+            size_t last_pos = 0;
+            while (true) {
+                size_t find_pos = v.find(sub, last_pos);
+                if (find_pos != std::string::npos) {
+                    pos_vec.emplace_back(find_pos);
+                    last_pos = find_pos + sub.size();
+                } else {
+                    break;
+                }
+            }
+            if (pos > 0) {
+                if (pos <= pos_vec.size()) {
+                    return builder.Append(v.substr(0, pos_vec[pos - 1]));
+                } else {
+                    return builder.Append(v);
+                }
+            } else {
+                pos = -pos;
+                if (pos <= pos_vec.size()) {
+                    pos = pos_vec.size() - pos;
+                    return builder.Append(v.substr(pos_vec[pos] + sub.size()));
+                } else {
+                    return builder.Append(v);
+                }
+            }
+            return builder.Append(v);
+        },
+        [&]() {
+            return builder.AppendNull();
+        }));
+        std::shared_ptr<arrow::Array> output_array;
+        RETURN_NOT_OK(builder.Finish(&output_array));
+        out->value = std::move(output_array->data());
+        return arrow::Status::OK();
+    }
+};
+
 arrow::Status ArrowFunctionManager::RegisterAllStringFunction() {
     auto registry = arrow::compute::GetFunctionRegistry();
     {
@@ -221,6 +310,17 @@ arrow::Status ArrowFunctionManager::RegisterAllStringFunction() {
                         arrow::compute::internal::GenerateVarBinaryToVarBinary<LowerTransfer, arrow::LargeBinaryType>(*in_ty)));
         }
         ARROW_RETURN_NOT_OK(registry->AddFunction(lower));
+    }
+    {
+        auto substring_index = std::make_shared<arrow::compute::ScalarFunction>("baikal_substring_index", arrow::compute::Arity::Unary(),
+                                                    /*doc=*/arrow::compute::FunctionDoc::Empty());
+        for (const std::shared_ptr<arrow::DataType>& in_ty : arrow::BaseBinaryTypes()) {
+            ARROW_RETURN_NOT_OK(
+                substring_index->AddKernel({in_ty}, arrow::large_binary(),
+                        arrow::compute::internal::GenerateVarBinaryToVarBinary<SubstringIndex, arrow::LargeBinaryType>(*in_ty),
+                        InitCommonState));
+        }
+        ARROW_RETURN_NOT_OK(registry->AddFunction(substring_index));
     }
     return arrow::Status::OK();
 }

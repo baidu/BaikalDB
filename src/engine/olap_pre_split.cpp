@@ -19,7 +19,7 @@ namespace baikaldb {
 DEFINE_int64(olap_region_pre_split_min_rows, 10000000, "olap_region_pre_split_min_rows 1000w");
 DEFINE_int64(olap_region_pre_split_interval_s, 2 * 24 * 3600LL, "default 2 day");
 DECLARE_int32(key_point_collector_interval);
-DEFINE_bool(need_olap_pre_split, false, "need_olap_pre_split");
+DEFINE_bool(need_olap_pre_split, false, "Enable OLAP pre-split, default: false");
 void OlapPreSplit::olap_pre_split() {
     if (!FLAGS_need_olap_pre_split) {
         return;

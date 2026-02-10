@@ -88,6 +88,8 @@ DEFINE_int32(store_port, 8110, "Server port");
 DEFINE_string(secondary_db_path, "./rocks_db_secondary", "rocks db path");
 DEFINE_string(compaction_db_path, "./rocks_db_compaction", "rocks db path for compaction server");
 DEFINE_int32(remote_compaction_server_concurrency, 10, "remote_compaction_server_concurrency");
+DEFINE_int64(print_time_us, 10000, "print log when time_cost > print_time_us(us)");
+BRPC_VALIDATE_GFLAG(print_time_us, brpc::NonNegativeInteger);
 
 int64_t timestamp_diff(timeval _start, timeval _end) {
     return (_end.tv_sec - _start.tv_sec) * 1000000 
@@ -672,10 +674,12 @@ bool same_with_container_id_and_address(const std::string& container_id, const s
     std::vector<std::string> instances;
     int ret = get_instance_from_bns(&bns_ret, container_id, instances, false);
     if (ret != 0) {
-        return true;
+        DB_WARNING("diff with container_id:%s bns error and address:%s", container_id.c_str(), address.c_str());
+        return false;
     }
     if (instances.size() != 1) {
-        return true;
+        DB_WARNING("diff with container_id:%s(size:%lu) and address:%s", container_id.c_str(), instances.size(), address.c_str());
+        return false;
     }
     if (instances[0] == address) {
         return true;

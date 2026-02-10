@@ -5,7 +5,7 @@ namespace baikaldb {
 int MysqlScanNode::init(const pb::PlanNode& node) {
     int ret = 0;
     ret = ScanNode::init(node);
-    if (ret != 0) {
+    if (ret < 0) {
         DB_WARNING("ExecNode::init fail, ret: %d", ret);
         return ret;
     }
@@ -18,6 +18,11 @@ int MysqlScanNode::open(RuntimeState* state) {
         return -1;
     }
     START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
+    int ret = ScanNode::open(state);
+    if (ret < 0) {
+        DB_WARNING("ScanNode::open fail, ret: %d", ret);
+        return -1;
+    }
     _table_info = SchemaFactory::get_instance()->get_table_info_ptr(_table_id);
     if (_table_info == nullptr) {
         DB_WARNING("table info is null, table id: %ld", _table_id);
@@ -30,15 +35,11 @@ int MysqlScanNode::open(RuntimeState* state) {
         DB_WARNING("tuple desc is nullptr");
         return -1;
     }
-    if (_related_manager_node == nullptr) {
-        DB_WARNING("related_manager_node is nullptr");
-        return -1;
-    }
-    if (_related_manager_node->is_delay_fetcher_store()) {
+    if (_related_manager_node != nullptr && _related_manager_node->is_delay_fetcher_store()) {
         set_node_exec_type(pb::EXEC_ARROW_ACERO);
         return 0;
     }
-    int ret = query_sql(state);
+    ret = query_sql(state);
     if (ret < 0) {
         DB_WARNING("Fail to query mysql");
         return -1;
@@ -202,11 +203,10 @@ int MysqlScanNode::build_arrow_declaration(RuntimeState* state) {
         arrow::Iterator<std::shared_ptr<arrow::RecordBatch>> batch_it = arrow::MakeIteratorFromReader(_vectorized_reader);
         return batch_it;
     };
-    if (_related_manager_node == nullptr) {
-        DB_WARNING("related_manager_node is nullptr");
-        return -1;
+    bool is_delay_fetch = false;
+    if (_related_manager_node != nullptr) {
+        is_delay_fetch = _related_manager_node->is_delay_fetcher_store();
     }
-    bool is_delay_fetch = _related_manager_node->is_delay_fetcher_store();
     if (state->vectorlized_parallel_execution == false) {
         arrow::acero::Declaration dec{"record_batch_source",
             arrow::acero::RecordBatchSourceNodeOptions{_vectorized_reader->schema(), std::move(iter_maker)}}; 
@@ -350,12 +350,10 @@ int MysqlVectorizedReader::init(MysqlScanNode* scan_node, RuntimeState* state) {
     }
     SelectManagerNode* related_manager_node = 
         static_cast<SelectManagerNode*>(_scan_node->get_related_manager_node());
-    if (related_manager_node == nullptr) {
-        DB_WARNING("_related_manager_node is nullptr");
-        return -1;
+    if (related_manager_node != nullptr) {
+        _is_delay_fetch = related_manager_node->is_delay_fetcher_store();
+        _index_cond = related_manager_node->get_index_collector_cond();
     }
-    _is_delay_fetch = related_manager_node->is_delay_fetcher_store();
-    _index_cond = related_manager_node->get_index_collector_cond();
     return 0;
 }
 

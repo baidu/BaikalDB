@@ -47,7 +47,7 @@ int segment(
         case pb::S_ES_STANDARD:
             ret = Tokenizer::get_instance()->es_standard(word, term_map, charset);
             break;
-#ifdef BAIDU_INTERNAL
+#if defined(BAIDU_INTERNAL) && !defined(__aarch64__)
         case pb::S_WORDRANK:
             ret = Tokenizer::get_instance()->wordrank(word, term_map, charset);
             break;

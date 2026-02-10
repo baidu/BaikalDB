@@ -49,7 +49,7 @@ inline std::shared_ptr<arrow::Schema> get_arrow_schema () {
         std::vector<std::shared_ptr<arrow::Field>> {
             arrow::field("key", arrow::binary()),
             arrow::field("flag", arrow::uint8()),
-            arrow::field("weight", arrow::float32())
+            arrow::field("weight", arrow::float64())
         }
     );
     return schema;
@@ -125,7 +125,6 @@ public:
         _key_builder.Append(key);
         _flag_builder.Append(flag);
         _weight_builder.Append(weight);
-        _current_node_index++;
         ++_rows;
     }
 
@@ -133,7 +132,6 @@ public:
         _key_builder.Append(node.key());
         _flag_builder.Append(node.flag());
         _weight_builder.Append(node.weight());
-        _current_node_index++;
         ++_rows;
     }
 
@@ -170,20 +168,20 @@ private:
     void set_internal_info() {
         _rows = _result->num_rows();
         _keys_ptr =
-            static_cast<arrow::StringArray*>(_result->column(0).get());
+            static_cast<arrow::BinaryArray*>(_result->column(0).get());
         _flags_ptr =
-            static_cast<arrow::Int8Array*>(_result->column(1).get());
+            static_cast<arrow::UInt8Array*>(_result->column(1).get());
         _weights_ptr =
             static_cast<arrow::DoubleArray*>(_result->column(2).get());
     }
 private:
     std::shared_ptr<arrow::RecordBatch> _result {nullptr};
-    arrow::StringArray* _keys_ptr = nullptr;
-    arrow::Int8Array* _flags_ptr = nullptr;
+    arrow::BinaryArray* _keys_ptr = nullptr;
+    arrow::UInt8Array* _flags_ptr = nullptr;
     arrow::DoubleArray* _weights_ptr = nullptr;
     arrow::MemoryPool* pool = arrow::default_memory_pool();
-    arrow::StringBuilder _key_builder {pool};
-    arrow::Int8Builder _flag_builder {pool};
+    arrow::BinaryBuilder _key_builder {pool};
+    arrow::UInt8Builder _flag_builder {pool};
     arrow::DoubleBuilder _weight_builder {pool};
     int64_t _rows = 0;
     int64_t _current_node_index = -1;

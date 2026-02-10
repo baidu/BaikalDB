@@ -154,6 +154,14 @@ public:
 
     int get_key_points(RuntimeState* state, RowBatch* batch, bool* eos);
 
+    bool is_ddl_update() const {
+        return _ddl_work_type == pb::DDL_COLUMN && _is_ddl_update;
+    }
+
+    bool is_ddl_delete() const {
+        return _ddl_work_type == pb::DDL_COLUMN && !_is_ddl_update;
+    };
+
 private:
     int get_next_by_table_get(RuntimeState* state, RowBatch* batch, bool* eos);
     int get_next_by_table_seek(RuntimeState* state, RowBatch* batch, bool* eos);
@@ -199,6 +207,7 @@ private:
     int64_t _region_id;
     bool _use_get = false;
     bool _is_ddl_work = false;
+    bool _is_ddl_update = false;
     bool _is_global_index = false;
     bool _has__weight = false;
     pb::DDLType _ddl_work_type = pb::DDL_NONE;
@@ -243,6 +252,7 @@ private:
     std::string _vector_word;
     int _topk = 10;
     int _efsearch = 16;
+    int _nprobe = 5;
     uint64_t _separate_value = 0;
 
     SmartTable       _table_info;

@@ -386,7 +386,7 @@ public:
     bool is_get_keypoint() {
         return _is_get_keypoint;
     }
-    bool set_has_optimized(bool has_optimized) {
+    void set_has_optimized(bool has_optimized) {
         _has_optimized = has_optimized;
     }
     bool has_optimized() {
@@ -466,6 +466,7 @@ public:
         _partition_property.hash_partition_propertys = partition_property->hash_partition_propertys;
         _partition_property.add_need_cast_string_columns(partition_property->need_cast_string_columns);
     }
+    void set_child_node_property_any_type();
 
     NodePartitionProperty* partition_property() {
         return &_partition_property;

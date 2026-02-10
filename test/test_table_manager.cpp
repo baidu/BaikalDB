@@ -232,6 +232,8 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     request_create_table_fc.mutable_table_info()->set_table_name("userinfo");
     request_create_table_fc.mutable_table_info()->set_database("FC_Word");
     request_create_table_fc.mutable_table_info()->set_namespace_name("FengChao");
+    request_create_table_fc.mutable_table_info()->set_engine(baikaldb::pb::ROCKSDB);
+    request_create_table_fc.mutable_table_info()->set_partition_num(1);
     // request_create_table_fc.mutable_table_info()->add_init_store("127.0.0.1:8010");
     request_create_table_fc.mutable_table_info()->set_resource_tag("e0");
     baikaldb::pb::FieldInfo* field = request_create_table_fc.mutable_table_info()->add_fields();
@@ -255,6 +257,8 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     index->set_index_type(baikaldb::pb::I_KEY);
     index->add_field_names("username");
     index->add_field_names("type");
+    baikaldb::pb::MetaManagerResponse response_create_table;
+    EXPECT_EQ(_schema_manager->pre_process_for_create_table(&request_create_table_fc, &response_create_table, 0), 0);
     _table_manager->create_table(request_create_table_fc, 1, NULL);
     
     ASSERT_EQ(2, _namespace_manager->_max_namespace_id);
@@ -278,8 +282,8 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     ASSERT_EQ(1, _database_manager->_table_ids[1].size());
     ASSERT_EQ(1, _database_manager->_database_info_map[1].version());
 
-    std::unordered_map<std::string, int64_t>            table_id_map;
-    std::unordered_map<int64_t, baikaldb::TableMem>               table_info_map;
+    std::unordered_map<std::string, int64_t> table_id_map;
+    std::unordered_map<int64_t, baikaldb::TableMem> table_info_map;
     {
         baikaldb::DoubleBufferedTableMemMapping::ScopedPtr info;
         if (_table_manager->_table_mem_infos.Read(&info) != 0) {
@@ -359,6 +363,8 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     request_create_table_fc_level.mutable_table_info()->set_table_name("planinfo");
     request_create_table_fc_level.mutable_table_info()->set_database("FC_Word");
     request_create_table_fc_level.mutable_table_info()->set_namespace_name("FengChao");
+    request_create_table_fc_level.mutable_table_info()->set_engine(baikaldb::pb::ROCKSDB);
+    request_create_table_fc_level.mutable_table_info()->set_partition_num(1);
     // request_create_table_fc_level.mutable_table_info()->add_init_store("127.0.0.1:8010");
     //request_create_table_fc_level.mutable_table_info()->set_upper_table_name("userinfo");
     request_create_table_fc_level.mutable_table_info()->set_resource_tag("e0");
@@ -384,6 +390,7 @@ TEST_F(TableManagerTest, test_create_drop_modify) {
     index->set_index_type(baikaldb::pb::I_KEY);
     index->add_field_names("planname");
     index->add_field_names("type");
+    EXPECT_EQ(_schema_manager->pre_process_for_create_table(&request_create_table_fc_level, &response_create_table, 0), 0);
     _table_manager->create_table(request_create_table_fc_level, 2, NULL);
     ASSERT_EQ(2, _namespace_manager->_max_namespace_id);
     ASSERT_EQ(3, _database_manager->_max_database_id);

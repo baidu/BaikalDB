@@ -421,6 +421,7 @@ public:
     std::set<int64_t>   current_table_tuple_ids;
     bool                open_binlog = false;
     bool                no_binlog = false; // 用于控制DM导入是否写binlog
+    bool                disable_on_update = false; // 为true时 ON UPDATE CURRENT_TIMESTAMP 不会自动更新
     SignExecType        sql_exec_type_defined = SignExecType::SIGN_EXEC_NOT_SET;
     bool                use_mpp = false;
 
@@ -442,6 +443,7 @@ public:
     bool                is_cancelled = false;
     bool                execute_global_flow = false;
     std::shared_ptr<QueryContext> kill_ctx;
+    bool                kill_without_raft = false;
     std::vector<std::shared_ptr<QueryContext>> sub_query_plans;
     std::unordered_map<uint64_t, std::string> long_data_vars;
     std::vector<SignedType> param_type;
@@ -500,6 +502,7 @@ public:
 
     // 向量索引使用
     int32_t efsearch = -1;
+    int32_t nprobe = -1;
 
     bool dumped_slow_sql = false;
 
@@ -508,6 +511,12 @@ public:
 
     // 查询是否包含DBLink Mysql表
     bool has_dblink_mysql = false;
+
+    // 查询是否包含DBLink File表
+    bool has_dblink_file = false;
+
+    // 查询是否必须使用向量化执行
+    bool must_vectorize = false;
 
 private:
     std::vector<pb::TupleDescriptor> _tuple_descs;

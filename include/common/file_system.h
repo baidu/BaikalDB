@@ -33,9 +33,11 @@
 #include <base/file_util.h>
 #include <base/files/file_path.h>
 #include <base/files/file_enumerator.h>
+
 #include "baidu/inf/afs-api/client/afs_filesystem.h"
 #include "baidu/inf/afs-api/common/afs_common.h"
 #include "baidu/inf/afs-api/client/afs_impl.h"
+
 #else
 #include <butil/files/file.h>
 #include <butil/file_util.h>
@@ -52,6 +54,14 @@ namespace baikaldb {
 DECLARE_int32(file_buffer_size);
 
 typedef boost::filesystem::directory_iterator dir_iter;
+
+extern const char* AFS_CLIENT_CONF_PATH;
+
+struct MemBuf : std::streambuf {
+    MemBuf(char* begin, char* end) {
+        this->setg(begin, begin, end);
+    }
+};
 
 enum class FileMode {
     I_FILE,
@@ -74,7 +84,8 @@ public:
     virtual bool sync() = 0;
 };
 
-#ifdef BAIDU_INTERNAL
+
+#if defined(BAIDU_INTERNAL)
 class AfsFileWriter : public FileWriter {
 public:
     AfsFileWriter(afs::Writer* writer) : _writer(writer) {}
@@ -132,7 +143,8 @@ private:
     bool _error = false;
 };
 
-#ifdef BAIDU_INTERNAL
+
+#if defined(BAIDU_INTERNAL)
 class AfsFileReader : public FileReader {
 public:
     AfsFileReader(afs::Reader* reader) : _reader(reader) {}
@@ -151,6 +163,11 @@ private:
 };
 #endif
 
+struct DirEntry {
+    FileMode mode;
+    std::string path;
+};
+
 class FileSystem {
 public:
     FileSystem(bool is_posix) : _is_posix(is_posix) {}
@@ -162,6 +179,7 @@ public:
     virtual std::shared_ptr<FileWriter> open_writer(const std::string& path, bool is_create) = 0;
     virtual int close_writer(std::shared_ptr<FileWriter> file_writer) = 0;
     virtual int read_dir(const std::string& path, std::vector<std::string>& direntrys) = 0;
+    virtual int read_dir(const std::string& path, std::vector<DirEntry>& direntrys) = 0;
     virtual int get_file_info(const std::string& path, FileInfo& file_info, std::string* err_msg) = 0;
     virtual int destroy() = 0;
     virtual int delete_path(const std::string& path, bool recursive = false) = 0;
@@ -206,6 +224,7 @@ public:
     }
 
     virtual int read_dir(const std::string& path, std::vector<std::string>& direntrys) override;
+    virtual int read_dir(const std::string& path, std::vector<DirEntry>& direntrys) override;
     virtual int get_file_info(const std::string& path, FileInfo& file_info, std::string* err_msg) override;
 
     // Parquet读取使用
@@ -213,7 +232,8 @@ public:
     virtual ::arrow::Status close_arrow_reader(std::shared_ptr<::arrow::io::RandomAccessFile> arrow_reader) override;
 };
 
-#ifdef BAIDU_INTERNAL
+
+#if defined(BAIDU_INTERNAL)
 class AfsFileSystem : public FileSystem {
 public:
     AfsFileSystem(const std::string& afs_uri, 
@@ -238,6 +258,7 @@ public:
     virtual int delete_path(const std::string& path, bool recursive = false) override;
 
     virtual int read_dir(const std::string& path, std::vector<std::string>& direntrys) override;
+    virtual int read_dir(const std::string& path, std::vector<DirEntry>& direntrys) override;
     virtual int get_file_info(const std::string& path, FileInfo& file_info, std::string* err_msg) override;
 
     // Parquet使用
@@ -285,6 +306,10 @@ public:
     // return  0 : success; entry is valid
     // return  1 : finish;  entry is not valid
     int next_entry(std::string& entry);
+    // 获取该目录下所有的文件
+    static int get_all_files(FileSystem* fs, const std::string& path, std::vector<std::string>& files);
+    // 获取该目录下所有的子目录
+    static int get_all_dirs(FileSystem* fs, const std::string& path, std::vector<std::string>& dirs);
 
 private:
     size_t                   _idx = 0;

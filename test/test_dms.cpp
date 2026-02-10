@@ -13,7 +13,6 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
-
 #include "dms.h"
 
 int main(int argc, char* argv[]) {

@@ -37,6 +37,40 @@ namespace baikaldb {
 //extern uint64_t str_to_datetime(const char* str_time);
 //extern time_t datetime_to_timestamp(uint64_t datetime);
 //extern uint64_t timestamp_to_datetime(time_t timestamp);
+TEST(test_localtime_mktime_fixed_r, case_all) {
+    time_t t;
+    std::cout << -1 % 86400 << " :  " << -1 / 86400 << "\n";
+    std::cout << -2000000000 % 86400 << " :  " << -2000000000 / 86400 << "\n";
+    for (t = -2000000000; t < 2000000000LL; t += 34567*345) {
+        struct tm tm_std, tm_fixed;
+        if (t < 0) { // 负数时间，localtime_r会差几分钟，不知道为啥，用gmtime_r来代替测试
+            gmtime_r(&t, &tm_std);
+            localtime_fixed_r(&t, &tm_fixed, 0); 
+        } else {
+            localtime_r(&t, &tm_std);
+            localtime_fixed_r(&t, &tm_fixed); 
+        }
+
+        EXPECT_EQ(tm_std.tm_year, tm_fixed.tm_year) << t;
+        EXPECT_EQ(tm_std.tm_mon, tm_fixed.tm_mon) << t;
+        EXPECT_EQ(tm_std.tm_mday, tm_fixed.tm_mday) << t;
+        // 不支持夏令时
+        if (tm_std.tm_year < 1986 - 1900 || tm_std.tm_year > 1991 - 1900) {
+            EXPECT_EQ(tm_std.tm_hour, tm_fixed.tm_hour) << t;
+        }
+        EXPECT_EQ(tm_std.tm_min, tm_fixed.tm_min) << t;
+        EXPECT_EQ(tm_std.tm_sec, tm_fixed.tm_sec) << t;
+        EXPECT_EQ(tm_std.tm_yday, tm_fixed.tm_yday) << t;
+        EXPECT_EQ(tm_std.tm_wday, tm_fixed.tm_wday) << t;
+        if (t < 0) { // 负数时间，mktime会差几分钟，不知道为啥，用timegm来代替测试
+            EXPECT_EQ(timegm(&tm_fixed), mktime_fixed_r(&tm_fixed, 0));
+        } else {
+            EXPECT_EQ(mktime(&tm_fixed), mktime_fixed_r(&tm_fixed));
+        }
+
+    }
+}
+
 TEST(test_stamp_to_str, case_all) {
     uint64_t year = 0;
     uint64_t mon = 0;

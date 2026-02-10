@@ -33,7 +33,9 @@ int ScalarFnCall::init(const pb::ExprNode& node) {
         return -1;
     }
     _fn = node.fn();
-    _origin_fn_name = _fn.name();
+    if (_fn.origin_name().empty()) {
+        _fn.set_origin_name(_fn.name());
+    }
     // rand不是const
     if (node_type() == pb::FUNCTION_CALL && _fn.name() == "rand") {
         _is_constant = false;
@@ -256,7 +258,9 @@ const std::unordered_map<std::string, int> ARROW_FUNC_SLOT_REF_COUNT = {
     {"repeat", 1},
     {"substr", 1},
     {"week", 1},
-    {"yearweek", 1}
+    {"yearweek", 1},
+    {"substring_index", 1},
+    {"replace", 1}
 };
 
 bool ScalarFnCall::can_use_arrow_vector() {
@@ -329,7 +333,7 @@ std::string ScalarFnCall::to_sql(const std::unordered_map<int32_t, std::string>&
             return "";
         }
     }
-    std::string fn_name = _origin_fn_name;
+    std::string fn_name = _fn.origin_name();
     // 一元负数运算符特殊处理
     if (_fn.fn_op() == parser::FT_UMINUS) {
         fn_name = "uminus";

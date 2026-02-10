@@ -719,7 +719,7 @@ bool HandleHelper::_handle_split_lines(const SmartSocket& client, const std::vec
 }
 
 bool HandleHelper::_handle_ttl_duration(const SmartSocket& client, const std::vector<std::string>& split_vec) {
-    if(!client || !client->user_info || split_vec.size() != 4) {
+    if(!client || !client->user_info || (split_vec.size() != 4 && split_vec.size() != 6)) {
         DB_FATAL("param invalid");
         return false;
     }
@@ -736,6 +736,10 @@ bool HandleHelper::_handle_ttl_duration(const SmartSocket& client, const std::ve
         return false; 
     }
     info->set_ttl_duration(ttl);
+    if (split_vec.size() == 6) {
+        pb::FieldInfo* ttl_field = info->mutable_ttl_field();
+        ttl_field->set_field_name(split_vec[5]);
+    }
     MetaServerInteract::get_instance()->send_request("meta_manager", request, response);
     DB_WARNING("req:%s res:%s", request.ShortDebugString().c_str(), response.ShortDebugString().c_str());
     if(!_make_response_packet(client, response.ShortDebugString())) {
@@ -1837,7 +1841,24 @@ bool HandleHelper::_handle_schema_conf(const SmartSocket& client, const std::vec
         schema_conf->set_use_column_storage(is_open);
     } else if (key == "force_column_storage") {
         schema_conf->set_force_column_storage(is_open);
+    } else if (key == "column_only_read_base") {
+        schema_conf->set_column_only_read_base(is_open);
     } else if (key == "enable_column_engine") {
+        if (is_open) {
+            auto table = factory->get_table_info_ptr(table_id);
+            if (table == nullptr) {
+                DB_FATAL("table null table name: %s, table_id: %ld", full_name.c_str(), table_id);
+                client->state = STATE_ERROR;
+                return false;
+            }
+            if (!(table->schema_conf.storage_compute_separate())) {
+                if (!table->has_version) {
+                    DB_FATAL("table name: %s, table_id: %ld need use column storage", full_name.c_str(), table_id);
+                    client->state = STATE_ERROR;
+                    return false;
+                }
+            }
+        }
         schema_conf->set_enable_column_engine(is_open);
     } else if (key == "olap_pre_split_cnt") {
         int32_t olap_pre_split_cnt = strtol(split_vec[4].c_str(), NULL, 10);

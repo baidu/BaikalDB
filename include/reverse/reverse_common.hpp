@@ -13,12 +13,12 @@
 // limitations under the License.
 
 namespace baikaldb {
-#ifdef BAIDU_INTERNAL
-template <typename OUT, typename IN>
+#if defined(BAIDU_INTERNAL) && !defined(__aarch64__)
+template <typename OUTPUT, typename INPUT>
 int Tokenizer::nlpc_seg(drpc::NLPCClient& client, 
              const std::string& word, 
-             OUT& s_output,
-             IN& s_input)
+             OUTPUT& s_output,
+             INPUT& s_input)
 {
     if (word.empty()) {
         return 0;

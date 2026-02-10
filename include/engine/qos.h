@@ -18,7 +18,6 @@
 #include "concurrency.h"
 
 namespace baikaldb {
-DECLARE_int64(sql_token_bucket_timeout_min);
 DECLARE_int64(min_global_extended_percent);
 DECLARE_int64(qps_statistics_minutes_ago);
 DECLARE_int64(max_tokens_per_second);
@@ -29,7 +28,6 @@ DECLARE_int64(get_token_weight);
 DECLARE_int64(qos_reject_interval_s);
 DECLARE_int64(qos_reject_ratio);
 DECLARE_int64(qos_reject_timeout_s);
-DECLARE_int64(qos_reject_max_scan_ratio);
 DECLARE_int64(qos_reject_growth_multiple);
 DECLARE_int64(qos_need_reject);
 DECLARE_int64(sign_concurrency);

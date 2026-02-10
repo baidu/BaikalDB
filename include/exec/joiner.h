@@ -115,7 +115,7 @@ public:
         _use_index_join = use;
     }
     void get_join_on_condition_filter(RuntimeState* state, ExprNode** condition_filter);
-    static int do_plan_router(RuntimeState* state, const std::vector<ExecNode*>& scan_nodes, bool& index_has_null, bool is_explain);
+    static int do_plan_router(RuntimeState* state, const std::vector<ExecNode*>& scan_nodes, bool& index_has_null, bool is_explain, bool in_acero);
     int vectorize_index_collector(RuntimeState* state, std::shared_ptr<arrow::RecordBatch> batch);
     void clear_in_conditions() {
         _outer_join_values.clear();
@@ -182,6 +182,8 @@ protected:
     //join相等条件的slot_ref
     std::vector<ExprNode*> _outer_equal_slot;
     std::vector<ExprNode*> _inner_equal_slot;
+
+    std::vector<pb::PrimitiveType> _equal_slot_cast_types;
 
     //从左边取到的等值条件的value
     ExprValueSet _outer_join_values;

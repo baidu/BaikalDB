@@ -5,6 +5,8 @@
 #include <arrow/type.h>
 #include <arrow/acero/options.h>
 #include <arrow/stl_iterator.h>
+#include <arrow/io/memory.h>
+#include <arrow/ipc/reader.h>
 #include "dual_scan_node.h"
 #include "arrow_io_excutor.h"
 #include "network_socket.h"
@@ -302,27 +304,40 @@ int DbService::handle_fragment_scan_nodes(RuntimeState* state, std::vector<ExecN
         //  1. index join的非驱动表, 需要进行runtime filter后查询, 这里会多进行一次indexselector和planrouter
         //  2. index join非驱动表子树里的no index join的非驱动表, 需要在这里先进行indexselector和planrouter, 
         //     acero一执行就会直接访问
-        auto scan_node = static_cast<RocksdbScanNode*>(node);
-        // 不clear select_index_common 会core 
-        scan_node->mutable_pb_node()->mutable_derive_node()->mutable_scan_node()->clear_use_indexes();
-
-        // 关联scan node和对应的select manager node
+        //  3. dblink scan_node场景
+        ScanNode* scan_node = static_cast<ScanNode*>(node);
+        if (scan_node == nullptr) {
+            DB_WARNING("scan_node is nullptr");
+            return -1;
+        }
         auto sm_node = static_cast<SelectManagerNode*>(scan_node->get_parent_node(pb::SELECT_MANAGER_NODE));
-        if (sm_node == nullptr) {
-            DB_FATAL("mpp execute fail: fragment get select manager node fail, log_id: %lu, tuple_id: %d", state->log_id(), scan_node->tuple_id());
-            return -1;
-        }
-        static_cast<RocksdbScanNode*>(scan_node)->set_related_manager_node(sm_node);
+        if (sm_node != nullptr) {
+            // 不clear select_index_common 会core 
+            scan_node->mutable_pb_node()->mutable_derive_node()->mutable_scan_node()->clear_use_indexes();
 
-        // index selector and plan router
-        DB_DEBUG("scannode tuple_id: %d, need planrouter", scan_node->tuple_id());
-        bool index_has_null = false;
-        if (0 != Joiner::do_plan_router(state, {scan_node}, index_has_null, false)) {
-            DB_FATAL("mpp execute fail: fragment plan router fail, log_id: %lu, tuple_id: %d", state->log_id(), scan_node->tuple_id());
-            return -1;
-        }
-        if (index_has_null) {
-            sm_node->set_return_empty();
+            // 关联scan node和对应的select manager node
+            if (sm_node == nullptr) {
+                DB_FATAL("mpp fragment get select manager node fail, log_id: %lu, tuple_id: %d", state->log_id(), scan_node->tuple_id());
+                return -1;
+            }
+            static_cast<ScanNode*>(scan_node)->set_related_manager_node(sm_node);
+
+            // index selector and plan router
+            DB_DEBUG("scannode tuple_id: %d, need planrouter", scan_node->tuple_id());
+            bool index_has_null = false;
+            if (0 != Joiner::do_plan_router(state, {scan_node}, index_has_null, false, false)) {
+                DB_FATAL("mpp execute fail: fragment plan router fail, log_id: %lu, tuple_id: %d", state->log_id(), scan_node->tuple_id());
+                return -1;
+            }
+            if (index_has_null) {
+                sm_node->set_return_empty();
+            }
+        } else {
+            // 发送到副db的file_scan_node/mysql_scan_node可能没有select manager node，用于执行扫描。
+            if (!scan_node->is_file_scan_node() && !scan_node->is_mysql_scan_node()) {
+                DB_WARNING("scan node has no select manager node, log_id: %lu, tuple_id: %d", state->log_id(), scan_node->tuple_id());
+                return -1;
+            }
         }
     }
     return 0;
@@ -414,7 +429,6 @@ int DbService::fragment_internal_open(google::protobuf::RpcController* controlle
             return -1;
         }
     }
-
     ret = root->open(&state);
     if (ret < 0) {
         err_msg = "open plan fail";

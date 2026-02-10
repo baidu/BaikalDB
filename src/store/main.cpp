@@ -41,7 +41,7 @@ DECLARE_bool(use_fulltext_wordweight_segment);
 DECLARE_bool(use_fulltext_wordseg_wordrank_segment);
 DEFINE_string(wordrank_conf, "./config/drpc_client.xml", "wordrank conf path");
 } // namespace baikaldb
-DEFINE_bool(stop_server_before_core, true, "stop_server_before_core");
+DEFINE_bool(stop_server_before_core, true, "Stop server before core dump, default: true");
 DEFINE_int32(compaction_sst_cache_capacity, 200000, "compaction_sst_cache_capacity");
 
 brpc::Server server;
@@ -105,7 +105,7 @@ int main(int argc, char **argv) {
     baikaldb::register_myraft_extension();
     int ret = 0;
     baikaldb::Tokenizer::get_instance()->init();
-#ifdef BAIDU_INTERNAL
+#if defined(BAIDU_INTERNAL) && !defined(__aarch64__)
     //init wordrank_client
     ret = ::drpc::init_env(baikaldb::FLAGS_wordrank_conf);
     if (ret < 0) {
@@ -136,7 +136,7 @@ int main(int argc, char **argv) {
 
     DB_WARNING("init nlpc success");
 #endif
-    /* 
+    /*
     auto call = []() {
         std::ifstream extra_fs("test_file");
         std::string word((std::istreambuf_iterator<char>(extra_fs)),
@@ -238,6 +238,7 @@ int main(int argc, char **argv) {
     DB_WARNING("store qos close success");
     baikaldb::MemoryGCHandler::get_instance()->close();
     baikaldb::MemTrackerPool::get_instance()->close();
+    baikaldb::GlobalArrowExecutor::shutdown();
     // exit if server.join is blocked
     baikaldb::Bthread bth;
     bth.run([]() {

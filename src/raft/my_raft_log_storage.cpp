@@ -281,6 +281,7 @@ braft::LogEntry* MyRaftLogStorage::get_entry(const int64_t index) {
                 index, _region_id);
         return NULL;
     }
+    RocksdbVars::get_instance()->raft_log_scan_times_count << 1;
     if (value.size() < LOG_HEAD_SIZE) {
         DB_FATAL("value of log index:%ld of region id:%ld is corrupted",
                 index, _region_id);

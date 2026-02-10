@@ -20,18 +20,25 @@ namespace baikaldb {
 DECLARE_bool(enable_plan_cache);
 DECLARE_bool(use_arrow_vector);
 DEFINE_int32(mpp_hash_partition_num, 0, "mpp hash partition num");
+DEFINE_int32(file_scan_concurrency, 4, "file scan concurrency");
 DEFINE_bool(enable_decide_mpp_by_db_statistics, false, "enable decide mpp by db statistics");
 DECLARE_int64(mpp_min_statistics_rows);
 DECLARE_int64(mpp_min_statistics_bytes);
 
 int ExecTypeAnalyzer::analyze(QueryContext* ctx) {
     if (ctx->is_from_subquery
-         || ctx->is_union_subquery
-         || ctx->is_insert_select_subquery) {
+            || ctx->is_union_subquery
+            || ctx->is_insert_select_subquery) {
         return 0;
     }
     bool can_vectorize = can_use_arrow_vector(ctx);
     if (!can_vectorize) {
+        if (ctx->must_vectorize) {
+            ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
+            ctx->stat_info.error_msg << "This SQL only support in vectorize mode";
+            DB_WARNING("This SQL only support in vectorize mode");
+            return -1;
+        }
         ctx->use_mpp = false;
         return 0;
     }
@@ -65,7 +72,7 @@ bool ExecTypeAnalyzer::can_use_arrow_vector(QueryContext* ctx) {
     state.reset_vectorize_info();
 
     // full join必须走向量化, 即使集群没开向量化开关
-    bool must_vectorize = false;
+    bool& must_vectorize = ctx->must_vectorize;
     // sql注释或者sign配置指定走向量化
     bool defined_vectorize = false;
     std::vector<ExecNode*> joins;
@@ -74,6 +81,16 @@ bool ExecTypeAnalyzer::can_use_arrow_vector(QueryContext* ctx) {
         if (static_cast<JoinNode*>(join)->join_type() == pb::FULL_JOIN) {
             must_vectorize = true;
             break;
+        }
+    }
+    if (!must_vectorize) {
+        std::vector<ExecNode*> scans;
+        ctx->root->get_node_pass_subquery(pb::SCAN_NODE, scans);
+        for (auto& scan : scans) {
+            if (static_cast<ScanNode*>(scan)->is_file_scan_node()) {
+                must_vectorize = true;
+                break;
+            }
         }
     }
     if (ctx->client_conn != nullptr && ctx->client_conn->txn_id != 0) {
@@ -128,9 +145,7 @@ bool ExecTypeAnalyzer::can_use_arrow_vector(QueryContext* ctx) {
             } 
         } else {
             if (must_vectorize) {
-                ctx->stat_info.error_code = ER_NOT_SUPPORTED_YET;
-                ctx->stat_info.error_msg << "FULL JOIN only support in vectorize mode.";
-                return -1;
+                return false;
             }
             state.execute_type = pb::EXEC_ROW;
         }
@@ -146,10 +161,19 @@ bool ExecTypeAnalyzer::can_use_mpp(QueryContext* ctx) {
         // 事务中不能使用mpp
         return false;
     }
+    std::vector<ExecNode*> scan_nodes;
+    ctx->root->get_node_pass_subquery(pb::SCAN_NODE, scan_nodes);
+    bool has_file_scan_node = false;
+    for (auto* scan_node : scan_nodes) {
+        if (scan_node != nullptr && static_cast<ScanNode*>(scan_node)->is_file_scan_node()) {
+            has_file_scan_node = true;
+            break;
+        }
+    }
     ExecNode* join_node = ctx->root->get_node_pass_subquery(pb::JOIN_NODE);
     ExecNode* agg_node = ctx->root->get_node_pass_subquery(pb::AGG_NODE);
-    if (join_node == nullptr && agg_node == nullptr) {
-        // 没有join/agg的没必要走mpp
+    if (join_node == nullptr && agg_node == nullptr && !has_file_scan_node) {
+        // 没有join/agg/file_scan的没必要走mpp
         return false;
     }
     if (ctx->is_explain && ctx->explain_type != SHOW_PLAN) {

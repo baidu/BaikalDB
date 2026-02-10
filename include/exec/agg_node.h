@@ -96,6 +96,12 @@ public:
         _node_type = pb::MERGE_AGG_NODE;
         _is_merger = true;
     }
+    void transfer_to_agg() {
+        _pb_node.set_node_type(pb::AGG_NODE);
+        _node_type = pb::AGG_NODE;
+        _is_merger = false;
+        _has_merger = false;
+    }
     int delete_self() {
         if (_parent == nullptr) {
             DB_WARNING("_parent is nullptr");

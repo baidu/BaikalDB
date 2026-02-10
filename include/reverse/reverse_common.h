@@ -24,7 +24,7 @@
 #include "key_encoder.h"
 #include "lru_cache.h"
 #include "boolean_executor.h"
-#ifdef BAIDU_INTERNAL
+#if defined(BAIDU_INTERNAL) && !defined(__aarch64__)
 #include <nlpc/ver_1_0_0/wordseg_input.h>
 #include <nlpc/ver_1_0_0/wordrank_output.h>
 #include <nlpc/ver_1_0_0/wordseg_output.h>
@@ -41,7 +41,7 @@ typedef std::pair<std::string, std::string> KeyRange;
 extern std::atomic_long g_statistic_insert_key_num;
 extern std::atomic_long g_statistic_delete_key_num;
 
-#ifdef BAIDU_INTERNAL
+#if defined(BAIDU_INTERNAL) && !defined(__aarch64__)
 extern drpc::NLPCClient* wordrank_client;
 extern drpc::NLPCClient* wordseg_client;
 extern drpc::NLPCClient* wordweight_client;
@@ -64,9 +64,9 @@ public:
     };
     int init();
 
-#ifdef BAIDU_INTERNAL
-    template <typename OUT, typename IN>
-    int nlpc_seg(drpc::NLPCClient& client, const std::string& word, OUT& s_output, IN& s_input);
+#if defined(BAIDU_INTERNAL) && !defined(__aarch64__)
+    template <typename OUTPUT, typename INPUT>
+    int nlpc_seg(drpc::NLPCClient& client, const std::string& word, OUTPUT& s_output, INPUT& s_input);
     int wordrank(std::string word, std::map<std::string, float>& term_map, const pb::Charset& charset);
     int wordweight(std::string word, std::map<std::string, float>& term_map,  
                    const pb::Charset& charset, bool is_filter = false, bool is_same_weight = false);

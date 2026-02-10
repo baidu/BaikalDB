@@ -7,7 +7,7 @@ message RocksdbGFLAGS {
     optional bool rocks_use_partitioned_index_filters = 1;
     optional bool rocks_use_ribbon_filter = 2;
     optional bool olap_table_only = 3;
-    optional bool olap_import_mode = 4;
+    //optional bool olap_import_mode = 4;
     optional bool rocks_use_sst_partitioner_fixed_prefix = 5;
     optional int32 key_point_collector_interval = 6;
     optional int64 rocks_block_cache_size_mb = 7;

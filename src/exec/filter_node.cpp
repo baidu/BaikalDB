@@ -33,7 +33,7 @@ namespace baikaldb {
 
 DECLARE_bool(open_nonboolean_sql_forbid);
 DECLARE_bool(open_nonboolean_sql_statistics);
-
+DECLARE_uint64(cut_huge_in_filter_size);
 int FilterNode::init(const pb::PlanNode& node) {
     int ret = ExecNode::init(node);
     if (ret < 0) {
@@ -707,6 +707,22 @@ void FilterNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
     }
 }
 
+void FilterNode::cut_huge_in_condition(std::vector<ExprNode*>& huge_in_conditions) {
+    std::vector<ExprNode*> left_conditions;
+    left_conditions.reserve(_pruned_conjuncts.size());
+    for (auto conjunct : _pruned_conjuncts) {
+        if (conjunct->node_type() == pb::IN_PREDICATE && conjunct->children_size() > 100000) {
+            huge_in_conditions.emplace_back(conjunct);
+        } else {
+            left_conditions.emplace_back(conjunct);
+        }
+    }
+    if (!huge_in_conditions.empty()) {
+        modifiy_pruned_conjuncts_by_index(left_conditions);
+    }
+    return;
+}
+
 inline bool FilterNode::need_copy(MemRow* row) {
     for (auto conjunct : _pruned_conjuncts) {
         ExprValue value = conjunct->get_value(row);
@@ -825,6 +841,19 @@ int FilterNode::show_explain(QueryContext* ctx, std::vector<std::map<std::string
         output.back()["Extra"] += "Using where; ";
     }
     return ret_id;
+}
+
+bool FilterNode::has_huge_in_condition() {
+    int32_t all_expr_child_sum = 0;
+    if (FLAGS_cut_huge_in_filter_size <= 0) {
+        return false;
+    }
+    for (auto& conjunct : _pruned_conjuncts) {
+        if (conjunct != nullptr) {
+            all_expr_child_sum += conjunct->children_size();
+        }
+    }
+    return all_expr_child_sum >= FLAGS_cut_huge_in_filter_size;
 }
 
 int FilterNode::arrow_steal_conjuncts(std::vector<arrow::compute::Expression>& conjuncts, int64_t& limit) {

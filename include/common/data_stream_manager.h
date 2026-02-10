@@ -65,6 +65,7 @@ private:
                    std::hash<int32_t>{}(key.node_id);
         }
     };
+    arrow::compute::Expression* _condition = nullptr;
     bthread::Mutex _mtx;
     std::unordered_map<ReceiverKey, std::shared_ptr<DataStreamReceiver>, ReceiverHasher> _receiver_map;
 };

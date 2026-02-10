@@ -118,6 +118,10 @@ int PhysicalPlanner::analyze(QueryContext* ctx) {
     if (ctx->return_empty) {
         ctx->root->set_return_empty();
     }
+    ret = ConditionOptimizer().analyze(ctx);
+    if (ret < 0) {
+        return ret;
+    }
     // mpp添加Exchange等
     ret = MppAnalyzer().analyze(ctx);
     if (ret < 0) {
@@ -279,33 +283,19 @@ int PhysicalPlanner::send_fragment_to_other_db(QueryContext* ctx) {
     int64_t send_time = 0;
     for (auto iter : ctx->db_to_fragments) {
         const std::string& ith_db = iter.first;
-
         if (ith_db == SchemaFactory::get_instance()->get_address()) {
             continue;
         }
         time_cost.reset();
         pb::DAGFragmentRequest request;
-        request.set_op(pb::OP_FRAGMENT_START);
-        request.set_log_id(cur_state.log_id());
-        request.set_sql_sign(cur_state.sign);
-        // add fragment infos
-        for (auto& fragment_id : iter.second) {
-            pb::Plan fragment_plan;
-            std::shared_ptr<FragmentInfo> fragment_info = ctx->fragments[fragment_id];
-            pb::FragmentInfo* fragment_info_pb = request.add_fragments();
-            fragment_info_pb->set_fragment_id(fragment_id);
-            pb::RuntimeState* pb_rs = fragment_info_pb->mutable_runtime_state();
-            fragment_info->runtime_state->to_proto(pb_rs);
-            ExecNode::create_pb_plan(0, &fragment_plan, fragment_info->root);
-            fragment_info_pb->mutable_plan()->CopyFrom(fragment_plan);
-        }
-        // add userinfo, 副db planrouter需要
-        if (ctx->user_info != nullptr) {
-            request.set_username(ctx->user_info->username);
+        int ret = DBInteract::get_instance()->construct_mpp_dag_request(ctx, iter.second, request);
+        if (ret != 0) {
+            DB_WARNING("Fail to construct_mpp_dag_fragment");
+            return -1;
         }
         pack_time += time_cost.get_time();
         time_cost.reset();
-        int ret = DBInteract::get_instance()->handle_mpp_dag_fragment(request, ith_db);
+        ret = DBInteract::get_instance()->handle_mpp_dag_fragment(request, ith_db);
         if (0 != ret) {
             DB_FATAL("logid: %lu, send request to other db fail, ret: %d", cur_state.log_id(), ret);
             return -1;
@@ -322,14 +312,20 @@ int PhysicalPlanner::send_fragment_to_other_db(QueryContext* ctx) {
 // 只有mpp主db执行失败/超时调用，停止所有db的fragment执行
 int PhysicalPlanner::stop_mpp(QueryContext* ctx) {
     RuntimeState& cur_state = *ctx->get_runtime_state();
-    for (auto iter : ctx->db_to_fragments) {
+    std::vector<std::string> db_list;
+    db_list.reserve(ctx->db_to_fragments.size() + 1);
+    db_list.emplace_back(SchemaFactory::get_instance()->get_address());
+    for (auto& iter : ctx->db_to_fragments) {
+        db_list.emplace_back(iter.first);
+    }
+    for (auto& db : db_list) {
         pb::DAGFragmentRequest request;
         request.set_op(pb::OP_FRAGMENT_STOP);
         request.set_log_id(cur_state.log_id());
         if (ctx->user_info != nullptr) {
             request.set_username(ctx->user_info->username);
         }
-        int ret = DBInteract::get_instance()->handle_mpp_dag_fragment(request, iter.first);
+        int ret = DBInteract::get_instance()->handle_mpp_dag_fragment(request, db);
         if (0 != ret) {
             DB_FATAL("send request to other db for stop fail, ret: %d", ret);
             return -1;
@@ -368,6 +364,18 @@ int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
                 state.statistics_types->insert(pb::StatisticType::ST_HISTOGRAM);
                 state.statistics_types->insert(pb::StatisticType::ST_CMSKETCH);
                 state.statistics_types->insert(pb::StatisticType::ST_HYPERLOGLOG);
+            } else if (boost::istarts_with(type, "max_sample_regions")) {
+                auto iter = type.find(":");
+                std::string max_region_string;
+                if (iter != std::string::npos) {
+                     max_region_string = type.substr(iter + 1);
+                }
+                int64_t max_sample_regions = 0;
+                if (boost::conversion::try_lexical_convert(max_region_string, max_sample_regions)) {
+                    state.max_sample_regions = max_sample_regions;
+                } else {
+                    DB_WARNING("convert max_sample_region to int failed");
+                }
             }
         }
         // 兜底，如果state.statistics_types 为空就默认选hist和cms
@@ -399,12 +407,20 @@ int PhysicalPlanner::execute(QueryContext* ctx, DataBuffer* send_buf) {
         }
     }
     if (explain_is_trace(ctx->explain_type)) {
-        ctx->trace_node.set_node_type(ctx->root->node_type());
-        ctx->root->set_trace(&ctx->trace_node);
-        ctx->root->create_trace();
-        for (auto& subquery : ctx->sub_query_plans) {
-            subquery->root->set_trace(&ctx->trace_node);
-            subquery->root->create_trace();
+        if (ctx->use_mpp) {
+            for (auto& [id, fragment] : ctx->fragments) {
+                fragment->trace_node.set_node_type(fragment->root->node_type());
+                fragment->root->set_trace(&fragment->trace_node);
+                fragment->root->create_trace();
+            }
+        } else {
+            ctx->trace_node.set_node_type(ctx->root->node_type());
+            ctx->root->set_trace(&ctx->trace_node);
+            ctx->root->create_trace();
+            for (auto& subquery : ctx->sub_query_plans) {
+                subquery->root->set_trace(&ctx->trace_node);
+                subquery->root->create_trace();
+            }
         }
     }
     if (ctx->use_mpp) {
