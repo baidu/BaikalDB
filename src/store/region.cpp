@@ -9115,7 +9115,7 @@ void Region::check_peer_latency() {
     } else {
         _node.get_status(&status);
     }
-    if (status.state == raft::STATE_ERROR) {
+    if (status.state == braft::STATE_ERROR) {
         _raft_status_error = true;
     } else {
         _raft_status_error = false;
