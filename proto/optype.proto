@@ -86,7 +86,7 @@ enum OpType {
     OP_ADD_FIELD                            = 133; //加列
     OP_ADD_INDEX                            = 134; //加索引
     OP_DROP_INDEX                           = 135; //删索引
-    OP_DROP_FIELD                           = 136; //删索引
+    OP_DROP_FIELD                           = 136; //删列
     OP_RENAME_FIELD                         = 137; //改字段名称
     OP_RENAME_INDEX                         = 138; //改索引名称
     OP_MODIFY_FIELD                         = 139; //改字段定义，包括改字段类型, 暂不支持

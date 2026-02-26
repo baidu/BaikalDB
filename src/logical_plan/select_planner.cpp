@@ -183,7 +183,7 @@ bool SelectPlanner::is_full_export() {
         return false;
     }
     // 包含DBLink Mysql的表不支持全量导出
-    if (_ctx->has_dblink_mysql) {
+    if (_ctx->has_dblink_mysql || _ctx->has_dblink_file) {
         return false;
     }
     //代价信息统计时不走full export流程

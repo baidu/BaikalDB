@@ -28,50 +28,6 @@ namespace baikaldb {
 static const int32_t DATE_FORMAT_LENGTH = 128;
 
 /*
- *  通用config
- */
-class CommonTimeOptionsType : public arrow::compute::FunctionOptionsType {
-public:
-    static const arrow::compute::FunctionOptionsType* GetInstance() {
-        static std::unique_ptr<arrow::compute::FunctionOptionsType> instance(new CommonTimeOptionsType());
-        return instance.get();
-    }
-    const char* type_name() const override { return "CommonTimeOptionType"; }
-    std::string Stringify(const  arrow::compute::FunctionOptions& options) const override {
-        return type_name();
-    }
-    bool Compare(const arrow::compute::FunctionOptions& options,
-                 const arrow::compute::FunctionOptions& other) const override {
-        const auto& lop = static_cast<const CommonTimeFunctionOptions&>(options);
-        const auto& rop = static_cast<const CommonTimeFunctionOptions&>(other);
-        return lop.str_value == rop.str_value && lop.int_value == rop.int_value;;
-    }
-    std::unique_ptr<arrow::compute::FunctionOptions> Copy(const arrow::compute::FunctionOptions& options) const override {
-        const auto& opts = static_cast<const CommonTimeFunctionOptions&>(options);
-        return std::make_unique<CommonTimeFunctionOptions>(opts.str_value, opts.int_value);
-    }
-};
-
-struct CommonTimeState : public arrow::compute::KernelState {
-    std::string str_value;
-    int64_t int_value = 0;
-    CommonTimeState(const std::string& conf, int64_t value) : str_value(conf), int_value(value) {}
-};
-
-arrow::Result<std::unique_ptr<arrow::compute::KernelState>> InitCommonTimeState(arrow::compute::KernelContext*,
-                                            const  arrow::compute::KernelInitArgs& args) {
-    auto func_options = static_cast<const CommonTimeFunctionOptions*>(args.options);
-    if (func_options == nullptr) {
-        return std::make_unique<CommonTimeState>("", 0);
-    }
-    return std::make_unique<CommonTimeState>(func_options->str_value, func_options->int_value);
-}
-
-CommonTimeFunctionOptions::CommonTimeFunctionOptions(const std::string& value, int64_t int_value)
-    : arrow::compute::FunctionOptions(CommonTimeOptionsType::GetInstance()), str_value(value), int_value(int_value) {}
-
-
-/*
  *  以下三个实际上不会走到, 直接转成常量表达式了
  */
 int arrow_current_date(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
@@ -124,7 +80,7 @@ int arrow_date_format(std::vector<ExprNode*>& children, pb::Function* fn, const 
     if (0 != build_arrow_expr_with_cast(children[0], pb::TIMESTAMP)) {
         return -1;
     }
-    CommonTimeFunctionOptions option(children[1]->get_value(nullptr).get_string());
+    CommonFunctionOptions option(children[1]->get_value(nullptr).get_string());
     out = arrow::compute::call("baikal_date_format", {children[0]->arrow_expr()}, std::move(option));
     return 0;
 }
@@ -134,7 +90,7 @@ int arrow_time_format(std::vector<ExprNode*>& children, pb::Function* fn, const 
     if (0 != build_arrow_expr_with_cast(children[0], pb::TIME)) {
         return -1;
     }
-    CommonTimeFunctionOptions option(children[1]->get_value(nullptr).get_string());
+    CommonFunctionOptions option(children[1]->get_value(nullptr).get_string());
     out = arrow::compute::call("baikal_time_format", {children[0]->arrow_expr()}, std::move(option));
     return 0;
 }
@@ -186,7 +142,7 @@ int arrow_date_sub(std::vector<ExprNode*>& children, pb::Function* fn, const pb:
     }
     int32_t interval = children[1]->get_value(nullptr).get_numberic<int32_t>();
     std::string unit = children[2]->get_value(nullptr).get_string();
-    CommonTimeFunctionOptions option(unit, interval);
+    CommonFunctionOptions option(unit, interval);
     out = arrow::compute::call("baikal_date_sub", {children[0]->arrow_expr()}, std::move(option));
     return 0;
 }
@@ -209,7 +165,7 @@ int arrow_date_add(std::vector<ExprNode*>& children, pb::Function* fn, const pb:
     }
     int32_t interval = children[1]->get_value(nullptr).get_numberic<int32_t>();
     std::string unit = children[2]->get_value(nullptr).get_string();
-    CommonTimeFunctionOptions option(unit, interval);
+    CommonFunctionOptions option(unit, interval);
     out = arrow::compute::call("baikal_date_add", {children[0]->arrow_expr()}, std::move(option));
     return 0;
 }
@@ -286,7 +242,7 @@ int arrow_week(std::vector<ExprNode*>& children, pb::Function* fn, const pb::Pri
     if (children.size() > 1) {
         mode = children[1]->get_value(nullptr).get_numberic<uint32_t>() % 8;
     }
-    CommonTimeFunctionOptions option("", mode);
+    CommonFunctionOptions option("", mode);
     out = arrow::compute::call("baikal_week", {children[0]->arrow_expr()}, std::move(option));
     return 0;
 }
@@ -300,7 +256,7 @@ int arrow_yearweek(std::vector<ExprNode*>& children, pb::Function* fn, const pb:
     if (children.size() > 1) {
         mode = children[1]->get_value(nullptr).get_numberic<uint32_t>() % 8;
     }
-    CommonTimeFunctionOptions option("", mode);
+    CommonFunctionOptions option("", mode);
     out = arrow::compute::call("baikal_yearweek", {children[0]->arrow_expr()}, std::move(option));
     return 0;
 }
@@ -328,6 +284,32 @@ int arrow_timestampdiff(std::vector<ExprNode*>& children, pb::Function* fn, cons
     }
     return 0;
 }
+
+int arrow_datediff(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
+    RETURN_NULL_IF_COLUMN_SATISFY_COND(children.size() != 2);
+    BUILD_ARROW_EXPR_RET(children[0]);
+    BUILD_ARROW_EXPR_RET(children[1]);
+    auto left = children[0]->arrow_expr();
+    auto right = children[1]->arrow_expr();
+    if (children[0]->col_type() == pb::INT64) {
+        left = arrow_cast(left, children[0]->col_type(), pb::STRING);
+        left = arrow_cast(left, pb::STRING, pb::DATE);
+    } else {
+        left = arrow_cast(left, children[0]->col_type(), pb::DATE);
+    }
+    if (children[1]->col_type() == pb::INT64) {
+        right = arrow_cast(right, children[1]->col_type(), pb::STRING);
+        right = arrow_cast(right, pb::STRING, pb::DATE);
+    } else {
+        right = arrow_cast(right, children[1]->col_type(), pb::DATE);
+    }
+    left = arrow_cast(left, pb::DATE, pb::TIMESTAMP);
+    right = arrow_cast(right, pb::DATE, pb::TIMESTAMP);
+    out = arrow::compute::call("subtract_checked", {arrow_cast(left, pb::TIMESTAMP, pb::INT64),
+                                                    arrow_cast(right, pb::TIMESTAMP, pb::INT64)});
+    out = arrow::compute::call("divide_checked", {out, arrow::compute::literal(3600 * 24)});
+    return 0;
+}
 /*
  * date_format arrow实现
  */
@@ -337,7 +319,7 @@ struct ExecDateFormat {
     using BuilderType = typename arrow::TypeTraits<O>::BuilderType;
 
     static arrow::Status Exec(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) {
-        CommonTimeState* state = static_cast<CommonTimeState*>(ctx->state());
+        CommonState* state = static_cast<CommonState*>(ctx->state());
         std::string format = state->str_value;
         BuilderType builder;
         const arrow::ArraySpan& input = batch[0].array;
@@ -347,7 +329,8 @@ struct ExecDateFormat {
                 // 核心
                 struct tm t_result;
                 time_t t = (uint32_t)v;
-                localtime_r(&t, &t_result);
+                localtime_fixed_r(&t, &t_result);
+
                 char s[DATE_FORMAT_LENGTH];
                 date_format_internal(s, sizeof(s), format.data(), &t_result);
                 return builder.Append(std::string(s));
@@ -370,7 +353,7 @@ struct ExecTimeFormat {
     using BuilderType = typename arrow::TypeTraits<O>::BuilderType;
 
     static arrow::Status Exec(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) {
-        CommonTimeState* state = static_cast<CommonTimeState*>(ctx->state());
+        CommonState* state = static_cast<CommonState*>(ctx->state());
         std::string format = state->str_value;
         BuilderType builder;
         const arrow::ArraySpan& input = batch[0].array;
@@ -404,7 +387,7 @@ struct ExecHour {
     using OutputValueCType = typename arrow::TypeTraits<O>::CType;
 
     static arrow::Status Exec(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) {
-        CommonTimeState* state = static_cast<CommonTimeState*>(ctx->state());
+        CommonState* state = static_cast<CommonState*>(ctx->state());
         std::string format = state->str_value;
         const arrow::ArraySpan& input = batch[0].array;
         arrow::ArraySpan* out_data = out->array_span_mutable();
@@ -431,7 +414,7 @@ struct ExecDateSub {
     using OutputValueCType = typename arrow::TypeTraits<O>::CType;
 
     static arrow::Status Exec(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) {
-        CommonTimeState* state = static_cast<CommonTimeState*>(ctx->state());
+        CommonState* state = static_cast<CommonState*>(ctx->state());
         int32_t interval = state->int_value;
         const std::string& unit = state->str_value;
         const arrow::ArraySpan& input = batch[0].array;
@@ -473,7 +456,7 @@ struct ExecDateAdd {
     using OutputValueCType = typename arrow::TypeTraits<O>::CType;
 
     static arrow::Status Exec(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) {
-        CommonTimeState* state = static_cast<CommonTimeState*>(ctx->state());
+        CommonState* state = static_cast<CommonState*>(ctx->state());
         int32_t interval = state->int_value;
         const std::string& unit = state->str_value;
         const arrow::ArraySpan& input = batch[0].array;
@@ -550,7 +533,7 @@ struct ExecWeek {
     using OutputValueCType = typename arrow::TypeTraits<O>::CType;
 
     static arrow::Status Exec(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) {
-        CommonTimeState* state = static_cast<CommonTimeState*>(ctx->state());
+        CommonState* state = static_cast<CommonState*>(ctx->state());
         int64_t mode = state->int_value;
         int year = 0;
         int weeks = 0;
@@ -589,7 +572,7 @@ struct ExecYearWeek {
     using OutputValueCType = typename arrow::TypeTraits<O>::CType;
 
     static arrow::Status Exec(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) {
-        CommonTimeState* state = static_cast<CommonTimeState*>(ctx->state());
+        CommonState* state = static_cast<CommonState*>(ctx->state());
         int64_t mode = state->int_value;
         int year = 0;
         int weeks = 0;
@@ -631,7 +614,7 @@ arrow::Status ArrowFunctionManager::RegisterAllTimeFunction() {
             ARROW_RETURN_NOT_OK(
                 arrow_date_format->AddKernel({in_ty}, arrow::large_binary(),
                         arrow::compute::internal::GenerateNumeric<ExecDateFormat, arrow::LargeBinaryType>(*in_ty),
-                        InitCommonTimeState));
+                        InitCommonState));
         }
         ARROW_RETURN_NOT_OK(registry->AddFunction(arrow_date_format));
     }
@@ -645,7 +628,7 @@ arrow::Status ArrowFunctionManager::RegisterAllTimeFunction() {
             ARROW_RETURN_NOT_OK(
                 arrow_time_format->AddKernel({in_ty}, arrow::large_binary(),
                         arrow::compute::internal::GenerateNumeric<ExecTimeFormat, arrow::LargeBinaryType>(*in_ty),
-                        InitCommonTimeState));
+                        InitCommonState));
         }
         ARROW_RETURN_NOT_OK(registry->AddFunction(arrow_time_format));
     }
@@ -659,7 +642,7 @@ arrow::Status ArrowFunctionManager::RegisterAllTimeFunction() {
             ARROW_RETURN_NOT_OK(
                 arrow_hour->AddKernel({in_ty}, arrow::uint32(),
                         arrow::compute::internal::GenerateNumeric<ExecHour, arrow::UInt32Type>(*in_ty),
-                        InitCommonTimeState));
+                        InitCommonState));
         }
         ARROW_RETURN_NOT_OK(registry->AddFunction(arrow_hour));
     }
@@ -673,7 +656,7 @@ arrow::Status ArrowFunctionManager::RegisterAllTimeFunction() {
             ARROW_RETURN_NOT_OK(
                 arrow_date_sub->AddKernel({in_ty}, arrow::uint64(),
                         arrow::compute::internal::GenerateNumeric<ExecDateSub, arrow::UInt64Type>(*in_ty),
-                        InitCommonTimeState));
+                        InitCommonState));
         }
         ARROW_RETURN_NOT_OK(registry->AddFunction(arrow_date_sub));
     }
@@ -687,7 +670,7 @@ arrow::Status ArrowFunctionManager::RegisterAllTimeFunction() {
             ARROW_RETURN_NOT_OK(
                 arrow_date_add->AddKernel({in_ty}, arrow::uint64(),
                         arrow::compute::internal::GenerateNumeric<ExecDateAdd, arrow::UInt64Type>(*in_ty),
-                        InitCommonTimeState));
+                        InitCommonState));
         }
         ARROW_RETURN_NOT_OK(registry->AddFunction(arrow_date_add));
     }
@@ -701,7 +684,7 @@ arrow::Status ArrowFunctionManager::RegisterAllTimeFunction() {
             ARROW_RETURN_NOT_OK(
                 time_to_sec->AddKernel({in_ty}, arrow::uint32(),
                         arrow::compute::internal::GenerateNumeric<ExecTimeToSec, arrow::UInt32Type>(*in_ty),
-                        InitCommonTimeState));
+                        InitCommonState));
         }
         ARROW_RETURN_NOT_OK(registry->AddFunction(time_to_sec));
     }
@@ -714,7 +697,7 @@ arrow::Status ArrowFunctionManager::RegisterAllTimeFunction() {
         for (const std::shared_ptr<arrow::DataType>& in_ty : arrow::NumericTypes()) {
             arrow::compute::ScalarKernel kernel({in_ty}, arrow::uint32(),
                         arrow::compute::internal::GenerateNumeric<ExecWeek, arrow::UInt32Type>(*in_ty),
-                        InitCommonTimeState);
+                        InitCommonState);
             /// Kernel expects a pre-allocated buffer to write the result bitmap
             /// into. The preallocated memory is not zeroed (except for the last byte),
             /// so the kernel should ensure to completely populate the bitmap.
@@ -733,7 +716,7 @@ arrow::Status ArrowFunctionManager::RegisterAllTimeFunction() {
         for (const std::shared_ptr<arrow::DataType>& in_ty : arrow::NumericTypes()) {
             arrow::compute::ScalarKernel kernel({in_ty}, arrow::uint32(),
                         arrow::compute::internal::GenerateNumeric<ExecYearWeek, arrow::UInt32Type>(*in_ty),
-                        InitCommonTimeState);
+                        InitCommonState);
             kernel.null_handling = arrow::compute::NullHandling::COMPUTED_PREALLOCATE;
             kernel.mem_allocation = arrow::compute::MemAllocation::PREALLOCATE;
             ARROW_RETURN_NOT_OK(yearweek_func->AddKernel(kernel));

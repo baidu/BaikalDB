@@ -86,10 +86,11 @@ void RegionManager::update_region(const pb::MetaManagerRequest& request,
             }
             if (region_info.version() == master_region_ptr->version() 
                     && region_info.conf_version() <= master_region_ptr->conf_version()) {
-                if (peer_is_equal(region_info, *master_region_ptr)) {
+                if (peer_is_equal(region_info, *master_region_ptr, true)) {
                     DB_WARNING("region_id: %ld, request conf_version  %ld <= master conf_version %ld", 
                             region_id, region_info.conf_version(), master_region_ptr->conf_version());
                     IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "equal conf version");
+                    return;
                 }
             }
             region_info.set_conf_version(master_region_ptr->conf_version() + 1);
@@ -297,7 +298,7 @@ void RegionManager::drop_region(const pb::MetaManagerRequest& request,
     DB_NOTICE("drop region success, request:%s", request.ShortDebugString().c_str());
 }
 
-void RegionManager::split_region(const pb::MetaManagerRequest& request, braft::Closure* done) {
+void RegionManager::split_region(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done) {
     auto& region_split_info = request.region_split();
     int64_t region_id = region_split_info.region_id();
     int new_region_num = region_split_info.new_region_num();
@@ -320,7 +321,7 @@ void RegionManager::split_region(const pb::MetaManagerRequest& request, braft::C
         IF_DONE_SET_RESPONSE(done, pb::INTERNAL_ERROR, "write db fail");
         return;
     }
-    DB_WARNING("generate %d region_id: [%ld, %ld]", new_region_num, new_region_start_id, new_region_end_id);
+    DB_WARNING("apply_index: %ld, generate %d region_id: [%ld, %ld]", apply_index, new_region_num, new_region_start_id, new_region_end_id);
     //更新内存
     set_max_region_id(new_region_end_id);
     if (done && ((MetaServerClosure*)done)->response) {
@@ -1947,7 +1948,7 @@ void RegionManager::leader_heartbeat_for_region(const pb::StoreHeartBeatRequest*
         }
         bool peer_changed = false;
         if (!leader_region.simple()) {
-            peer_changed = !peer_is_equal(leader_region_info, *master_region_info);
+            peer_changed = !peer_is_equal(leader_region_info, *master_region_info, false);
         }
         check_whether_update_region(region_id, peer_changed, instance, leader_region, master_region_info, response);
         if (!peer_changed) {

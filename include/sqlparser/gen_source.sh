@@ -1,6 +1,7 @@
 #!/bin/bash
 
-prefix='/opt/compiler/gcc-4.8.2/bin/'
+# prefix='/opt/compiler/gcc-4.8.2/bin/'
+prefix=$1
 
 cur_dir='.'
 if [[ $2 == "opensource" ]]; then

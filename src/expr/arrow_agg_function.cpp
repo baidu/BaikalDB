@@ -21,6 +21,8 @@
 #include <arrow/compute/registry.h>
 #include <arrow/compute/cast.h>
 #include <arrow/compute/kernels/codegen_internal.h>
+#include <arrow/compute/kernel.h>
+#include <arrow/compute/function_internal.h>
 #include <arrow/util/int_util_overflow.h>
 #include "slot_ref.h"
 #include "agg_fn_call.h"
@@ -431,6 +433,135 @@ struct GroupedAvgFinalizeFactory {
     arrow::compute::InputType argument_type;
 };
 
+/* 
+ * group concat 不带order by
+ *   1.  store一阶段agg -> append string                 (group by groupby cols)
+ *   2.  db   三阶段agg -> append string                 (group by groupby cols)
+ *
+ * group concat 带order by (TODO)
+ *   1.  store一阶段agg -> append string                 (group by groupby cols, orderby cols)
+ *   2.  db   二阶段agg -> append string                 (group by groupby cols, orderby cols)
+ *   3.  db   三阶段agg -> sort -> final string value    (group by groupby cols)
+ *
+ * GROUP_CONCAT generate intermediate string(agg)
+ */
+static auto kCountOptionsType =
+    arrow::compute::internal::GetFunctionOptionsType<GroupConcatOptions>(arrow::internal::DataMember("separator_", &GroupConcatOptions::separator_));
+GroupConcatOptions::GroupConcatOptions(const std::string& sep, const std::vector<bool>& asc)
+    : FunctionOptions(kCountOptionsType), separator_(sep), asc_(asc) {}
+constexpr char GroupConcatOptions::kTypeName[];
+
+struct GroupeConcatIntermediateImpl final : public GroupedAggregator {
+    arrow::Status Init(arrow::compute::ExecContext* ctx, const arrow::compute::KernelInitArgs& args) override {
+        ctx_ = ctx;
+        null_bitmap_ = arrow::TypedBufferBuilder<bool>(ctx->memory_pool());
+        options_ = arrow::internal::checked_cast<const GroupConcatOptions&>(*args.options);
+        return arrow::Status::OK();
+    }
+
+    arrow::Status Resize(int64_t new_num_groups) override {
+        auto added_groups = new_num_groups - num_groups_;
+        DCHECK_GE(added_groups, 0);
+        num_groups_ = new_num_groups;
+        values_.resize(new_num_groups);
+        RETURN_NOT_OK(null_bitmap_.Append(added_groups, false));
+        return arrow::Status::OK();
+    }
+
+    arrow::Status Consume(const arrow::compute::ExecSpan& batch) override {
+        int64_t values_size = values_.size();
+        return VisitGroupedValues<arrow::LargeBinaryType>(
+                batch,
+                [&](uint32_t g, std::string_view val) -> arrow::Status {
+                    if (values_size <= g) {
+                        return arrow::Status::Invalid("Group index ", g, " out of range");
+                    }
+                    if (!values_[g].has_value()) {
+                        values_[g].emplace(val.data(), val.size());
+                    } else {
+                        values_[g]->append(options_.separator_);
+                        values_[g]->append(val.data(), val.size());
+                    }
+                    arrow::bit_util::SetBit(null_bitmap_.mutable_data(), g);
+                    return arrow::Status::OK();
+                },
+            [&](uint32_t g) -> arrow::Status { return arrow::Status::OK(); });
+    }
+
+    arrow::Status Merge(GroupedAggregator&& raw_other, const arrow::ArrayData& group_id_mapping) override {
+        auto other = arrow::internal::checked_cast<GroupeConcatIntermediateImpl*>(&raw_other);
+        auto g = group_id_mapping.GetValues<uint32_t>(1);
+        for (uint32_t other_g = 0; static_cast<int64_t>(other_g) < group_id_mapping.length; ++other_g, ++g) {
+            if (!other->values_[other_g].has_value()) {
+                continue;
+            }
+            if (!values_[*g].has_value()) {
+                values_[*g].emplace(other->values_[other_g]->data(), other->values_[other_g]->size());
+            } else {
+                values_[*g]->append(options_.separator_);
+                values_[*g]->append(other->values_[other_g]->data(), other->values_[other_g]->size());
+            }
+            arrow::bit_util::SetBit(null_bitmap_.mutable_data(), *g);
+        }
+        return arrow::Status::OK();
+    }
+
+    arrow::Result<arrow::Datum> Finalize() override {
+        if (ctx_ == nullptr) {
+            return arrow::Status::Invalid("ctx is nullptr");
+        }
+        using offset_type = int64_t;
+        ARROW_ASSIGN_OR_RAISE(auto nulls, null_bitmap_.Finish());
+        auto result_out = arrow::ArrayData::Make(out_type(), num_groups_, {std::move(nulls), nullptr});
+        ARROW_ASSIGN_OR_RAISE(
+            auto raw_offsets,
+            AllocateBuffer((1 + values_.size()) * sizeof(offset_type), ctx_->memory_pool()));
+        auto* offsets = reinterpret_cast<offset_type*>(raw_offsets->mutable_data());
+        offsets[0] = 0;
+        offsets++;
+        if (result_out->buffers.size() < 2) {
+            return arrow::Status::Invalid("Result array want 2 buffers but only has ", result_out->buffers.size());
+        }
+        const uint8_t* null_bitmap = result_out->buffers[0]->data();
+        offset_type total_length = 0;
+        for (size_t i = 0; i < values_.size(); i++) {
+            if (arrow::bit_util::GetBit(null_bitmap, i)) {
+                const std::optional<std::string>& value = values_[i];
+                DCHECK(value.has_value());
+                if (arrow::internal::AddWithOverflow(
+                        total_length, static_cast<offset_type>(value->size()), &total_length)) {
+                    return arrow::Status::Invalid("Result is too large to fit in ", *result_out->type,
+                                            " cast to large_ variant of type");
+                }
+            }
+            offsets[i] = total_length;
+        }
+        ARROW_ASSIGN_OR_RAISE(auto data, AllocateBuffer(total_length, ctx_->memory_pool()));
+        int64_t offset = 0;
+        for (size_t i = 0; i < values_.size(); i++) {
+            if (arrow::bit_util::GetBit(null_bitmap, i)) {
+                const std::optional<std::string>& value = values_[i];
+                DCHECK(value.has_value());
+                std::memcpy(data->mutable_data() + offset, value->data(), value->size());
+                offset += value->size();
+            }
+        }
+        result_out->buffers[1] = std::move(raw_offsets);
+        result_out->buffers.push_back(std::move(data));
+        return result_out;
+    }
+
+    std::shared_ptr<arrow::DataType> out_type() const override {
+        return arrow::large_binary();
+    }
+
+    int64_t num_groups_ = 0;
+    std::vector<std::optional<std::string>> values_;
+    arrow::TypedBufferBuilder<bool> null_bitmap_;
+    arrow::compute::ExecContext* ctx_;
+    GroupConcatOptions options_;
+};
+
 arrow::Status ArrowFunctionManager::RegisterAllHashAggFunction() {
     auto registry = arrow::compute::GetFunctionRegistry();
     {
@@ -449,6 +580,13 @@ arrow::Status ArrowFunctionManager::RegisterAllHashAggFunction() {
         auto func = std::make_shared<arrow::compute::HashAggregateFunction>("hash_avg_finalize", arrow::compute::Arity::Binary(), 
             /*doc=*/arrow::compute::FunctionDoc::Empty());
         DCHECK_OK(AddHashAggKernels(arrow::BaseBinaryTypes(), GroupedAvgFinalizeFactory::Make, func.get())); // 一阶段agg产出中间结果
+        DCHECK_OK(registry->AddFunction(std::move(func)));
+    }
+    {
+        static auto default_group_concat_options = GroupConcatOptions::Defaults();
+        auto func = std::make_shared<arrow::compute::HashAggregateFunction>("group_concat_intermediate", arrow::compute::Arity::Binary(),
+            /*doc=*/arrow::compute::FunctionDoc::Empty(), &default_group_concat_options);
+        DCHECK_OK(func->AddKernel(MakeKernel(arrow::compute::InputType::Any(), HashAggregateInit<GroupeConcatIntermediateImpl>)));
         DCHECK_OK(registry->AddFunction(std::move(func)));
     }
     return arrow::Status::OK();

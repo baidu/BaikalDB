@@ -26,9 +26,8 @@ public:
 
     bool PartialMerge(const rocksdb::Slice& key, const rocksdb::Slice& left_operand,
                     const rocksdb::Slice& right_operand, std::string* new_value,
-                    rocksdb::Logger* /*logger*/) const override {
-        return false;
-    }
+                    rocksdb::Logger* /*logger*/) const override;
+                    
     const char* Name() const override { return "OLAPMergeOperator"; }
 };
 }  // namespace baikaldb

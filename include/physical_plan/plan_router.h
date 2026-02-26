@@ -29,13 +29,13 @@ public:
     /* 通过主键索引获取所在的regions
      */
     int analyze(QueryContext* ctx);
-    int scan_plan_router(RocksdbScanNode* scan_node,  
+    int scan_plan_router(ScanNode* scan_node,  
         const std::function<int32_t(int32_t, int32_t)>& get_slot_id,
         const std::function<pb::TupleDescriptor*(int32_t)>& get_tuple_desc,
         bool has_join,
         const std::set<ExecNode*>& escape_get_region_infos);
 
-    int scan_node_analyze(RocksdbScanNode* scan_node, 
+    int scan_node_analyze(ScanNode* scan_node, 
         QueryContext* ctx, bool has_join, const std::set<ExecNode*>& escape_get_region_infos);
  
 private:

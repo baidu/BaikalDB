@@ -1216,7 +1216,7 @@ int ColdFileSstWriter::write_kv(const rocksdb::Slice& key, const rocksdb::Slice&
     if (_writer == nullptr) {
         rocksdb::Options option = RocksWrapper::get_instance()->get_cold_options();
         option.env = rocksdb::Env::Default();
-        _writer = new SstFileWriter(option, false);
+        _writer = new SstFileWriter(option);
         _write_count = 0;
         _cost.reset();
         _tmp_file_name = FLAGS_db_path + "_tmp/" + std::to_string(_region_id) + "_" +std::to_string(butil::gettimeofday_us()); 

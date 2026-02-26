@@ -17,6 +17,8 @@
 #include "common.h"
 
 namespace baikaldb {
+time_t mktime_fixed_r(const struct tm* tm, int tz_offset_hours = 8);
+struct tm *localtime_fixed_r(const time_t *timep, struct tm *result, int tz_offset_hours = 8);
 extern std::string timestamp_to_str(time_t timestamp, bool is_utc = false);
 extern time_t str_to_timestamp(const char* str_time);
 

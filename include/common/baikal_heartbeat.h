@@ -24,6 +24,7 @@ struct HeartBeatTableName {
     std::string namespace_name;
     std::string database;
     std::string table_name;
+    std::set<int64_t> partition_ids;
 };
 
 struct SubTableNames {

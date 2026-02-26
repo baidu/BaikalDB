@@ -67,6 +67,9 @@ public:
     RuntimeState* runtime_state() {
         return _state;
     }
+    void set_conditions(arrow::compute::Expression* condition) {
+        _condition = condition;
+    }
 
 public:
     class SenderQueue;
@@ -114,6 +117,8 @@ public:
 
     RuntimeState* _state = nullptr;
     ExchangeReceiverNode* _exchange_receiver_node = nullptr;
+
+    arrow::compute::Expression* _condition = nullptr;
 
     bthread::Mutex _mtx;
     // <region_id, RegionInfo>，需要接收region的信息
@@ -167,12 +172,7 @@ public:
         return true;
     }
 
-    int init_sort_info(SortNode* sort_node) {
-        _slot_order_exprs = sort_node->slot_order_exprs();
-        _is_asc = sort_node->is_asc();
-        _is_null_first = sort_node->is_null_first();
-        return 0;
-    }
+    int init_condition_and_sort_info(ExecNode* select_manager);
 
     std::shared_ptr<DataStreamReceiver> get_data_stream_receiver() const {
         return _data_stream_receiver; 
@@ -250,6 +250,10 @@ private:
     std::vector<ExprNode*> _slot_order_exprs;
     std::vector<bool> _is_asc;
     std::vector<bool> _is_null_first;
+
+    // filter
+    std::vector<ExprNode*> _conditions;
+    arrow::compute::Expression _vectorize_conditions;
 
     // 已下只有主db赋值
     ExecNode* _exchange_sender_node = nullptr; 

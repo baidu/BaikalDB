@@ -21,8 +21,8 @@
 #include <boost/algorithm/string.hpp>
 
 namespace baikaldb {
-DEFINE_bool(unique_index_default_global, true, "unique_index_default_global");
-DEFINE_bool(normal_index_default_global, false, "normal_index_default_global");
+DEFINE_bool(unique_index_default_global, true, "Default unique index as global, default: true");
+DEFINE_bool(normal_index_default_global, false, "Default normal index as global, default: false");
 int DDLPlanner::plan() {
     pb::MetaManagerRequest request;
     if (!_ctx->user_info->allow_ddl()) {
@@ -878,11 +878,9 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
             }
         } else if (constraint->type == parser::CONSTRAINT_FULLTEXT) {
             index->set_index_type(pb::I_FULLTEXT);
-            can_support_ttl = false;
             index->set_storage_type(pb::ST_ARROW);
         } else if (constraint->type == parser::CONSTRAINT_VECTOR) {
             index->set_index_type(pb::I_VECTOR);
-            can_support_ttl = false;
         } else if (constraint->type == parser::CONSTRAINT_ROLLUP) {
             index->set_index_type(pb::I_ROLLUP);
             can_support_ttl = false;
@@ -1109,6 +1107,34 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                     table.set_online_ttl_expire_time_us(0);
                     DB_WARNING("ttl_duration: %ld", ttl_duration);
                 }
+                // 新格式ttl配置优先
+                json_iter = root.FindMember("ttl");
+                if (json_iter != root.MemberEnd()) {
+                    if (!can_support_ttl) {
+                        DB_FATAL("fulltext/engine!=rocksdb can not create ttl table");
+                        return -1;
+                    }
+                    auto duration_iter = json_iter->value.FindMember("duration");
+                    if (duration_iter == json_iter->value.MemberEnd()) {
+                        DB_FATAL("ttl need specify duration");
+                        return -1;
+                    }
+                    std::string ttl_field_name;
+                    auto field_iter = json_iter->value.FindMember("field");
+                    if (field_iter != json_iter->value.MemberEnd()) {
+                        ttl_field_name = field_iter->value.GetString();
+                        std::vector<std::string> splits;
+                        boost::split(splits, ttl_field_name, boost::is_any_of("."));
+                        ttl_field_name = splits.back();
+                    }
+                    int64_t ttl_duration = duration_iter->value.GetInt64();
+                    table.set_ttl_duration(ttl_duration);
+                    if (!ttl_field_name.empty()) {
+                        table.mutable_ttl_field()->set_field_name(ttl_field_name);
+                    }
+                    table.set_online_ttl_expire_time_us(0);
+                    DB_WARNING("ttl_duration: %ld, ttl field: %s", ttl_duration, ttl_field_name.c_str());
+                }
                 json_iter = root.FindMember("storage_compute_separate");
                 if (json_iter != root.MemberEnd()) {
                     int64_t separate = json_iter->value.GetInt64();
@@ -1291,6 +1317,48 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                         mysql_info_iter = mysql_info_value.FindMember("charset");
                         if (mysql_info_iter != mysql_info_value.MemberEnd() && mysql_info_iter->value.IsString()) {
                             dblink_info->mutable_mysql_info()->set_charset(mysql_info_iter->value.GetString());
+                        }
+                    }
+                    iter = value.FindMember("file_info");
+                    if (iter != value.MemberEnd()) {
+                        const rapidjson::Value& file_info_value = iter->value;
+                        auto file_info_iter = file_info_value.FindMember("cluster");
+                        if (file_info_iter != file_info_value.MemberEnd() && file_info_iter->value.IsString()) {
+                            dblink_info->mutable_file_info()->set_cluster(file_info_iter->value.GetString());
+                        }
+                        file_info_iter = file_info_value.FindMember("path");
+                        if (file_info_iter != file_info_value.MemberEnd() && file_info_iter->value.IsString()) {
+                            dblink_info->mutable_file_info()->set_path(file_info_iter->value.GetString());
+                        }
+                        file_info_iter = file_info_value.FindMember("username");
+                        if (file_info_iter != file_info_value.MemberEnd() && file_info_iter->value.IsString()) {
+                            dblink_info->mutable_file_info()->set_username(file_info_iter->value.GetString());
+                        }
+                        file_info_iter = file_info_value.FindMember("password");
+                        if (file_info_iter != file_info_value.MemberEnd() && file_info_iter->value.IsString()) {
+                            dblink_info->mutable_file_info()->set_password(file_info_iter->value.GetString());
+                        }
+                        file_info_iter = file_info_value.FindMember("partition_fields");
+                        if (file_info_iter != file_info_value.MemberEnd() && file_info_iter->value.IsArray()) {
+                            for (size_t i = 0; i < file_info_iter->value.Size(); ++i) {
+                                if (file_info_iter->value[i].IsString()) {
+                                    dblink_info->mutable_file_info()->add_partition_fields(file_info_iter->value[i].GetString());
+                                }
+                            }
+                        }
+                        file_info_iter = file_info_value.FindMember("format");
+                        if (file_info_iter != file_info_value.MemberEnd() && file_info_iter->value.IsString()) {
+                            const std::string& file_format_str = file_info_iter->value.GetString();
+                            pb::FileFormat file_format;
+                            if (!pb::FileFormat_Parse(file_format_str, &file_format)) {
+                                DB_WARNING("Invalid file_format_str: %s", file_format_str.c_str());
+                                return -1;
+                            }
+                            dblink_info->mutable_file_info()->set_format(file_format);
+                        }
+                        file_info_iter = file_info_value.FindMember("delimiter");
+                        if (file_info_iter != file_info_value.MemberEnd() && file_info_iter->value.IsString()) {
+                            dblink_info->mutable_file_info()->set_delimiter(file_info_iter->value.GetString());
                         }
                     }
                     DB_WARNING("dblink_info: %s", dblink_info->ShortDebugString().c_str());
@@ -1758,10 +1826,12 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
         return -1;
     }
     if (tbl_ptr->engine == pb::DBLINK) {
-        DB_WARNING("dblink table not support alter");
-        _ctx->stat_info.error_code = ER_BAD_TABLE_ERROR;
-        _ctx->stat_info.error_msg << "dblink table not support alter";
-        return -1;
+        if (check_alter_dblink_table_valid(*tbl_ptr, *stmt) != 0) {
+            DB_WARNING("dblink table not support alter");
+            _ctx->stat_info.error_code = ER_BAD_TABLE_ERROR;
+            _ctx->stat_info.error_msg << "dblink table not support alter";
+            return -1;
+        }
     }
     if (spec->spec_type == parser::ALTER_SPEC_TABLE_OPTION) {
         if (spec->table_options.size() > 1) {
@@ -1880,8 +1950,18 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
             _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;
             _ctx->stat_info.error_msg << "field_name is empty";
             return -1;
-        } 
-        field->set_field_name(spec->column_name.value);
+        }
+        std::string drop_field_name = spec->column_name.value;
+        if (tbl_ptr->get_ttl_field() != nullptr) {
+            std::vector<std::string> splits;
+            boost::split(splits, drop_field_name, boost::is_any_of("."));
+            if (splits.back() == tbl_ptr->get_ttl_field()->short_name) {
+                _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;
+                _ctx->stat_info.error_msg << "forbid drop ttl field";
+                return -1;
+            }
+        }
+        field->set_field_name(drop_field_name);
     } else if (spec->spec_type == parser::ALTER_SPEC_MODIFY_COLUMN && spec->new_columns.size() > 0) {
         alter_request.set_op_type(pb::OP_MODIFY_FIELD);
         int column_len = spec->new_columns.size();
@@ -1915,7 +1995,7 @@ int DDLPlanner::parse_alter_table(pb::MetaManagerRequest& alter_request) {
             }
         }
         if (table->indexs_size() != 0) {
-            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;;
+            _ctx->stat_info.error_code = ER_ALTER_OPERATION_NOT_SUPPORTED;
             _ctx->stat_info.error_msg << "modify table column with index is not supported";
             return -1;
         }
@@ -2356,10 +2436,10 @@ int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* co
                 DB_WARNING("fulltext index only support one field.");
                 return -1;
             }
-            if (has_ttl) {
-                DB_WARNING("fulltext index can't support ttl.");
-                return -1;
-            }
+            // if (has_ttl) {
+            //     DB_WARNING("fulltext index can't support ttl.");
+            //     return -1;
+            // }
             break;
         case parser::CONSTRAINT_VECTOR:
             index_type = pb::I_VECTOR;
@@ -2393,6 +2473,7 @@ int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* co
         }
     }
 
+    std::unordered_set<std::string> index_fields_set;
     for (int32_t column_index = 0; column_index < constraint->columns.size(); ++column_index) {
         std::string column_name = constraint->columns[column_index]->name.value;
         if (_column_can_null[column_name] && index->index_type() != pb::I_FULLTEXT) {
@@ -2401,6 +2482,13 @@ int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* co
             _ctx->stat_info.error_msg << "index column : " << column_name << " should NOT NULL";
             return -1;
         }
+        if (index_fields_set.count(column_name) != 0) {
+            DB_WARNING("index column : %s duplicate", column_name.c_str());
+            _ctx->stat_info.error_code = ER_DUP_FIELDNAME;
+            _ctx->stat_info.error_msg << "Duplicate column name '" << column_name << "'";
+            return -1;
+        }
+        index_fields_set.emplace(column_name);
         index->add_field_names(column_name);
     }
     if (constraint->index_option != nullptr) {
@@ -2430,6 +2518,35 @@ int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* co
                     StorageType_Parse(storage_type, &pb_storage_type);
                 }
                 index->set_storage_type(pb_storage_type);
+
+                // vector index
+                auto iter = root.FindMember("vector_description");
+                if (iter != root.MemberEnd()) {
+                    index->set_vector_description(iter->value.GetString());
+                }
+                iter = root.FindMember("dimension");
+                if (iter != root.MemberEnd()) {
+                    index->set_dimension(iter->value.GetInt());
+                }
+                iter = root.FindMember("nprobe");
+                if (iter != root.MemberEnd()) {
+                    index->set_nprobe(iter->value.GetInt());
+                }
+                iter = root.FindMember("efsearch");
+                if (iter != root.MemberEnd()) {
+                    index->set_efsearch(iter->value.GetInt());
+                }
+                iter = root.FindMember("efconstruction");
+                if (iter != root.MemberEnd()) {
+                    index->set_efconstruction(iter->value.GetInt());
+                }
+                iter = root.FindMember("metric_type");
+                pb::MetricType metric_type = pb::METRIC_L2;
+                if (iter != root.MemberEnd()) {
+                    std::string metric_type_str = iter->value.GetString();
+                    MetricType_Parse(metric_type_str, &metric_type);
+                    index->set_metric_type(metric_type);
+                }
             }
         } catch (...) {
             DB_WARNING("parse create table json comments error [%s]", value);
@@ -3045,7 +3162,6 @@ int DDLPlanner::add_default_partition_info(pb::SchemaInfo& table) {
     return 0;
 }
 
-// 请求对应MetaServer检查外部映射表是否存在
 int DDLPlanner::check_dblink_table_valid(const pb::SchemaInfo& table) {
     if (!table.has_dblink_info()) {
         DB_WARNING("table has no dblink_info, table: %s", table.ShortDebugString().c_str());
@@ -3059,10 +3175,28 @@ int DDLPlanner::check_dblink_table_valid(const pb::SchemaInfo& table) {
             return -1;
         }
         return 0;
+    } else if (dblink_info.type() == pb::LT_FILE) {
+        std::unordered_set<std::string> field_names;
+        for (const auto& field : table.fields()) {
+            field_names.insert(field.field_name());
+        }
+        for (const auto& partition_field_name : dblink_info.file_info().partition_fields()) {
+            if (field_names.find(partition_field_name) == field_names.end()) {
+                DB_WARNING("DBLink File partition field should be in table fields, table: %s",
+                            table.ShortDebugString().c_str());
+                return -1;
+            }
+        }
+        if (dblink_info.file_info().delimiter().size() > 1) {
+            DB_WARNING("DBLink File only support single char delimiter");
+            return -1;
+        }
+        return 0;
     } else if (dblink_info.type() != pb::LT_BAIKALDB) {
         DB_WARNING("Invalid dblink type: %d", dblink_info.type());
         return -1;
     }
+    // 请求对应MetaServer检查外部映射表是否存在
     if (_ctx == nullptr) {
         DB_WARNING("_ctx is nullptr");
         return -1;
@@ -3105,6 +3239,39 @@ int DDLPlanner::check_dblink_table_valid(const pb::SchemaInfo& table) {
         DB_WARNING("Not support link dblink table");
         _ctx->stat_info.error_code = ER_BAD_TABLE_ERROR;
         _ctx->stat_info.error_msg << "Not support link dblink table";
+        return -1;
+    }
+    return 0;
+}
+
+int DDLPlanner::check_alter_dblink_table_valid(const TableInfo& table, const parser::AlterTableStmt& stmt) {
+    const pb::DBLinkInfo& dblink_info = table.dblink_info;
+    if (dblink_info.type() == pb::LT_FILE) {
+        // 只允许添加或删除字段，且删除字段不能为分区字段
+        if (stmt.alter_specs.size() < 1) {
+            DB_WARNING("No alter_specs");
+            return -1;
+        }
+        parser::AlterTableSpec* spec = stmt.alter_specs[0];
+        if (spec == nullptr) {
+            DB_WARNING("spec is nullptr");
+            return -1;
+        }
+        if (spec->spec_type != parser::ALTER_SPEC_ADD_COLUMN &&
+                spec->spec_type != parser::ALTER_SPEC_DROP_COLUMN) {
+            DB_WARNING("Invalid spec_type: %d", spec->spec_type);
+            return -1;
+        }
+        if (spec->spec_type == parser::ALTER_SPEC_DROP_COLUMN) {
+            const std::string& drop_column_name = spec->column_name.c_str();
+            for (const auto& partition_field_name : dblink_info.file_info().partition_fields()) {
+                if (drop_column_name == partition_field_name) {
+                    DB_WARNING("Can not drop partition field, %s", partition_field_name.c_str());
+                    return -1;
+                }
+            }
+        }
+    } else {
         return -1;
     }
     return 0;

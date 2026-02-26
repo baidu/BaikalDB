@@ -40,6 +40,7 @@ enum ErrorType {
 struct RegionReturnData {
     std::shared_ptr<RowBatch> row_data = nullptr;
     std::shared_ptr<arrow::RecordBatch> arrow_data = nullptr;
+    int64_t partition_id = 0; // 只有分区表全局索引使用
     void set_row_data(std::shared_ptr<RowBatch>& batch) {
         row_data = batch;
         arrow_data = nullptr;
@@ -47,6 +48,9 @@ struct RegionReturnData {
     void set_arrow_data(std::shared_ptr<arrow::RecordBatch>& batch) {
         arrow_data = batch;
         row_data = nullptr;
+    }
+    void set_partition_id(int64_t p_id) {
+        partition_id = p_id;
     }
 };
 
@@ -120,6 +124,8 @@ public:
                                     pb::RegionInfo& info,
                                     std::shared_ptr<pb::StoreRes> single_response);
     ErrorType check_status();
+
+    bool need_copy(MemRow* row);
 
     void clear_request() {
         if (_need_check_memory && _has_multi_plan && _op_type == pb::OP_SELECT) {
@@ -771,6 +777,10 @@ public:
     std::shared_ptr<pb::Plan> shared_plan;
     bool is_full_export = false;
     bool need_check_memory = false;
+    std::vector<ExprNode*>* conditions = nullptr;
+    arrow::compute::Expression* vectorize_conditions = nullptr;
+
+    bool broadcast_all_peer_without_raft = false;
 };
 
 template<typename Repeated>

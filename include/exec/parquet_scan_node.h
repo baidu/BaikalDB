@@ -18,12 +18,6 @@
 #include "file_manager.h"
 
 namespace baikaldb {
-
-struct ReaderInfo{
-    std::shared_ptr<ReadContents> read_contents;
-    std::shared_ptr<::arrow::RecordBatchReader> reader;
-};
-
 class ParquetScanNode : public ScanNode {
 public:
     ParquetScanNode() {}
@@ -41,11 +35,8 @@ public:
     std::unordered_map<int32_t, FieldInfo*>* get_field_id2info_map() {
         return &_field_id2info_map;
     }
-    std::unordered_map<std::string, ReaderInfo>* get_parquet_file2reader_map() {
-        return &_parquet_file2reader_map;
-    }
-    std::unordered_map<std::string, std::vector<FieldInfo*>>* get_parquet_file_not_exist_column_map() {
-        return &_parquet_file_not_exist_column_map;
+    std::vector<std::shared_ptr<::arrow::RecordBatchReader>>* get_parquet_file_readers() {
+        return &_parquet_file_readers;
     }
 
 private:
@@ -53,23 +44,21 @@ private:
 
     // 获取每个parquet文件符合条件数据的RecordBatchReader
     // 增删列场景下，每个parquet文件的schema可能不相同，需要记录查询需要但是parquet文件中不存在的列，对这些列需要填充null或默认值
-    int get_qualified_record_batch_readers(
-            std::unordered_map<std::string, ReaderInfo>& parquet_file2reader_map,
-            std::unordered_map<std::string, std::vector<FieldInfo*>>& parquet_file_not_exist_column_map);
+    int get_qualified_record_batch_readers(std::vector<std::shared_ptr<::arrow::RecordBatchReader>>& parquet_file_readers);
+    void get_qualified_parquet_file_readers(std::vector<std::shared_ptr<ParquetFileReader>>& parquet_file_readers, 
+            const std::vector<std::shared_ptr<ParquetFile>>& parquet_files, std::shared_ptr<arrow::Schema> schema);
 
 private:
     ParquetFileManager* _file_manager = nullptr;
     SchemaFactory* _factory = nullptr;
-    SmartTable _table_info;
+    SmartTable _table_info  = nullptr;
+    SmartIndex _pri_info    = nullptr;
     int64_t _region_id = -1;
-    std::vector<pb::PossibleIndex::Range> _key_ranges;
-    std::vector<std::shared_ptr<ParquetFile>> _parquet_files;
+    pb::PossibleIndex _possible_index;
     // key: field_id, value: field_info
     std::unordered_map<int32_t, FieldInfo*> _field_id2info_map;
-    // key: parquet_file_name, value: parquet RecordBatchReader
-    std::unordered_map<std::string, ReaderInfo> _parquet_file2reader_map;
-    // key: parquet_file_name, value: 本次需要获取的但parquet文件中不存在的列
-    std::unordered_map<std::string, std::vector<FieldInfo*>> _parquet_file_not_exist_column_map;
+    std::unordered_map<std::string, FieldInfo*> _field_name2info_map;
+    std::vector<std::shared_ptr<::arrow::RecordBatchReader>> _parquet_file_readers;
 };
 
 class ParquetVectorizedReader : public arrow::RecordBatchReader {
@@ -87,13 +76,15 @@ private:
     RuntimeState* _state = nullptr;
     ParquetScanNode* _parquet_scan_node = nullptr;
     std::unordered_map<int32_t, FieldInfo*>* _field_id2info_map = nullptr;
-    std::unordered_map<std::string, ReaderInfo>* _parquet_file2reader_map = nullptr;
-    std::unordered_map<std::string, std::vector<FieldInfo*>>* _parquet_file_not_exist_column_map = nullptr;
+    std::unordered_map<std::string, FieldInfo*>* _field_name2info_map = nullptr;
+    std::vector<std::shared_ptr<::arrow::RecordBatchReader>>* _parquet_file_readers = nullptr;
 
     std::shared_ptr<::arrow::Schema> _arrow_schema;
     // key: baikaldb column name, value: parquet column name
     std::unordered_map<std::string, std::string> _column_name_map;
-    std::unordered_map<std::string, ReaderInfo>::iterator _reader_iter;
+    // key: baikaldb column name, value: baikaldb column type
+    std::unordered_map<std::string, pb::PrimitiveType> _column_type_map;
+    std::vector<std::shared_ptr<::arrow::RecordBatchReader>>::iterator _reader_iter;
 
     std::shared_ptr<::arrow::RecordBatch> _record_batch;
     int64_t _row_idx_in_record_batch = 0;

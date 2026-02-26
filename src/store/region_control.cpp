@@ -29,8 +29,8 @@ DECLARE_string(stable_uri);
 DECLARE_int64(transfer_leader_catchup_time_threshold);
 DECLARE_int64(store_heart_beat_interval_us);
 DEFINE_int32(compact_interval, 1, "compact_interval xx (s)");
-DEFINE_bool(allow_compact_range, true, "allow_compact_range");
-DEFINE_bool(allow_blocking_flush, true, "allow_blocking_flush");
+DEFINE_bool(allow_compact_range, true, "Allow compact range, default: true");
+DEFINE_bool(allow_blocking_flush, true, "Allow blocking flush, default: true");
 DEFINE_bool(snapshot_consistency, true, "avoid bottommost compaction");
 int RegionControl::remove_data(int64_t drop_region_id) {
     rocksdb::WriteOptions options;
@@ -290,6 +290,7 @@ int RegionControl::remove_log_entry(int64_t drop_region_id) {
     opt.fill_cache = false;
     std::unique_ptr<rocksdb::Iterator> iter(rocksdb->new_iterator(opt, rocksdb->get_raft_log_handle()));
     iter->Seek(log_data_key.data());
+    RocksdbVars::get_instance()->raft_log_scan_times_count << 1;
     if (iter->Valid()) {
         int64_t log_index = TableKey(iter->key()).extract_i64(sizeof(int64_t) + 1);
         rocksdb::Slice value(iter->value());

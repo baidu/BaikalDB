@@ -23,13 +23,13 @@ namespace baikaldb {
 DECLARE_string(meta_server_bns);
 DECLARE_string(cold_rocksdb_afs_infos);
 DEFINE_int64(afs_double_read_interval_us, 1000 * 1000LL, "afs_double_read_interval_us");
-DEFINE_bool(afs_open_reader_async_switch, true, "afs_open_reader_async_switch");
+DEFINE_bool(afs_open_reader_async_switch, true, "Enable async AFS reader, default: true");
 DEFINE_int64(afs_gc_interval_s, 24 * 3600LL, "default 1 day");
 DEFINE_int64(afs_gc_count, 10, "afs_gc_count");
 DEFINE_int64(afs_gc_delay_days, 30, "afs_gc_delay_days");
 DEFINE_int64(afs_gc_allow_dead_store_count, 3, "afs_gc_allow_dead_store_count");
-DEFINE_bool(afs_gc_enable, false, "afs_gc_enable");
-DEFINE_bool(need_ext_fs_gc, false, "need_ext_fs_gc");
+DEFINE_bool(afs_gc_enable, false, "Enable AFS garbage collection, default: false");
+DEFINE_bool(need_ext_fs_gc, false, "Need external filesystem garbage collection, default: false");
 DEFINE_int64(compaction_sst_cache_max_block, 8192, "compaction_sst_cache_max_block");
 
 int get_size_by_external_file_name(uint64_t* size, uint64_t* lines, const std::string& external_file) {
@@ -89,8 +89,7 @@ int get_size_by_external_file_name(uint64_t* size, uint64_t* lines, const std::s
     }
     return 0;
 }
-#ifdef BAIDU_INTERNAL
-
+#if defined(BAIDU_INTERNAL)
 // uri,user,password,conf_file,root_path     多组afs ugi使用英文分号分割用户名密码等信息使用英文逗号分割
 int get_afs_infos(std::vector<AfsExtFileSystem::AfsUgi>& ugi_infos) {
     ugi_infos.clear();
@@ -347,7 +346,6 @@ bool AfsExtFileWriter::close() {
     
     return all_succ ? true : false;
 }
-
 #endif
 
 int64_t CompactionExtFileReader::read(char* buf, uint32_t count, uint32_t offset, bool* eof) {
@@ -490,8 +488,7 @@ bool CompactionExtFileWriter::close() {
     return true;
 }
 
-#ifdef BAIDU_INTERNAL
-
+#if defined(BAIDU_INTERNAL)
 AfsExtFileSystem::~AfsExtFileSystem() {
     for (auto& info : _ugi_infos) {
         if (info.afs != nullptr) {
@@ -923,7 +920,6 @@ int AfsExtFileSystem::readdir(const std::string& full_name, std::set<std::string
 
     return -1;
 }
-
 
 int ExtFileSystemGC::external_filesystem_gc() {
     if (!FLAGS_need_ext_fs_gc) {

@@ -92,6 +92,10 @@ int64_t ParquetArrowReader::read(char* buf, uint32_t count, uint32_t offset, boo
 }
 
 ::arrow::Result<int64_t> ParquetArrowReadableFile::read_from_device(int64_t position, int64_t nbytes, void* buffer) {
+    if (nbytes == 0) {
+        DB_WARNING("read from device, filename: %s, offset: %ld, len: 0", _file_reader->file_name().c_str(), position);
+        return 0;
+    }
     int64_t r = -1;
     int64_t left = nbytes;
     char* ptr = static_cast<char*>(buffer);

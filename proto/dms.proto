@@ -36,12 +36,17 @@ enum DMSOpType {
     OP_ADD_TMP_TABLE_TASK             = 14; // 添加临时表任务
     OP_QUERY_TMP_TABLE_TASK           = 15; // 查询临时表任务
     OP_QUERY_BNS                      = 16; // 排查工具使用，查询baikaldb bns、baikalstore bns
+    OP_CREATE_FLASH_BACK_TASK         = 17; // 创建闪回任务
+    OP_CREATE_BINLOG_TASK             = 18; // 创建binlog信息
+    OP_QUERY_BINLOG_TASK              = 19; // 查询binlog信息
 };
 
 enum SqlStatus {
     SQL_SUCCESS = 0;
     SQL_FAILED  = 1;
     SQL_DOING   = 2;
+    SQL_UPDATE  = 3;            // SQL闪回时更新SQL, 需要重新执行
+    SQL_WAITING = 4;            // 爱速搭不支持把''当枚举值，无法表示待执行的状态
 };
 
 enum TaskStatus {
@@ -55,6 +60,7 @@ enum TaskStatus {
     TS_IDLE             = 7;    // 任务待执行（导入回溯任务查询使用）
     TS_LORENTZ          = 8;    // 任务状态为lorentz（凤阁场景使用）
     TS_INITED           = 9;    // 导入任务创建校验成功，未启动状态
+    TS_UPDATE           = 10;    // SQL闪回时更新SQL, 需要重新执行
     TS_UNKNOWN          = 1001; // 未知状态
 };
 
@@ -70,6 +76,7 @@ message SqlDetail {
     optional bytes errmsg         = 3; // SQL错误信息
     optional int64 affected_row   = 4; // SQL影响行数
     optional bytes sql            = 5; // SQL文本
+    optional int64 old_id         = 6; // 旧SQL序号
 };
 
 // SQL预估和SQL执行返回结果复用该结构
@@ -80,6 +87,7 @@ message TaskDetail {
     optional int64 total_sql_num   = 4; // 任务SQL总数量
     optional int64 done_sql_num    = 5; // 任务SQL已完成数量
     repeated SqlDetail sql_details = 6; // SQL处理信息
+    optional bytes afs_path        = 7; // 任务afs路径
 };
 
 // 导入任务信息
@@ -106,6 +114,7 @@ message ImporterTaskInfo {
     optional bytes baikaldb_username       = 20; // 用于获取baikalmeta、namespace（凤阁场景使用）
     optional bytes baikaldb_password       = 21; // 用于获取baikalmeta、namespace（凤阁场景使用）
     optional bytes lorentz_done_json       = 22; // 用于检查的done_json（凤阁场景使用）
+    optional bytes local_done_json         = 23; // _SUCCESS模式下不和done_file共用
 };
 
 // 回溯任务信息
@@ -135,6 +144,17 @@ message TroubleShootingResponse {
     repeated bytes baikalstore_bns = 2;
 };
 
+message BinlogRequest {
+    optional bytes baikal_meta              = 1;
+    optional bytes baikal_namespace         = 2;
+    optional bytes db_name                  = 3;
+    optional bytes table_name               = 4;
+    optional bytes start_datetime           = 5;
+    optional bytes end_datetime             = 6;
+    optional int64 filter_partition_key     = 7;
+    optional bytes find_str                 = 8;
+}
+
 message TaskConfig {
     optional bool need_backup   = 1; // 是否需要备份
     optional bool need_parallel = 2; // 是否需要并行
@@ -150,6 +170,8 @@ message DMSRequest {
     optional ImporterTaskInfo importer_task_info                    = 7; // 导入任务信息
     optional BacktrackImporterTaskInfo backtrack_importer_task_info = 8; // 回溯任务信息
     optional TroubleShootingRequest trouble_shooting_request        = 9; // 排查工具请求
+    optional BinlogRequest binlog_request                           = 10; // 查找binlog请求
+    optional uint32 limit_tps                                       = 11; // 限制sql issue执行速度
 };
 
 message DMSResponse {

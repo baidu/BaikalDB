@@ -19,19 +19,18 @@
 #include "vectorize_helpper.h"
 #include "filter_node.h"
 #include "agg_node.h"
+#include "file_scan_node.h"
+#include "db_service.h"
 
 namespace baikaldb {
 DECLARE_int32(mpp_hash_partition_num);
+DECLARE_int32(file_scan_concurrency);
 
 int MppAnalyzer::analyze(QueryContext* ctx) {
     if (ctx->get_runtime_state()->execute_type == pb::EXEC_ARROW_ACERO) {
         restore_sort_pushdown_for_join(ctx);
     }
     if (!ctx->use_mpp) {
-        return 0;
-    }
-    // 包含DBLink Mysql表的查询不支持MPP执行
-    if (ctx->has_dblink_mysql) {
         return 0;
     }
     // 设置每个节点的partition_property和schema
@@ -168,6 +167,8 @@ int MppAnalyzer::create_exchange_node_pair(QueryContext* ctx,
     pb_es_node->set_log_id(ctx->stat_info.log_id);
     pb_es_node->mutable_partition_property()->set_type(parent->type);
     if (use_broadcast_shuffle) {
+        er_node->partition_property()->type = pb::BroadcastPartitionType;
+        pb_er_node->mutable_partition_property()->set_type(pb::BroadcastPartitionType);
         pb_es_node->mutable_partition_property()->set_type(pb::BroadcastPartitionType);
     }
     ExchangeSenderNode* es_node = new (std::nothrow) ExchangeSenderNode;
@@ -227,13 +228,16 @@ int MppAnalyzer::add_exchange_and_separate_for_index_join_inner_node(QueryContex
                                            NodePartitionProperty* parent_property,
                                            std::set<ExecNode*>& need_runtime_filter_select_manager_nodes,
                                            bool need_use_broadcast_exchange) {
-    DB_DEBUG("node: %s, parent_property(%p): %s, node_property(%p): %s, need_runtime_filter_select_manager_nodes size: %ld", 
+    DB_DEBUG("node: %s, parent_property(%p): %s, node_property(%p): %s, "
+            "need_runtime_filter_select_manager_nodes size: %ld, need_use_broadcast_exchange: %d", 
             pb::PlanNodeType_Name(node->node_type()).c_str(),
             fragment->partition_property,
             parent_property->print().c_str(),
             node->partition_property(),
             node->partition_property()->print().c_str(),
-            need_runtime_filter_select_manager_nodes.size());
+            need_runtime_filter_select_manager_nodes.size(),
+            need_use_broadcast_exchange);
+    
     if (node->partition_property()->has_no_input_data) {
         return 0;
     }
@@ -460,6 +464,7 @@ int MppAnalyzer::seperate_store_fragment(QueryContext* ctx,
                                         ExecNode* select_manager, 
                                         NodePartitionProperty* parent_property,
                                         bool need_use_broadcast_exchange) {
+    ScanNode* scan_node = static_cast<ScanNode*>(select_manager->get_node(pb::SCAN_NODE));
     // parent -> SelectManager -> store (xxx)
     ExchangeReceiverNode* receiver = nullptr;
     ExchangeSenderNode* sender = nullptr;
@@ -475,6 +480,8 @@ int MppAnalyzer::seperate_store_fragment(QueryContext* ctx,
     store_fragment->root = sender;
     store_fragment->parent = fragment.get();
     store_fragment->partition_property = sender->partition_property();
+    store_fragment->runtime_state = fragment->last_runtime_state;
+    store_fragment->last_runtime_state = fragment->last_runtime_state;
     fragment->receivers.emplace_back(receiver);
     fragment->children.emplace_back(store_fragment);
 
@@ -492,11 +499,7 @@ int MppAnalyzer::seperate_store_fragment(QueryContext* ctx,
     receiver->set_sender_fragment_id(store_fragment->fragment_id);
     sender->set_receiver_fragment_id(fragment->fragment_id);
 
-    // sortnode
-    SortNode* sort_node = static_cast<SortNode*>(sender->get_node(pb::SORT_NODE));
-    if (sort_node != nullptr) {
-        receiver->init_sort_info(sort_node);
-    }
+    receiver->init_condition_and_sort_info(select_manager);
 
     // 如果使用全局索引, 在这里串行访问全局索引, 生成主表的region信息, 供exchange使用, 否则exchange获取到的是全局索引的region信息
     // TODO 是否有更好的方法
@@ -577,14 +580,26 @@ int MppAnalyzer::check_need_add_exchange(NodePartitionProperty* parent_propety, 
                 *need_add_exchange = true;
                 return 0;
             }
+            if (parent_propety->hash_partition_propertys.empty()) {
+                DB_FATAL("parent hash_partition_propertys is empty, but is HashPartitionType");
+                return -1;
+            }
             for (auto& hash_columns : node_property->hash_partition_propertys) {
-                if (parent_propety->hash_partition_propertys[0]->hash_partition_is_same(hash_columns.get())) {
+                if (hash_columns.get() == parent_propety->hash_partition_propertys[0].get()
+                    || (hash_columns->type == pb::HashPartitionType
+                            && parent_propety->hash_partition_propertys[0]->hash_partition_is_same(hash_columns.get()))) {
                     *need_add_exchange = false;
                     return 0;
                 }
             }
             *need_add_exchange = true;
-            break;
+            return 0;
+        case pb::BroadcastPartitionType: 
+            *need_add_exchange = (node_property->type != pb::BroadcastPartitionType);
+            return 0;
+        case pb::RandomPartitionType: 
+            *need_add_exchange = (node_property->type != pb::RandomPartitionType);
+            return 0;
         default:
             DB_FATAL("not support partition type: %d", node_property->type);
             return -1;
@@ -681,8 +696,8 @@ int MppAnalyzer::build_fragment(QueryContext* ctx, SmartFragment& fragment) {
     int fragment_id = fragment->fragment_id;
     ctx->fragments[fragment_id] = fragment;
     if (fragment->receivers.size() == 0) {
-        // store fragment
-        return 0;
+        // scan fragment
+        return build_scan_fragment(ctx, fragment);
     }
     if (fragment->root->node_type() == pb::PACKET_NODE) {
         // 需要特殊处理fragment0, 因为root是pack_node, 不是exchange sender
@@ -702,7 +717,8 @@ int MppAnalyzer::build_fragment(QueryContext* ctx, SmartFragment& fragment) {
     ExchangeSenderNode* sender = static_cast<ExchangeSenderNode*>(fragment->root);
     // 先添加主db
     sender->add_address(SchemaFactory::get_instance()->get_address());
-    if (fragment->partition_property->type == pb::HashPartitionType) {
+    if (fragment->partition_property->type == pb::HashPartitionType
+            || fragment->partition_property->type == pb::RandomPartitionType) {
         // rolling N-1 db
         int mpp_hash_partition_num = FLAGS_mpp_hash_partition_num;
         if (ctx->mpp_hash_num > 0) {
@@ -726,7 +742,9 @@ int MppAnalyzer::build_fragment(QueryContext* ctx, SmartFragment& fragment) {
         SmartFragment& next_fragment = fragment->children[i];
         ExchangeSenderNode* next_fragment_sender = static_cast<ExchangeSenderNode*>(next_fragment->root);
         if (fragment->partition_property->type == pb::SinglePartitionType 
-            || fragment->partition_property->type == pb::HashPartitionType) {
+            || fragment->partition_property->type == pb::HashPartitionType
+            || fragment->partition_property->type == pb::BroadcastPartitionType
+            || fragment->partition_property->type == pb::RandomPartitionType) {
             // 本fragment sender对应的下游sender, 确定了本fragment分布地址, 就可以指定下游sender的destination
             next_fragment_sender->set_destination(sender->get_fragment_address());
         } else {
@@ -739,6 +757,91 @@ int MppAnalyzer::build_fragment(QueryContext* ctx, SmartFragment& fragment) {
     }
     return 0;
 }
+
+// 生成db侧执行scan的fragment
+int MppAnalyzer::build_scan_fragment(QueryContext* ctx, SmartFragment& fragment) {
+    if (ctx == nullptr) {
+        DB_WARNING("ctx is nullptr");
+        return -1;
+    }
+    if (fragment == nullptr) {
+        DB_WARNING("fragment is nullptr");
+        return -1;
+    }
+    ExchangeSenderNode* sender = static_cast<ExchangeSenderNode*>(fragment->root);
+    if (sender == nullptr) {
+        DB_WARNING("sender is nullptr");
+        return -1;
+    }
+    ScanNode* scan_node = static_cast<ScanNode*>(sender->get_node(pb::SCAN_NODE));
+    if (scan_node == nullptr) {
+        return 0;
+    }
+    if (scan_node->partition_property()->has_no_input_data) {
+        return 0;
+    }
+    ExchangeReceiverNode* receiver = static_cast<ExchangeReceiverNode*>(sender->get_exchange_receiver_node());    
+    if (receiver == nullptr) {
+        DB_WARNING("receiver is nullptr");
+        return -1;
+    }
+    SelectManagerNode* select_manager = 
+        static_cast<SelectManagerNode*>(receiver->get_relate_select_manager_node());
+    if (select_manager == nullptr) {
+        DB_WARNING("select_manager is nullptr");
+        return -1;
+    }
+    if (scan_node->is_file_scan_node()) {
+        // 将离线文件平均分配到多个实例执行
+        FileScanNode* file_scan_node = static_cast<FileScanNode*>(scan_node);
+        const auto& partition_files = file_scan_node->get_files();
+        if (partition_files.empty()) {
+            return 0;
+        }
+        std::vector<std::string> db_instances;
+        int32_t file_scan_concurrency = 
+                std::min(FLAGS_file_scan_concurrency, static_cast<int32_t>(partition_files.size()));
+        if (file_scan_concurrency > 1 &&
+                SchemaFactory::get_instance()->rolling_pick_db(file_scan_concurrency - 1, db_instances) != 0) {
+            DB_WARNING("pick db instances failed");
+            return -1;
+        }
+        db_instances.emplace_back(SchemaFactory::get_instance()->get_address());
+        std::map<std::string, std::vector<pb::PartitionFile>> db_partition_files;
+        for (int i = 0; i < partition_files.size(); ++i) {
+            const std::string& db_instance = db_instances[i % db_instances.size()];
+            db_partition_files[db_instance].emplace_back(partition_files[i]);
+        }
+        std::map<std::string, pb::DAGFragmentRequest> db_request_map;
+        for (const auto& [ith_db, files] : db_partition_files) {
+            sender->add_address(ith_db);
+            file_scan_node->set_files(files);
+            pb::DAGFragmentRequest request;
+            int ret = DBInteract::get_instance()->construct_mpp_dag_request(ctx, {fragment->fragment_id}, request);
+            if (ret != 0) {
+                DB_WARNING("construct mpp dag request failed");
+                return -1;
+            }
+            db_request_map[ith_db] = request;
+        }
+        receiver->set_destination(sender->get_fragment_address()); 
+        select_manager->set_db_request_map(db_request_map);
+    } else if (scan_node->is_mysql_scan_node()) {
+        sender->add_address(SchemaFactory::get_instance()->get_address());
+        receiver->set_destination(sender->get_fragment_address()); 
+        std::map<std::string, pb::DAGFragmentRequest> db_request_map;
+        pb::DAGFragmentRequest request;
+        int ret = DBInteract::get_instance()->construct_mpp_dag_request(ctx, {fragment->fragment_id}, request);
+        if (ret != 0) {
+            DB_WARNING("construct mpp dag request failed");
+            return -1;
+        }
+        db_request_map[SchemaFactory::get_instance()->get_address()] = request;
+        select_manager->set_db_request_map(db_request_map);
+    }
+    return 0;
+}
+
 }
 
 /* vim: set ts=4 sw=4 sts=4 tw=100 */

@@ -27,6 +27,15 @@ IndexDDLManagerNode::IndexDDLManagerNode() {
 IndexDDLManagerNode::~IndexDDLManagerNode() {
 }
 
+bool IndexDDLManagerNode::is_ddl_delete(const pb::ScanNode& scan_node) {
+    if (scan_node.ddl_work_type() == pb::DDL_COLUMN
+            && scan_node.has_column_ddl_info()
+            && scan_node.column_ddl_info().update_exprs_size() == 0) {
+        return true;
+    }
+    return false;
+}
+
 int IndexDDLManagerNode::open(RuntimeState* state) {
     state->set_is_ddl_work(true);
     int ret = 0;
@@ -54,13 +63,20 @@ int IndexDDLManagerNode::open(RuntimeState* state) {
     std::vector<SmartRecord> delete_records;
     insert_records.reserve(limit);
     std::map<int64_t, pb::RegionInfo> region_infos;
+
+    const pb::ScanNode& scan_node_pb = scan_node->pb_node().derive_node().scan_node();
+    bool ddl_delete = is_ddl_delete(scan_node_pb);
+    if (ddl_delete && init_lock_nodes_if_not_exist() < 0) {
+        DB_FATAL("ddl delete init lock_nodes failed");
+        return ret;
+    }
     
     SmartRecord record_template = SchemaFactory::get_instance()->new_record(main_table_id);
     auto tuple_id = 0;
     int32_t ddl_scan_size = 0;
     std::string max_pk_str;
     std::string max_record;
-    bool global_ddl_with_ttl = _fetcher_store.region_id_ttl_timestamp_batch.size() > 0 ? true : false;
+    bool global_ddl_with_ttl = _fetcher_store.region_id_ttl_timestamp_batch.size() > 0;
     std::map<std::string, int64_t> record_ttl_map;
 
     auto pk_info = SchemaFactory::get_instance()->get_index_info(_table_id);
@@ -213,6 +229,119 @@ int IndexDDLManagerNode::open(RuntimeState* state) {
             }
         }
     }
+    if (ddl_delete && !insert_records.empty()) {
+        delete_records.swap(insert_records);
+        int64_t affected_rows = send_request(state, _lock_primary.get(), std::vector<SmartRecord>{}, delete_records);
+        if (affected_rows < 0) {
+            DB_WARNING("DDL delete pk failed.");
+            return -1;
+        }
+        delete_records.swap(_fetcher_store.index_records[_table_id]);
+        for (auto& lock_secondary: _lock_secondaries) {
+            affected_rows = send_request(state, lock_secondary.get(), std::vector<SmartRecord>{}, delete_records);
+            if (affected_rows < 0) {
+                DB_WARNING("DDL delete global index failed.");
+                return -1;
+            }
+        }
+        // TODO: 需要处理binlog?
+    }
     return ret;
+}
+
+int IndexDDLManagerNode::create_lock_primary_node(
+        int64_t table_id,
+        std::unique_ptr<LockPrimaryNode>& primary_node) const {
+    auto table_info = _factory->get_table_info_ptr(table_id);
+    if (table_info == nullptr) {
+        return -1;
+    }
+    primary_node.reset(new (std::nothrow) LockPrimaryNode);
+    if (primary_node == nullptr) {
+        DB_WARNING("create manager_node failed");
+        return -1;
+    }
+
+    std::vector<int64_t> local_affected_indexs;
+    local_affected_indexs.reserve(3);
+    for (auto index_id: table_info->indices) {
+        auto index_info = _factory->get_index_info_ptr(index_id);
+        if (index_info == nullptr) {
+            return -1;
+        }
+        if (index_info->index_hint_status == pb::IHS_VIRTUAL) {
+            DB_NOTICE("index info is virtual, skip.");
+            continue;
+        }
+        if (index_info->index_hint_status == pb::IHS_DISABLE
+            && index_info->state == pb::IS_DELETE_LOCAL) {
+            continue;
+        }
+        if (index_info->is_global) {
+            continue;
+        }
+        local_affected_indexs.emplace_back(index_id);
+    }
+
+    pb::PlanNode plan_node;
+    plan_node.set_node_type(pb::LOCK_PRIMARY_NODE);
+    plan_node.set_limit(-1);
+    plan_node.set_num_children(0);
+    auto lock_primary_node = plan_node.mutable_derive_node()->mutable_lock_primary_node();
+    lock_primary_node->set_lock_type(pb::LOCK_GET_DML);
+    lock_primary_node->set_table_id(table_id);
+    primary_node->init(plan_node);
+    primary_node->set_affected_index_ids(local_affected_indexs);
+    return 0;
+}
+
+int IndexDDLManagerNode::create_lock_secondary_node(
+        int64_t table_id,
+        std::vector<std::unique_ptr<LockSecondaryNode>>& secondary_nodes) const {
+    auto table_info = _factory->get_table_info_ptr(table_id);
+    if (table_info == nullptr) {
+        return -1;
+    }
+    std::vector<int64_t> global_affected_indexs;
+    global_affected_indexs.reserve(3);
+    for (auto index_id : table_info->indices) {
+        auto index_info = _factory->get_index_info_ptr(index_id);
+        if (index_info == nullptr) {
+            return -1;
+        }
+        if (index_info->index_hint_status == pb::IHS_VIRTUAL) {
+            DB_NOTICE("index info is virtual, skip.");
+            continue;
+        }
+        if (index_info->index_hint_status == pb::IHS_DISABLE
+            && index_info->state == pb::IS_DELETE_LOCAL) {
+            continue;
+        }
+        if (index_info->is_global) {
+            if (index_info->state == pb::IS_NONE) {
+                DB_NOTICE("index info is NONE, skip.");
+                continue;
+            }
+            global_affected_indexs.emplace_back(index_id);
+        }
+    }
+    for (auto index_id: global_affected_indexs) {
+        std::unique_ptr<LockSecondaryNode> secondary_node(new (std::nothrow) LockSecondaryNode);
+        if (secondary_node == nullptr) {
+            DB_WARNING("create manager_node failed");
+            return -1;
+        }
+        pb::PlanNode plan_node;
+        plan_node.set_node_type(pb::LOCK_SECONDARY_NODE);
+        plan_node.set_limit(-1);
+        plan_node.set_num_children(0);
+        auto lock_secondary_node = plan_node.mutable_derive_node()->mutable_lock_secondary_node();
+        lock_secondary_node->set_lock_type(pb::LOCK_DML);
+        lock_secondary_node->set_global_index_id(index_id);
+        lock_secondary_node->set_table_id(table_id);
+        secondary_node->init(plan_node);
+        secondary_nodes.emplace_back(std::move(secondary_node));
+    }
+    return 0;
 }
 }

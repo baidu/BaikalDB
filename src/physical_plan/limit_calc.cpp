@@ -46,6 +46,10 @@ void LimitCalc::_analyze_limit(QueryContext* ctx, ExecNode* node, int64_t limit)
         // 没有agg_fn时, 在agg_node的open阶段可以使用limit。
         case pb::MERGE_AGG_NODE:
             if (static_cast<AggNode*>(node)->mutable_agg_fn_calls()->empty()) {
+                if (node->children(0)->node_type() == pb::SELECT_MANAGER_NODE) {
+                    //跳过SELECT_MANAGER_NODE，否则select distinct f from test limit 10;有bug，会少返回数据
+                    node = node->children(0);
+                }
                 break;
             } else {
                 return;

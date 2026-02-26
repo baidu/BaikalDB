@@ -26,6 +26,8 @@
 #include "vectorize_helpper.h"
 #include "arrow_io_excutor.h"
 #include "arrow_exec_node_manager.h"
+#include "file_scan_node.h"
+#include "db_service.h"
 
 namespace baikaldb {
 DEFINE_bool(global_index_read_consistent, true, "double check for global and primary region consistency");
@@ -89,9 +91,8 @@ int SelectManagerNode::open(RuntimeState* state) {
         // mpp
         return subquery_open(state);
     }
-    if (is_mysql_scan()) {
-        // open子节点
-        return subquery_open(state);
+    if (is_dblink_scan()) {
+        return dblink_scan_run(state, scan_nodes[0]);
     }
     _scan_tuple_id = static_cast<ScanNode*>(scan_nodes[0])->tuple_id();
     if (_delay_fetcher_store) {
@@ -148,6 +149,17 @@ int SelectManagerNode::init(const pb::PlanNode& node){
     if (select_node.has_is_return_empty()) {
         _return_empty = select_node.is_return_empty();
     }
+    _conditions.reserve(select_node.filter_conditions_size());
+    for (auto& expr : select_node.filter_conditions()) {
+        ExprNode* expr_node = nullptr;
+        ret = ExprNode::create_tree(expr, &expr_node);
+        if (ret < 0) {
+            DB_FATAL("create expr fail");
+            ExprNode::destroy_tree(expr_node);
+            return ret;
+        }
+        _conditions.emplace_back(expr_node);
+    }
     return 0;
 } 
 
@@ -162,7 +174,7 @@ void SelectManagerNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
             return;
         }
         // 序列化schema
-        arrow::Result<std::shared_ptr<arrow::Buffer>> schema_ret = arrow::ipc::SerializeSchema(*_arrow_schema, arrow::default_memory_pool());
+        arrow::Result<std::shared_ptr<arrow::Buffer>> schema_ret = arrow::ipc::SerializeSchema(*_arrow_schema, GetMemoryPoolForRead());
         if (!schema_ret.ok()) {
             DB_FATAL("arrow serialize schema fail, status: %s", schema_ret.status().ToString().c_str());
             return;
@@ -179,6 +191,9 @@ void SelectManagerNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
         node->add_is_null_first(null_first);
     }
     node->set_is_return_empty(_return_empty);
+    for (ExprNode* expr : _conditions) {
+        ExprNode::create_pb_expr(node->add_filter_conditions(), expr);
+    }
     return;
 }
 
@@ -192,7 +207,7 @@ int SelectManagerNode::delay_fetcher_store(RuntimeState* state) {
 }
 
 int SelectManagerNode::build_arrow_declaration(RuntimeState* state) {
-    if (is_dual_scan() || _has_er_child || is_mysql_scan()) {
+    if (is_dual_scan() || _has_er_child || is_dblink_scan()) {
         return _children[0]->build_arrow_declaration(state);
     }
     RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(get_node(pb::SCAN_NODE));
@@ -329,11 +344,14 @@ int SelectManagerNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos)
 }
 
 int SelectManagerNode::mpp_fetcher_global_index(RuntimeState* state) {
-    RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(get_node(pb::SCAN_NODE));
-    if (scan_node == nullptr) {
+    ScanNode* scan = static_cast<ScanNode*>(get_node(pb::SCAN_NODE));
+    if (scan == nullptr) {
         return 0;
     }
-    
+    if (!scan->is_rocksdb_scan_node()) {
+        return 0;
+    }
+    RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(scan);
     ScanIndexInfo* scan_index_info = scan_node->main_scan_index();
     int64_t router_index_id = scan_index_info->router_index_id;
     int64_t main_table_id = scan_node->table_id();
@@ -439,6 +457,17 @@ int SelectManagerNode::fetcher_store_run(RuntimeState* state, ExecNode* exec_nod
                 << main_scan_index->region_infos.size();
         return -1;
     };
+    if (_conditions.size() > 0) {
+        START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
+        if (0 != VectorizeHelpper::init_conditions(state, _conditions, _vectorize_conditions, _scan_tuple_id, nullptr)) {
+            DB_FATAL("init condition fail, txn_id: %lu, log_id:%lu, scan tuple_id: %d", 
+                state->txn_id, state->log_id(), _scan_tuple_id);
+            return -1;
+        } 
+        if (state->execute_type == pb::EXEC_ARROW_ACERO) {
+            LOCAL_TRACE_ARROW_FILTER(&_vectorize_conditions, _limit);
+        }
+    }
     if (backup_scan_index != nullptr && dynamic_timeout_ms > 0 && state->txn_id == 0) {
         // 非事务情况下才进行全局二级索引降级，txn_id != 0 情况下state中会有修改，无法多个请求并发使用state
         // 可以降级
@@ -482,6 +511,10 @@ int SelectManagerNode::fetcher_store_run(RuntimeState* state, ExecNode* exec_nod
         // 没有开启动态超时，不满足降级条件，只使用main router
         main_fetcher.scan_index = main_scan_index;
         fetcher_store = &main_fetcher.fetcher_store;
+        if (_conditions.size() > 0) {
+            fetcher_store->conditions = &_conditions;
+            fetcher_store->vectorize_conditions = &_vectorize_conditions;
+        }
         ret = single_fetcher_store_open(&main_fetcher, state, exec_node);
         if (ret < 0) {
             state->error_code = fetcher_store->error_code;
@@ -512,7 +545,11 @@ int SelectManagerNode::fetcher_store_run(RuntimeState* state, ExecNode* exec_nod
             }
         }
         // 无sort节点时不会排序，按顺序输出
-        _sorter->merge_sort();
+        if (_conditions.empty()) {
+            _sorter->merge_sort();
+        } else {
+            _sorter->sort();
+        }
     } else {
         // EXEC_ARROW_ACERO(多表查询, 或者单表查询有region返回了arrow格式)
         for (auto& pair : fetcher_store->start_key_sort) {
@@ -738,11 +775,10 @@ int SelectManagerNode::construct_primary_possible_index(
                 return -1;
             }
             pos_index.set_is_eq(true);
+            pos_index.set_left_open(false);
+            pos_index.set_left_field_cnt(pri_info->fields.size());
             range->set_left_key(key.data());
             range->set_left_full(key.get_full());
-            pos_index.set_left_field_cnt(pri_info->fields.size());
-            pos_index.set_left_open(false);
-            
             range->add_partition_ids(mem_row->get_partition_id());
             limit_cnt --;
             if(!limit_cnt) {
@@ -773,8 +809,10 @@ int SelectManagerNode::construct_primary_possible_index_vectorize(
     std::vector<std::shared_ptr<arrow::RecordBatch>> batchs;
     std::shared_ptr<Chunk> chunk;
     auto tuple = state->get_tuple_desc(tuple_id);
+    bool is_partition_table = pri_info->is_partitioned;
     for (auto& pair : fetcher_store.start_key_sort) {
         auto row_batch = fetcher_store.region_batch[pair.second].row_data;
+        int64_t partition_id = fetcher_store.region_batch[pair.second].partition_id;
         if (row_batch != nullptr) {
             if (chunk == nullptr) {
                 chunk = std::make_shared<Chunk>();
@@ -796,11 +834,31 @@ int SelectManagerNode::construct_primary_possible_index_vectorize(
                 && 0 != VectorizeHelpper::change_arrow_record_batch_schema(fetcher_store.arrow_schema, 
                     fetcher_store.region_batch[pair.second].arrow_data, 
                     &fetcher_store.region_batch[pair.second].arrow_data, 
-                    true)) {
+                    /*need_check_momery_limit=*/true)) {
             DB_FATAL("change arrow record batch schema chunk fail");
             return -1;
         }
-        batchs.push_back(fetcher_store.region_batch[pair.second].arrow_data);
+        std::shared_ptr<arrow::RecordBatch> data_without_partition = fetcher_store.region_batch[pair.second].arrow_data;
+        if (is_partition_table) {
+            // 处理全局索引partition id
+            arrow::Int64Scalar scalar = arrow::Int64Scalar(partition_id);
+            auto partition_id_array = arrow::MakeArrayFromScalar(scalar, data_without_partition->num_rows());
+            if (!partition_id_array.ok()) {
+                DB_FATAL("make partition id array failed: %s", partition_id_array.status().ToString().c_str());
+                return -1;
+            }
+            auto data_with_partition = data_without_partition->AddColumn(
+                data_without_partition->num_columns(),
+                arrow::field("__partition_id__", arrow::int64()),
+                *partition_id_array);
+            if (!data_with_partition.ok()) {
+                DB_FATAL("add partition column failed: %s", data_with_partition.status().ToString().c_str());
+                return -1;
+            }        
+            batchs.emplace_back(*data_with_partition);
+        } else {
+            batchs.emplace_back(data_without_partition);
+        }
     }
     if (batchs.size() == 0){ 
         return 0;
@@ -842,6 +900,14 @@ int SelectManagerNode::construct_primary_possible_index_vectorize(
         limit->add_num_rows_skipped(offset_cnt);
     }
     std::unordered_map<int64_t, std::shared_ptr<arrow::ChunkedArray>> field_id_to_arrow_array;
+    std::shared_ptr<arrow::ChunkedArray> partition_id_array = nullptr;
+    if (is_partition_table) {
+        partition_id_array = table->GetColumnByName("__partition_id__");
+        if (partition_id_array == nullptr) {
+            DB_FATAL("not find partition id array");
+            return -1;
+        }
+    }
     for (auto& pri_field : pri_info->fields) {
         int32_t field_id = pri_field.id;
         int32_t slot_id = state->get_slot_id(tuple_id, field_id);
@@ -868,12 +934,13 @@ int SelectManagerNode::construct_primary_possible_index_vectorize(
             return -1;
         }
         pos_index.set_is_eq(true);
+        pos_index.set_left_open(false);
+        pos_index.set_left_field_cnt(pri_info->fields.size());
         range->set_left_key(key.data());
         range->set_left_full(key.get_full());
-        pos_index.set_left_field_cnt(pri_info->fields.size());
-        pos_index.set_left_open(false);
-        // [ARROW todo] 全局索引反查partition分发
-        // range->set_partition_id(mem_row->get_partition_id());
+        if (is_partition_table) {
+            range->add_partition_ids(VectorizeHelpper::get_vectorized_value(partition_id_array.get(), row_idx).get_numberic<int64_t>());
+        }
     }
     //重新做路由选择
     pos_index.SerializeToString(&scan_index_info->raw_index);
@@ -881,12 +948,9 @@ int SelectManagerNode::construct_primary_possible_index_vectorize(
                 &scan_index_info->region_primary, scan_node->get_partition());
 }
 
-
-
 // arrow vectorize
-int FetcherStoreVectorizedReader::init(SelectManagerNode* select_node, RuntimeState* state) {
-    _schema = select_node->get_arrow_schema();
-    _need_fetcher_store = select_node->is_delay_fetcher_store();
+void FetcherStoreVectorizedReader::init_tuple(SelectManagerNode* select_node, RuntimeState* state) {
+    _tuples.clear();
     int32_t scan_tuple_id = select_node->get_scan_tuple_id();
     pb::TupleDescriptor* tuple = state->get_tuple_desc(scan_tuple_id);
     if (state->is_simple_select) {
@@ -897,26 +961,48 @@ int FetcherStoreVectorizedReader::init(SelectManagerNode* select_node, RuntimeSt
     } else {
         _tuples.emplace_back(tuple);
     }
+}
+
+int FetcherStoreVectorizedReader::init(SelectManagerNode* select_node, RuntimeState* state) {
+    int32_t scan_tuple_id = select_node->get_scan_tuple_id();
+    _schema = select_node->get_arrow_schema();
+    _need_fetcher_store = select_node->is_delay_fetcher_store();
+    init_tuple(select_node, state);
     if (_schema == nullptr) {
         // 当store返回的数据都是row pb, 但是需要列式执行, 如index join场景; 或是非index join延迟访问store
         // 1. 初始化根据tuple_id(用scannode的tuple_id)生成对应tuple对应的arrow schema 
         // 2. 列式执行过程中将返回的memrow转arrow
         // 3. 列式执行返回的record batch, 转换为db构建的schema
-        _chunk = std::make_shared<Chunk>();
-        if (_chunk->init(_tuples) != 0) {
-            DB_FATAL("build arrow schema fail, scan_tuple_id: %d", scan_tuple_id);
-            return -1;
-        }
-        _schema = _chunk->get_arrow_schema();
-        if (_schema == nullptr) {
-            DB_FATAL("build arrow schema fail");
-            return -1;
-        }
+        _schema = VectorizeHelpper::get_arrow_schema(_tuples);
     } 
+    if (_schema == nullptr) {
+        DB_FATAL("build arrow schema fail");
+        return -1;
+    }
     state->arrow_input_schemas[scan_tuple_id] = _schema;
     _select_node = select_node;
     _state = state;
     _index_cond = select_node->get_index_collector_cond();
+    return 0;
+}
+
+int SelectManagerNode::dblink_scan_run(RuntimeState* state, ExecNode* exec_node) {
+    if (state == nullptr) {
+        DB_WARNING("state is nullptr");
+        return -1;
+    }
+    if (_db_request_map.empty()) {
+        // 非mpp场景
+        return subquery_open(state);
+    }
+    // 放在这里启动mpp请求，保证 db fragment（非dblink scan的fragment）都启动了，再启动dblink scan；
+    for (const auto& [ith_db, request] : _db_request_map) {
+        int ret = DBInteract::get_instance()->handle_mpp_dag_fragment(request, ith_db);
+        if (ret != 0) {
+            DB_FATAL("logid: %lu, send request to other db fail, ret: %d", state->log_id(), ret);
+            return -1;
+        } 
+    }
     return 0;
 }
     
@@ -970,7 +1056,11 @@ arrow::Status FetcherStoreVectorizedReader::ReadNext(std::shared_ptr<arrow::Reco
         if (batch.arrow_data != nullptr) {
             if (_row_idx_in_record_batch == 0) {
                 if (!_schema->Equals(batch.arrow_data->schema())
-                        && 0 != VectorizeHelpper::change_arrow_record_batch_schema(_schema, batch.arrow_data, &(batch.arrow_data), true)) {
+                        && 0 != VectorizeHelpper::change_arrow_record_batch_schema(
+                                _schema, 
+                                batch.arrow_data, 
+                                &(batch.arrow_data), 
+                                /*need_check_momery_limit=*/true)) {
                     return arrow::Status::IOError("change arrow record batch schema fail");
                 }
             } 
@@ -987,6 +1077,10 @@ arrow::Status FetcherStoreVectorizedReader::ReadNext(std::shared_ptr<arrow::Reco
             // memrow -> arrow recordbatch
             if (_chunk == nullptr) {
                 _chunk = std::make_shared<Chunk>();
+                // 如果是join的非驱动表, 且命中全局索引并且不是covering index, 同时sql里不涉及主键
+                // acero计划启动(schema不包含主键)  -> 查驱动表 -> 对非驱动表planrouter -> 额外将主键加到tuple里 -> 查非驱动表 -> 返回行数据包含主键
+                // 在这里重新init_tuple兼容解析包含主键的行数据 -> change schame(去掉主键)
+                init_tuple(_select_node, _state);
                 if (_chunk->init(_tuples) != 0) {
                     return arrow::Status::IOError("chunk init fail");
                 }
@@ -996,7 +1090,11 @@ arrow::Status FetcherStoreVectorizedReader::ReadNext(std::shared_ptr<arrow::Reco
                 return arrow::Status::IOError("transfer rowbatch to arrow fail");
             }
             // 调整schema
-            if (0 != VectorizeHelpper::change_arrow_record_batch_schema(_schema, *out, out, true)) {
+            if (0 != VectorizeHelpper::change_arrow_record_batch_schema(
+                    _schema, 
+                    *out, 
+                    out, 
+                    /*need_check_momery_limit=*/true)) {
                 return arrow::Status::IOError("change arrow record batch schema fail");
             }
             _select_node->add_num_rows_returned((*out)->num_rows());

@@ -148,8 +148,9 @@ message ExtraReq {
     optional int64                   sign_latency = 2;
     optional OlapRegionInfo          olap_info = 3;
     optional RegionOfflineBinlogInfo offline_binlog_info = 4;
-    optional uint64 watt_stats_version = 5;
+    optional uint64                  watt_stats_version = 5;
     optional ColumnRegionInfo        column_info = 6;
+    optional bool                    no_raft_log = 7;
 };
 
 message ExtraRes {

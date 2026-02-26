@@ -161,15 +161,17 @@ int WindowNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
                 DB_WARNING_STATE(state, "split into partition fail, ret:%d", ret);
                 return ret;
             }
-            if (is_first_partition_belong_to_prev) {
+            if (is_first_partition_belong_to_prev) {       
                 get_next_partition(start, end);
                 if (start < 0 || end > _child_row_batch.size() || start >= end) {
                     DB_WARNING_STATE(state, "get next partition fail, start:%d end:%d", start, end);
                     return -1;
-                }
+                }         
                 for (int i = start; i < end; ++i) {
                     cur_partition_batch.move_row(std::move(_child_row_batch.get_row(i)));
                 }
+            } else {
+                break;
             }
         }
         ret = _window_processor->process_one_partition(&cur_partition_batch);

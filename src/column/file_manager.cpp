@@ -1,13 +1,14 @@
 #include "file_manager.h"
 #include "meta_writer.h"
 #include "rocksdb_filesystem.h"
+#include "vectorize_helpper.h"
 
 namespace baikaldb {
 
 DEFINE_bool(use_row_ranges, false, "GetRecordBatchReader use row_ranges");
 DEFINE_bool(parquet_read_pre_buffer, false, "parquet read use pre_buffer");
 DEFINE_bool(parquet_read_use_threads, false, "parquet read use use_threads");
-DEFINE_bool(parquet_file_enable_lru, true, "parquet_file_enable_lru");
+DEFINE_bool(parquet_file_enable_lru, true, "Enable LRU for parquet files, default: true");
 DEFINE_int32(parquet_file_lru_cache_capacity, 1024, "parquet_file_lru_cache_capacity, default(1024)");
 
 DECLARE_int32(chunk_size);
@@ -19,6 +20,7 @@ DEFINE_int64(column_minor_compaction_interval_s, 60, "column_minor_compaction_in
 DEFINE_int64(column_minor_compaction_raft_interval, 1000, "column_minor_compaction_raft_interval, default(1000)");
 DEFINE_int64(column_major_compaction_minor_interval, 10, "column_major_compaction_minor_interval, default(10)");
 DEFINE_int64(column_base_compaction_interval_s, 2 * 24 * 3600, "column_major_compaction_interval_s, default(2day)");
+DEFINE_int64(column_fast_base_compaction_interval_s, 1800, "column_fast_base_compaction_interval_s, default(1800s)");
 DEFINE_int64(column_base_compaction_threshold_mb, 256, "column_base_compaction_threshold_mb, default(256MB)");
 DEFINE_int64(column_base_compaction_cumulative_threshold_mb, 128, "column_base_compaction_cumulative_threshold_mb, default(128MB)");
 DEFINE_int64(column_cumulative_file_max_size_mb, 16, "column_cumulative_file_max_size_mb, default(16MB)");
@@ -57,22 +59,25 @@ int ParquetFile::open() {
     }
     _file_path = path;
     std::shared_ptr<::arrow::io::RandomAccessFile> infile = std::move(res).ValueOrDie();
-
+    arrow::MemoryPool* pool = GetMemoryPoolForRead();
     ::parquet::arrow::FileReaderBuilder builder;
     // Set GetRecordBatchReader batch size, default: 65536
+    ::arrow::io::IOContext io_context(pool);
     ::parquet::ArrowReaderProperties arrow_properties = ::parquet::default_arrow_reader_properties();
     arrow_properties.set_batch_size(FLAGS_chunk_size);
     arrow_properties.set_pre_buffer(FLAGS_parquet_read_pre_buffer);
     arrow_properties.set_use_threads(FLAGS_parquet_read_use_threads);
+    arrow_properties.set_io_context(io_context);
 
     ::arrow::io::CacheOptions cache_options = ::arrow::io::CacheOptions::LazyDefaults();
     cache_options.hole_size_limit  = FLAGS_parquet_read_hole_size_limit;
     cache_options.range_size_limit = FLAGS_parquet_read_range_size_limit;
     arrow_properties.set_cache_options(cache_options);
     builder.properties(arrow_properties);
+    builder.memory_pool(pool);
 
     // Avoid reading whole file data into memory at once
-    ::parquet::ReaderProperties read_properties = ::parquet::default_reader_properties();
+    ::parquet::ReaderProperties read_properties(pool);
     read_properties.enable_buffered_stream();
     read_properties.set_buffer_size(FLAGS_file_buffer_size * 1024 * 1024ULL);
     auto status = builder.Open(infile, read_properties);
@@ -159,7 +164,7 @@ int ParquetFile::init_kv_metadata(const std::vector<std::string>& keys, const st
     return -1;
 }
 
-bool ParquetFile::check_interval_overlapped(const pb::PossibleIndex::Range& index_range, 
+bool ParquetFile::check_interval_overlapped(const pb::PossibleIndex::Range& index_range, bool is_eq, bool is_left_open, bool is_right_open,
                                                  const std::string& file_start_key, const std::string& file_end_key) { 
     // 文件区间理论上不为空，BUG
     if (file_start_key.empty() || file_end_key.empty()) {
@@ -167,16 +172,16 @@ bool ParquetFile::check_interval_overlapped(const pb::PossibleIndex::Range& inde
     }
 
     // 索引右区间为空
-    if (index_range.right_key().empty()) {
-        if (index_range.left_open()) {
+    if (index_range.right_key().empty() && !is_eq) {
+        if (is_left_open) {
             return file_end_key > index_range.left_key();
         } else {
             return file_end_key >= index_range.left_key();
         }
     }
 
-    MutTableKey end_key(index_range.right_key());
-    if (!index_range.right_open()) {
+    MutTableKey end_key(is_eq ? index_range.left_key() : index_range.right_key());
+    if (!is_right_open) {
         end_key.append_u64(UINT64_MAX);
         end_key.append_u64(UINT64_MAX);
         end_key.append_u64(UINT64_MAX);
@@ -189,10 +194,10 @@ bool ParquetFile::check_interval_overlapped(const pb::PossibleIndex::Range& inde
     if (max_start_key < min_end_key) {
         return true;
     } else if (max_start_key == min_end_key) {
-        if (index_end_key == file_start_key && index_range.right_open()) {
+        if (index_end_key == file_start_key && is_right_open) {
             return false;
         }
-        if (index_start_key == file_end_key && index_range.left_open()) {
+        if (index_start_key == file_end_key && is_left_open) {
             return false;
         }
         return true;
@@ -220,7 +225,7 @@ void print_rg_and_rrs(std::vector<int>& rowgroup_indices,
 }
 
 int ParquetFile::get_qualified_rowgroup_and_rowranges(
-        const std::vector<pb::PossibleIndex::Range>& key_ranges,
+        const pb::PossibleIndex& possible_index,
         std::vector<int>& rowgroup_indices,
         std::vector<std::vector<std::pair<int64_t, int64_t>>>& rowranges) {
     if (_sparse_index_map.empty()) {
@@ -232,14 +237,15 @@ int ParquetFile::get_qualified_rowgroup_and_rowranges(
     const std::string& file_end_key   = _sparse_index_map.rbegin()->first;
     // 获取rowgroup和rowranges
     std::map<int, std::vector<std::pair<int64_t, int64_t>>> rowgroup_rowranges_map;
-    for (const auto& key_range : key_ranges) {
+    for (const auto& key_range : possible_index.ranges()) {
         // 跳过和该parquet文件未重叠的key_range
-        if (!check_interval_overlapped(key_range, file_start_key, file_end_key)) {
+        if (!check_interval_overlapped(key_range, possible_index.is_eq(), possible_index.left_open(), 
+                possible_index.right_open(), file_start_key, file_end_key)) {
             continue;
         }
 
-        MutTableKey range_right_key(key_range.right_key());
-        if (!key_range.right_open()) {
+        MutTableKey range_right_key(possible_index.is_eq() ? key_range.left_key() : key_range.right_key());
+        if (!possible_index.right_open()) {
             range_right_key.append_u64(UINT64_MAX);
             range_right_key.append_u64(UINT64_MAX);
             range_right_key.append_u64(UINT64_MAX);
@@ -252,7 +258,7 @@ int ParquetFile::get_qualified_rowgroup_and_rowranges(
         }
         // 找到大于等于right_key的最小元素的位置
         auto right_iter = _sparse_index_map.lower_bound(range_right_key.data());
-        if (key_range.right_key().empty()) {
+        if (key_range.right_key().empty() && !possible_index.is_eq()) {
             right_iter = _sparse_index_map.end();
         }
         if (right_iter == _sparse_index_map.end()) {
@@ -348,15 +354,79 @@ int ParquetFileReader::init() {
     if (_init) {
         return 0;
     }
-    int ret = _parquet_file->open();
-    if (ret < 0) {
-        DB_COLUMN_FATAL("Fail to open parquet file");
-        return -1;
+
+    const std::string& file_short_name = _parquet_file->get_file_short_name();
+    // 获取column_indices，以及在parquet文件里不存在的列
+    // 在parquet文件中不存在的列需要补充默认值或NULL
+    const std::unordered_map<std::string, int>& column_name2index_map = _parquet_file->get_column_name2index_map();
+    std::vector<int> exist_column_indices;
+    exist_column_indices.reserve(column_name2index_map.size());
+    for (const auto& f : _options.schema->fields()) {
+        const std::string& field_name = f->name();
+        auto iter = column_name2index_map.find(field_name);
+        if (iter != column_name2index_map.end()) {
+            exist_column_indices.emplace_back(iter->second);
+            // DB_WARNING("file: %s, field_name: %s, index: %d", file_short_name.c_str(), field_name.c_str(), iter->second);
+        } else {
+            DB_WARNING("file: %s, field_name: %s, not exist", file_short_name.c_str(), field_name.c_str());
+        }
     }
 
-    auto s = _parquet_file->GetRecordBatchReader(&_reader);
+    std::vector<int> row_group_indices;
+    bool fill_cache = false;        
+    if (_options.pos_index != nullptr && _options.pos_index->ranges_size() > 0) {
+        // 获取符合条件的row_group_indices和row_ranges
+        std::vector<std::vector<std::pair<int64_t, int64_t>>> row_ranges;
+        if (_parquet_file->get_qualified_rowgroup_and_rowranges(*_options.pos_index, row_group_indices, row_ranges) != 0) {
+            DB_WARNING("%s Fail to get_qualified_rowgroup_and_rowranges", file_short_name.c_str());
+            return -1;
+        }
+        if (row_group_indices.empty()) {
+            DB_WARNING("parquet file: %s has no qualified data", file_short_name.c_str());
+            return -1;
+        }
+        fill_cache = true;
+    } else {
+        // 获取所有rowgroup的数据
+        std::shared_ptr<::parquet::FileMetaData> file_metadata = _parquet_file->get_file_metadata();
+        if (file_metadata == nullptr) {
+            DB_WARNING("file_metadata:%s is nullptr", file_short_name.c_str());
+            return -1;
+        }
+        if (file_metadata->num_row_groups() == 0) {
+            DB_WARNING("parquet file: %s has no row group", file_short_name.c_str());
+            return -1;
+        }
+        
+        row_group_indices.reserve(file_metadata->num_row_groups());
+        for (int i = 0; i < file_metadata->num_row_groups(); ++i) {
+            row_group_indices.emplace_back(i);
+        }
+    }
+
+    std::shared_ptr<ColumnFileInfo> file_info = _parquet_file->get_file_info();
+    _raftindex = file_info->end_version;
+    if (fill_cache) {
+        std::vector<ReadRange> read_ranges;
+        read_ranges.reserve(row_group_indices.size() * exist_column_indices.size());
+        _parquet_file->parser_position(row_group_indices, exist_column_indices, read_ranges);
+        _read_contents = std::make_shared<ReadContents>();
+        _read_contents->fill_cache = true;
+        _read_contents->file_short_name = file_short_name;
+        _read_contents->ranges.swap(read_ranges);
+        _read_contents->region_id = file_info->region_id;
+        _read_contents->start_version = file_info->start_version;
+        _read_contents->end_version = file_info->end_version;
+        _read_contents->file_idx = ColumnFileInfo::get_file_idx(file_short_name);
+        if (_read_contents->file_idx < 0) {
+            DB_COLUMN_FATAL("Fail to get file idx : %s", file_short_name.c_str());
+            return -1;
+        }
+    }
+
+    ::arrow::Status s = _parquet_file->GetRecordBatchReader(row_group_indices, exist_column_indices, &_reader);
     if (!s.ok()) {
-        DB_COLUMN_FATAL("Fail to get_record_batch_reader");
+        DB_COLUMN_FATAL("%s Fail to get_record_batch_reader", file_short_name.c_str());
         return -1;
     }
     _init = true;
@@ -364,6 +434,10 @@ int ParquetFileReader::init() {
 }
 
 ::arrow::Status ParquetFileReader::ReadNext(std::shared_ptr<::arrow::RecordBatch>* batch) {
+    ON_SCOPE_EXIT([]() {
+        ParquetCache::get_instance()->set_bthread_local(nullptr);
+    });
+    ParquetCache::get_instance()->set_bthread_local(_read_contents.get());
     int ret = init();
     if (ret < 0) {
         return ::arrow::Status::IOError("Fail to init");
@@ -379,9 +453,9 @@ int ParquetFileReader::init() {
         batch->reset();
         return ::arrow::Status::OK();
     }
-    const auto& key_fields = _options.schema_info->key_fields;
-    const auto& value_fields = _options.schema_info->value_fields;
-    const auto& schema = _options.need_order_info ? _options.schema_info->schema_with_order_info : _options.schema_info->schema;
+
+    const auto& fields = _options.lower_short_name_fields;
+    const auto& schema = _options.schema;
     std::vector<std::shared_ptr<arrow::Array>> columns;
     for (int i = 0; i < schema->num_fields(); ++i) {
         const auto& f = schema->field(i);
@@ -394,23 +468,23 @@ int ParquetFileReader::init() {
         if (f->name() == RAFT_INDEX_NAME) {
             ExprValue raft_index;
             raft_index.type = pb::INT64;
-            raft_index._u.int64_val = _options.raftindex;
-            array = ColumnRecord::make_array_from_exprvalue(
+            raft_index._u.int64_val = _raftindex;
+            array = VectorizeHelpper::make_array_from_exprvalue(
                 pb::INT64, raft_index, tmp_batch->num_rows());
         } else if (f->name() == BATCH_POS_NAME) {
             ExprValue batch_pos;
             batch_pos.type = pb::INT32;
             batch_pos._u.int32_val = 0;
-            array = ColumnRecord::make_array_from_exprvalue(
+            array = VectorizeHelpper::make_array_from_exprvalue(
                 pb::INT32, batch_pos, tmp_batch->num_rows());
         } else {
-            if (i < key_fields.size()) {
-                DB_COLUMN_FATAL("%s Fail to find key field", _parquet_file->get_file_path().c_str());
-                return arrow::Status::IOError("Fail to find key field");
+            auto it = fields.find(f->name());
+            if (it == fields.end()) {
+                DB_COLUMN_FATAL("%s Fail to find field: %s", _parquet_file->get_file_path().c_str(), f->name().c_str());
+                return arrow::Status::IOError("Fail to find field");
             }
-            const auto& field = value_fields[i - key_fields.size()];
-            array = ColumnRecord::make_array_from_exprvalue(
-                                field.type, field.default_expr_value, tmp_batch->num_rows());
+            array = VectorizeHelpper::make_array_from_exprvalue(
+                                it->second.type, it->second.default_expr_value, tmp_batch->num_rows());
         }
         if (array == nullptr) {
             DB_COLUMN_FATAL("%s Fail to make array from expr value", _parquet_file->get_file_path().c_str());
@@ -696,7 +770,7 @@ int ColumnFileManager::pick_major_compact_file(std::vector<std::shared_ptr<Colum
 }
 
 // COLUMNTODO compaction参数每个表可定制
-int ColumnFileManager::pick_base_compact_file(std::vector<std::shared_ptr<ColumnFileInfo>>& file_infos) {
+int ColumnFileManager::pick_base_compact_file(std::vector<std::shared_ptr<ColumnFileInfo>>& file_infos, bool only_read_base) {
     std::unique_lock<std::mutex> l(_mutex);
     if (_column_status != pb::CS_NORMAL) {
         DB_WARNING("region_id: %ld, column status invalid", _region_id);
@@ -710,6 +784,11 @@ int ColumnFileManager::pick_base_compact_file(std::vector<std::shared_ptr<Column
     // 时间过长, 直接进行base compact
     bool need_check_cumulatives_size = true;
     if (butil::gettimeofday_us() - _last_base_compact_time > FLAGS_column_base_compaction_interval_s * 1000 * 1000LL) {
+        need_check_cumulatives_size = false;
+    }
+
+    // 非merge on read，及时做base compaction
+    if (only_read_base && (butil::gettimeofday_us() - _last_base_compact_time > FLAGS_column_fast_base_compaction_interval_s * 1000 * 1000LL)) {
         need_check_cumulatives_size = false;
     }
 

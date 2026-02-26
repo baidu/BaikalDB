@@ -112,6 +112,10 @@ public:
     }
     virtual int show_explain(QueryContext* ctx, std::vector<std::map<std::string, std::string>>& output, int& next_id, int display_id);
 
+    bool has_huge_in_condition();
+
+    void cut_huge_in_condition(std::vector<ExprNode*>& huge_in_conditions);
+
     void reset(RuntimeState* state) override {
         _child_eos = false;
         _child_row_idx = 0;

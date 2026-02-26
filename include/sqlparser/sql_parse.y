@@ -6047,6 +6047,13 @@ AlterSpec:
         spec->where = $5;
         $$ = spec;
     }
+    | MODIFY COLUMN DELETE WhereClauseOptional
+    {
+        AlterTableSpec* spec = new_node(AlterTableSpec);
+        spec->spec_type = ALTER_SPEC_MODIFY_COLUMN;
+        spec->where = $4;
+        $$ = spec;
+    }
     | MODIFY ColumnKwdOpt ColumnDef ColumnPosOpt
     {
         AlterTableSpec* spec = new_node(AlterTableSpec);

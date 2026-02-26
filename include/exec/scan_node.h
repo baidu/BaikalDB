@@ -256,7 +256,7 @@ public:
         return _old_region_infos;
     }
     void set_old_region_infos(google::protobuf::RepeatedPtrField<pb::RegionInfo>&& region_infos) {
-        _old_region_infos = region_infos;
+        _old_region_infos = std::move(region_infos);
     }
     pb::Engine engine() {
         return _engine;
@@ -421,6 +421,10 @@ public:
         return _is_mysql_scan_node;
     }
 
+    bool is_file_scan_node() const {
+        return _is_file_scan_node;
+    }
+
     void calc_index_range() {
         _main_path.path(_select_idx)->calc_index_range(_partition_field_id, _expr_partition_map);
         if (!_main_path.path(_select_idx)->index_info_ptr->is_global && _select_idx != _table_id) {
@@ -445,7 +449,7 @@ public:
     }
 
     bool can_use_no_index_join() {
-        if (_select_idx == _select_index_for_join && _select_idx != _table_id) {
+        if (_select_idx != -1 && _select_idx == _select_index_for_join && _select_idx != _table_id) {
             // 当join on条件推不推都选择同一个索引, 且不是主键的时候, 可以使用no index join
             return true;
         }
@@ -538,6 +542,7 @@ protected:
     bool _has_index = false;
     bool _is_rocksdb_scan_node = false;
     bool _is_mysql_scan_node = false;
+    bool _is_file_scan_node = false;
     pb::LockCmdType _lock = pb::LOCK_NO;
     RouterPolicy _router_policy = RouterPolicy::RP_RANGE;
     google::protobuf::RepeatedPtrField<pb::RegionInfo> _old_region_infos;

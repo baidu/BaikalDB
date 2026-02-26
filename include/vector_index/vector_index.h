@@ -34,6 +34,11 @@ const std::string FAISS_SCALAR_DATA_PREFIX = "/faissindex_scalardata_";
 const std::string FAISS_DEL_BITMAP_PREFIX = "/faissindex_delbitmap_";
 const std::string FAISS_NOT_CACHE_FIELDS_PREFIX = "/faissindex_notcachefields_";
 
+struct VectorSearchParam {
+    int32_t nprobe = -1;
+    int32_t efsearch = -1;
+};
+
 class VectorIndex {
     struct FaissIndex;
     using SmartFaissIndex = std::shared_ptr<FaissIndex>;
@@ -171,7 +176,8 @@ public:
             SmartTransaction& txn,
             const std::string& word,
             const std::string& pk,
-            SmartRecord record);
+            SmartRecord record,
+            pb::IndexState index_status);
     int search_vector(
             myrocksdb::Transaction* txn,
             const uint64_t separate_value,
@@ -179,7 +185,7 @@ public:
             SmartTable& table_info,
             const std::string& search_data,
             int64_t topk,
-            int32_t efsearch,
+            VectorSearchParam& search_param,
             std::vector<SmartRecord>& records,
             std::vector<ExprNode*>& vector_filter_exprs,
             std::vector<ExprNode*>& scan_filter_exprs,
@@ -188,7 +194,8 @@ public:
             SmartFaissIndex faiss_index,
             const std::string& word, 
             int64_t cache_idx,
-            SmartRecord record);
+            SmartRecord record,
+            bool enable_train);
     int search(
             myrocksdb::Transaction* txn,
             SmartFaissIndex faiss_index,
@@ -196,7 +203,7 @@ public:
             SmartTable& table_info,
             const std::string& search_data,
             int64_t topk,
-            int32_t efsearch,
+            VectorSearchParam& search_param,
             std::vector<SmartRecord>& records,
             std::vector<ExprNode*>& vector_filter_exprs,
             std::vector<ExprNode*>& scan_filter_exprs,
@@ -211,7 +218,8 @@ public:
             myrocksdb::Transaction* txn, 
             SmartFaissIndex faiss_index, 
             const std::string& pk, 
-            VFlag flag);
+            VFlag flag,
+            pb::IndexState index_status);
     int construct_records(
             myrocksdb::Transaction* txn,
             const uint64_t separate_value,
@@ -230,6 +238,19 @@ public:
     // 根据主表行数和faiss索引行数判断是否需要compact
     bool need_compact(const int64_t table_lines);
 
+    bool need_train() {
+        return _is_ivf || _is_pq || _is_pqfs;
+    }
+
+    void cal_new_train_vec_size(int64_t valid_vec_size);
+
+    bool is_removed() {
+        return _removed;
+    }
+
+    void set_removed(bool r) {
+        _removed = r;
+    }
 private:
     int init_faiss_index(SmartFaissIndex faiss_index);
     int reset_faiss_index(SmartFaissIndex faiss_index);
@@ -365,6 +386,8 @@ private:
     }
 
     bool _is_separate = false; // 向量索引是否进行隔离
+    int32_t _separate_field_id = -1;
+
     SmartFaissIndex _faiss_index = nullptr; // 正常向量索引
     std::shared_ptr<ThreadSafeMap<uint64_t, SmartFaissIndex>> _separate_faiss_index_map; // 向量隔离索引
 
@@ -377,13 +400,32 @@ private:
     int64_t _table_id = 0;
     int32_t _dimension = 0;                    // 维度
     faiss::MetricType _metrix_type = faiss::METRIC_L2;
+    // -- IVF
     int32_t _nprobe = 5;
+    int32_t _ivf_nlist = 50;
+    // -- HNSW
     int32_t _efsearch = 16;
     int32_t _efconstruction = 40;
+
+    // metric_type
+    bool _is_l2norm = false;
+
+    // vector index type
     bool _is_flat = false;
     bool _is_hnsw = false;
-    bool _is_l2norm = false;
-    int32_t _separate_field_id = -1;
+    bool _is_ivf = false;
+    bool _is_pq = false;
+    bool _is_pqfs = false;
+
+    // for train
+    int64_t _train_vec_size = -1;
+    int64_t _trigger_retrain_vector_num = -1;
+
+    // for slowdown
+    bool _begin_train = false;
+    TimeCost _train_begin_time;
+
+    bool _removed = false;
 };
 
 }  // namespace baikaldb

@@ -29,6 +29,7 @@
 #include "fragment.h"
 #include "mpp_analyzer.h"
 #include "join_type_analyzer.h"
+#include "condition_optimizer.h"
 
 namespace baikaldb {
 class PhysicalPlanner {

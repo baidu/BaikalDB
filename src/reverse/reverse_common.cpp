@@ -19,11 +19,11 @@
 #include <gflags/gflags.h>
 #include "proto/reverse.pb.h"
 namespace baikaldb {
-DEFINE_string(q2b_utf8_path, "./conf/q2b_utf8.dic", "q2b_utf8_path");
-DEFINE_string(q2b_gbk_path, "./conf/q2b_gbk.dic", "q2b_gbk_path");
-DEFINE_string(punctuation_path, "./conf/punctuation.dic", "punctuation_path");
-DEFINE_bool(reverse_print_log, false, "reverse_print_log");
-DEFINE_bool(enable_print_convert_log, false, "enable_print_convert_log");
+DEFINE_string(q2b_utf8_path, "./conf/q2b_utf8.dic", "Path to q2b UTF-8 dictionary, default: ./conf/q2b_utf8.dic");
+DEFINE_string(q2b_gbk_path, "./conf/q2b_gbk.dic", "Path to q2b GBK dictionary, default: ./conf/q2b_gbk.dic");
+DEFINE_string(punctuation_path, "./conf/punctuation.dic", "Path to punctuation dictionary, default: ./conf/punctuation.dic");
+DEFINE_bool(reverse_print_log, false, "Enable reverse print logging, default: false");
+DEFINE_bool(enable_print_convert_log, false, "Enable print convert logging, default: false");
 
 std::atomic_long g_statistic_insert_key_num = {0};
 std::atomic_long g_statistic_delete_key_num = {0};
@@ -70,7 +70,7 @@ int Tokenizer::init() {
     return 0;
 }
 
-#ifdef BAIDU_INTERNAL
+#if defined(BAIDU_INTERNAL) && !defined(__aarch64__)
 drpc::NLPCClient* wordrank_client;
 drpc::NLPCClient* wordseg_client;
 drpc::NLPCClient* wordweight_client;

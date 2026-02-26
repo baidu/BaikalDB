@@ -399,7 +399,7 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
             break; 
         }
         case pb::OP_UPDATE_TTL_DURATION: {
-            TableManager::get_instance()->update_ttl_duration(request, iter.index(), done);
+            TableManager::get_instance()->update_ttl_info(request, iter.index(), done);
             break;
         }
         case pb::OP_UPDATE_BYTE_SIZE: {
@@ -459,7 +459,7 @@ void MetaStateMachine::on_apply(braft::Iterator& iter) {
             break;
         }
         case pb::OP_SPLIT_REGION: {
-            RegionManager::get_instance()->split_region(request, done);
+            RegionManager::get_instance()->split_region(request, iter.index(), done);
             break;
         }
         case pb::OP_MODIFY_RESOURCE_TAG: {

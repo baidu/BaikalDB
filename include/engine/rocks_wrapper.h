@@ -39,7 +39,6 @@ DECLARE_int32(key_point_collector_interval);
 DECLARE_bool(rocks_use_partitioned_index_filters);
 DECLARE_bool(rocks_use_ribbon_filter);
 DECLARE_bool(olap_table_only);
-DECLARE_bool(olap_import_mode);
 DECLARE_bool(rocks_use_sst_partitioner_fixed_prefix);
 DECLARE_int64(rocks_block_cache_size_mb);
 DECLARE_double(rocks_high_pri_pool_ratio);
@@ -414,9 +413,16 @@ public:
     }
     void close() {
         delete _txn_db;
+        _txn_db = nullptr;
         if (_cold_txn_db != nullptr) {
             delete _cold_txn_db;
+            _cold_txn_db = nullptr;
         }
+        _is_init = false;
+        _column_families.clear();
+        _cold_column_family = nullptr;
+        _cold_binlog_cf = nullptr;
+        _old_binlog_cf = nullptr;
     }
     bool is_any_stall() {
         uint64_t value = 0;

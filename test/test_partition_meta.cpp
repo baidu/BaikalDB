@@ -74,6 +74,7 @@ void construct_schema(pb::SchemaInfo& schema_info) {
     schema_info.set_database("test_db");
     schema_info.set_namespace_name("test_namespace");
     schema_info.set_resource_tag("e0-nj");
+    schema_info.set_partition_num(1);
 
     // Field
     schema_info.add_fields();
@@ -299,6 +300,7 @@ TEST_F(TestPartition, test_alter_partition) {
     ASSERT_NE(p_schema_info, nullptr);
     construct_schema(*p_schema_info);
     EXPECT_EQ(_schema_manager->pre_process_for_partition(&request_create_table, &response_create_table, 0), 0);
+    EXPECT_EQ(_schema_manager->pre_process_for_create_table(&request_create_table, &response_create_table, 0), 0);
     _table_manager->create_table(request_create_table, 1, NULL);
     {
         baikaldb::DoubleBufferedTableMemMapping::ScopedPtr info;

@@ -188,6 +188,7 @@ void MetaServer::distribute_leader_thread() {
     int META_TYPE = 0;
     int AUTO_INCR_TYPE = 1;
     int TSO_TYPE = 2;
+    TimeCost time_cost;
     while (!_shutdown) {
         int sleep_s = 60;
         if (FLAGS_distribute_leader_thread_s > 0) {
@@ -203,6 +204,9 @@ void MetaServer::distribute_leader_thread() {
             continue;
         }
         if (FLAGS_distribute_leader_thread_s <= 0) {
+            continue;
+        }
+        if (time_cost.get_time() < 2 * 3600ULL * 1000 * 1000) {
             continue;
         }
         if (!_meta_state_machine->is_leader()) {

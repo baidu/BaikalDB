@@ -94,7 +94,8 @@ int ExchangeSenderNode::Channel::send_record_batch(RuntimeState* state,
         if (0 != VectorizeHelpper::concatenate_record_batches(
                         record_batch->schema(), 
                         need_send_record_batches, 
-                        concatenate_record_batch)) {
+                        concatenate_record_batch,
+                        /*need_check_memory_limit=*/true)) {
             DB_FATAL_CHANNEL("Fail to concatenate record batches");
             return -1;
         }
@@ -453,7 +454,7 @@ void ExchangeSenderNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
                     DB_FATAL_ES("transfer receiver arrow schema fail");
                     return;
                 }
-                arrow::Result<std::shared_ptr<arrow::Buffer>> schema_ret = arrow::ipc::SerializeSchema(*_arrow_schema, arrow::default_memory_pool());
+                arrow::Result<std::shared_ptr<arrow::Buffer>> schema_ret = arrow::ipc::SerializeSchema(*_arrow_schema, GetMemoryPoolForRead());
                 if (!schema_ret.ok()) {
                     DB_FATAL_ES("arrow serialize schema fail, status: %s", schema_ret.status().ToString().c_str());
                     return;
@@ -501,8 +502,7 @@ int ExchangeSenderNode::open(RuntimeState* state) {
         // 具体执行的时候需要使用对应上游receiver的partition_property
         _partition_property = *(_exchange_receiver_node->partition_property());
     }
-    
-    _is_db_fragment = (get_node_pass_subquery(pb::EXCHANGE_RECEIVER_NODE) != nullptr);
+    _is_db_fragment = is_db_fragment();
     _region_id = state->region_id();
     for (int i = 0; i < _receiver_destinations.size(); ++i) {
         bool is_local_pass_through = false;
@@ -530,14 +530,7 @@ int ExchangeSenderNode::open(RuntimeState* state) {
 }
 
 int ExchangeSenderNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
-    // 应该不需要往下get_next, 直接转向量化执行, 注意RocksdbScanNode的reader
-    // 应该不会调用get_next
-    // int ret = 0;
-    // ret = _children[0]->get_next(state, batch, eos);
-    // if (ret < 0) {
-    //     DB_WARNING("_children get_next fail");
-    //     return ret;
-    // }
+    // 不需要往下get_next, 直接转向量化执行, 注意RocksdbScanNode的reader
     set_node_exec_type(pb::EXEC_ARROW_ACERO);
     *eos = true;
     return 0;
@@ -631,7 +624,8 @@ int ExchangeSenderNode::send_record_batch(RuntimeState* state,
             DB_FATAL_ES("Fail to send record batch");
             return -1;
         }
-    } else if (_partition_property.type == pb::BroadcastPartitionType) {
+    } else if (_partition_property.type == pb::BroadcastPartitionType 
+            || _partition_property.type == pb::RandomPartitionType) {
         std::vector<std::shared_ptr<arrow::RecordBatch>> need_send_record_batches;
         bool need_send_rpc = false;
         if (0 != _broadcast_record_batch_keepper.add_record_batch(state, record_batch, _is_db_fragment, need_send_record_batches, exchange_state, need_send_rpc)) {
@@ -653,7 +647,8 @@ int ExchangeSenderNode::send_record_batch(RuntimeState* state,
         if (0 != VectorizeHelpper::concatenate_record_batches(
                                         record_batch->schema(), 
                                         need_send_record_batches, 
-                                        concatenate_record_batch)) {
+                                        concatenate_record_batch,
+                                        /*need_check_memory_limit=*/true)) {
             DB_FATAL_ES("Fail to concatenate record batches");
             return -1;
         }
@@ -672,12 +667,18 @@ int ExchangeSenderNode::send_record_batch(RuntimeState* state,
         serialize_cost = time_cost.get_time();
         time_cost.reset();
         attachment_size = data_buffer->size();
+        int channel_idx = 0;
         // 发送全部上游
         for (auto& channel : _channels) {
+            bool is_not_target_channel_for_random_type = (_partition_property.type == pb::RandomPartitionType && _target_channel_idx_for_random_type != channel_idx);
+            if (is_not_target_channel_for_random_type && exchange_state == pb::ExchangeState::ES_DOING) {
+                // 不是目标channel, 最后发一次eof即可
+                continue;
+            }
             if (0 != channel->send_record_batch_data(state, 
                                         need_send_record_batches, 
                                         schema_buffer, 
-                                        data_buffer, 
+                                        is_not_target_channel_for_random_type ? _empty_recordbatch_buffer : data_buffer, 
                                         exchange_state, 
                                         is_send_query_stat, 
                                         send_rows)) {
@@ -687,6 +688,7 @@ int ExchangeSenderNode::send_record_batch(RuntimeState* state,
             if (is_send_query_stat) {
                 is_send_query_stat = false;
             }
+            channel_idx++;
         }
         send_cost = time_cost.get_time();
         if (combine_cost + serialize_cost + send_cost > FLAGS_print_time_us) {
@@ -767,7 +769,31 @@ int ExchangeSenderNode::init_repartition_param() {
     // repartition使用
     // 获取分区列，获取需要转化成字符串的分区列
     _hash_bucket_num = _receiver_destinations.size();
-
+    if (_hash_bucket_num == 0) {
+        DB_FATAL_ES("hash_bucket_num is 0");
+        return -1;
+    }
+    if (_partition_property.type == pb::RandomPartitionType) {
+        if (_is_db_fragment) {
+            _target_channel_idx_for_random_type = _fragment_instance_id % _hash_bucket_num;
+        } else {
+            _target_channel_idx_for_random_type = _region_id % _hash_bucket_num;
+        }
+        auto empty_record_batch = arrow::RecordBatch::MakeEmpty(_arrow_schema);
+        if (!empty_record_batch.ok()) {
+            DB_FATAL_ES("Fail to MakeEmpty recordbatch for random partition type");
+            return -1;
+        }
+        std::shared_ptr<arrow::RecordBatch> record_batch = *empty_record_batch;
+        arrow::Result<std::shared_ptr<arrow::Buffer>> empty_recordbatch_buffer = 
+                arrow::ipc::SerializeRecordBatch(*record_batch, arrow::ipc::IpcWriteOptions::Defaults());
+        if (!empty_recordbatch_buffer.ok()) {
+            DB_FATAL("Fail to Serialize empty RecordBatch");
+            return -1;
+        }
+        _empty_recordbatch_buffer = *empty_recordbatch_buffer;
+        return 0;
+    }
     if (_partition_property.type == pb::SinglePartitionType
         || _partition_property.type == pb::BroadcastPartitionType) {
         return 0;
@@ -857,13 +883,16 @@ arrow::Status ExchangeSenderNode::repartition(
     // cast string
     const int64_t batch_length = batch->num_rows();
     std::unordered_map<int, std::shared_ptr<arrow::Array>> cast_array_map;
+    arrow::compute::ExecContext exec_ctx(GetMemoryPoolForRead());
+    arrow::compute::CastOptions cast_options;
+    cast_options.allow_int_overflow = true;
     for (int i = 0; i < hash_indices.size(); ++i) {
         if (need_cast_indices[i]) {
             if (hash_indices[i] >= batch->column_data().size()) {
                 return arrow::Status::Invalid("hash_indices[i] >= batch->num_columns()");
             }
             auto array = batch->column(hash_indices[i]);
-            ARROW_ASSIGN_OR_RAISE(cast_array_map[hash_indices[i]], arrow::compute::Cast(*array, arrow::large_binary()));
+            ARROW_ASSIGN_OR_RAISE(cast_array_map[hash_indices[i]], arrow::compute::Cast(*array, arrow::large_binary(), cast_options, &exec_ctx));
             if (cast_array_map[hash_indices[i]]->length() != batch_length) {
                 return arrow::Status::Invalid("cast_array_map[hash_indices[i]]->length() != batch_length");
             }
@@ -871,7 +900,7 @@ arrow::Status ExchangeSenderNode::repartition(
     }
     // 构造arrow ctx
     arrow::util::TempVectorStack stack;
-    stack.Init(::arrow::default_memory_pool(), 8 * max_batch_size * sizeof(uint64_t));
+    stack.Init(GetMemoryPoolForRead(), 8 * max_batch_size * sizeof(uint64_t));
     arrow::compute::LightContext ctx;
     ctx.hardware_flags = arrow::internal::CpuInfo::GetInstance()->hardware_flags();
     ctx.stack = &stack;

@@ -522,8 +522,10 @@ public:
     std::shared_ptr<std::set<pb::StatisticType>> statistics_types;
     // 表总行数
     int64_t          table_rows = 0;
-    // 采样行数
+    // 单个region采样行数
     int64_t          sample_rows = 0;
+    // 采样region数
+    int64_t          max_sample_regions = 0;
     // -------- 此部分皆为收集统计信息相关 ----------------
     int64_t          last_insert_id = INT64_MIN; //存储baikalStore last_insert_id(expr)更新的字段
     pb::StoreRes*    response = nullptr;

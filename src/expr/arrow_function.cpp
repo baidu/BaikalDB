@@ -21,12 +21,51 @@
 #include <arrow/compute/registry.h>
 #include <arrow/compute/cast.h>
 #include <arrow/compute/kernels/codegen_internal.h>
+#include <charconv>
 #include "slot_ref.h"
 #include "row_expr.h"
 
 namespace baikaldb {
-DEFINE_bool(enable_arrow_complex_func, false, "enable_arrow_complex_func");
+/*
+ *  通用config
+ */
+class CommonOptionsType : public arrow::compute::FunctionOptionsType {
+public:
+    static const arrow::compute::FunctionOptionsType* GetInstance() {
+        static std::unique_ptr<arrow::compute::FunctionOptionsType> instance(new CommonOptionsType());
+        return instance.get();
+    }
+    const char* type_name() const override { return "CommonOptionType"; }
+    std::string Stringify(const  arrow::compute::FunctionOptions& options) const override {
+        return type_name();
+    }
+    bool Compare(const arrow::compute::FunctionOptions& options,
+                 const arrow::compute::FunctionOptions& other) const override {
+        const auto& lop = static_cast<const CommonFunctionOptions&>(options);
+        const auto& rop = static_cast<const CommonFunctionOptions&>(other);
+        return lop.str_value == rop.str_value && lop.int_value == rop.int_value;;
+    }
+    std::unique_ptr<arrow::compute::FunctionOptions> Copy(const arrow::compute::FunctionOptions& options) const override {
+        const auto& opts = static_cast<const CommonFunctionOptions&>(options);
+        return std::make_unique<CommonFunctionOptions>(opts.str_value, opts.int_value);
+    }
+};
 
+arrow::Result<std::unique_ptr<arrow::compute::KernelState>> InitCommonState(arrow::compute::KernelContext*,
+                                            const  arrow::compute::KernelInitArgs& args) {
+    auto func_options = static_cast<const CommonFunctionOptions*>(args.options);
+    if (func_options == nullptr) {
+        return std::make_unique<CommonState>("", 0);
+    }
+    return std::make_unique<CommonState>(func_options->str_value, func_options->int_value);
+}
+
+CommonFunctionOptions::CommonFunctionOptions(const std::string& value, int64_t int_value)
+    : arrow::compute::FunctionOptions(CommonOptionsType::GetInstance()), str_value(value), int_value(int_value) {}
+
+/*
+ * cast type map
+ */
 const std::unordered_map<pb::PrimitiveType, std::shared_ptr<arrow::DataType>> cast_types = {
     {pb::BOOL, arrow::boolean()},
 
@@ -81,7 +120,7 @@ bool check_row_expr_is_support(pb::Function& fn, ExprNode* node) {
         || fn.fn_op() == parser::FT_LE
         || fn.fn_op() == parser::FT_LT
         || fn.fn_op() == parser::FT_IN) {
-        return static_cast<RowExpr*>(node)->can_use_arrow_vector_for_compare_sclar_exrpr();
+        return static_cast<RowExpr*>(node)->children_can_use_arrow_vector();
     }
     return false;
 }
@@ -102,6 +141,23 @@ bool is_same_type(const pb::PrimitiveType& type1, const pb::PrimitiveType& type2
     if (is_string(type1) && is_string(type2)) {
         return true;
     }
+    return false;
+}
+
+bool need_special_cast(const pb::PrimitiveType& from_type, const pb::PrimitiveType& to_type) {
+    if (from_type == to_type) {
+        return false;
+    }
+    // 时间类型+字符串，之间相互转换
+    if ((is_datetime_specic(from_type) || from_type == pb::STRING) 
+            && (is_datetime_specic(to_type) || to_type == pb::STRING)) {
+        return true;
+    }
+    // 字符串转数值型
+    if (from_type == pb::STRING && is_numberic(to_type)) {
+        return true;
+    }
+    // 基础类型直接用arrow cast
     return false;
 }
 /*
@@ -135,9 +191,7 @@ int build_arrow_expr_with_cast(ExprNode* node, const pb::PrimitiveType& col_type
         return 0;
     }
     BUILD_ARROW_EXPR_RET(node);
-    if (node->col_type() != col_type 
-            && (is_datetime_specic(node->col_type()) || node->col_type() == pb::STRING) 
-            && (is_datetime_specic(col_type) || col_type == pb::STRING)) {
+    if (need_special_cast(node->col_type(), col_type)) {
         arrow::Expression cast_expr = arrow_cast(node->arrow_expr(), node->col_type(), col_type);
         node->set_arrow_expr(cast_expr);
         return 0;
@@ -165,6 +219,9 @@ int build_arrow_expr_with_cast(ExprNode* node, const pb::PrimitiveType& col_type
 
 arrow::compute::Expression arrow_cast(const arrow::compute::Expression& expr, const pb::PrimitiveType& type, const pb::PrimitiveType& cast_type) {
     arrow::compute::Expression cast_expr = expr;
+    if (type == cast_type) {
+        return cast_expr;
+    }
     if ((is_datetime_specic(type) || type == pb::STRING) && 
             (is_datetime_specic(cast_type) || cast_type == pb::STRING)) {
         std::string cast_func_name;
@@ -187,6 +244,13 @@ arrow::compute::Expression arrow_cast(const arrow::compute::Expression& expr, co
         }
         ExprValueCastFunctionOptions option(type);
         cast_expr = arrow::compute::call(cast_func_name, {expr}, std::move(option));
+    } else if (type == pb::STRING && is_numberic(cast_type)){
+        auto iter = cast_types.find(cast_type);
+        if (iter == cast_types.end()) {
+            return cast_expr;
+        }
+        std::string cast_name = "string_cast_" + iter->second->ToString();
+        cast_expr = arrow::compute::call(cast_name, {expr});
     } else {
         auto iter = cast_types.find(cast_type);
         if (iter == cast_types.end()) {
@@ -226,11 +290,11 @@ int get_all_arrow_argments_for_add_minus_multiple(std::vector<ExprNode*>& childr
     for (auto& c : children) {
         BUILD_ARROW_EXPR_RET(c);
         if (has_double(args_types)) {
-            arguments.emplace_back(arrow::compute::call("cast", {c->arrow_expr()}, arrow::compute::CastOptions::Unsafe(arrow::float64())));
+            arguments.emplace_back(arrow_cast(c->arrow_expr(), c->col_type(), pb::DOUBLE));
         } else if (has_uint(args_types)) {
-            arguments.emplace_back(arrow::compute::call("cast", {c->arrow_expr()}, arrow::compute::CastOptions::Unsafe(arrow::uint64())));
+            arguments.emplace_back(arrow_cast(c->arrow_expr(), c->col_type(), pb::UINT64));
         } else {
-            arguments.emplace_back(arrow::compute::call("cast", {c->arrow_expr()}, arrow::compute::CastOptions::Unsafe(arrow::int64())));
+            arguments.emplace_back(arrow_cast(c->arrow_expr(), c->col_type(), pb::INT64));
         }
     }
     return 0;
@@ -242,7 +306,7 @@ int arrow_add(std::vector<ExprNode*>& children, pb::Function* fn, const pb::Prim
     if (0 != get_all_arrow_argments_for_add_minus_multiple(children, arguments)) {
         return -1;
     }
-    out = arrow::compute::call("add_checked", arguments);
+    out = arrow::compute::call("add", arguments);
     return 0;
 }
 
@@ -252,7 +316,7 @@ int arrow_minus(std::vector<ExprNode*>& children, pb::Function* fn, const pb::Pr
     if (0 != get_all_arrow_argments_for_add_minus_multiple(children, arguments)) {
         return -1;
     }
-    out = arrow::compute::call("subtract_checked", arguments);
+    out = arrow::compute::call("subtract", arguments);
     return 0;
 }
 
@@ -262,25 +326,25 @@ int arrow_multiplies(std::vector<ExprNode*>& children, pb::Function* fn, const p
     if (0 != get_all_arrow_argments_for_add_minus_multiple(children, arguments)) {
         return -1;
     }
-    out = arrow::compute::call("multiply_checked", arguments);
+    out = arrow::compute::call("multiply", arguments);
     return 0;
 }
 
 // case parser::FT_DIVIDES:
 int arrow_divides(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out) {
     for (int i = 0; i < children.size(); ++i) {
-        if (0 != build_arrow_expr_with_cast(children[i], nullptr, i)) {
+        if (0 != build_arrow_expr_with_cast(children[i], pb::DOUBLE)) {
             return -1;
         }
     }
     // 需要特殊处理除数是0, 返回NULL
     arrow::Datum null_datum = std::make_shared<arrow::DoubleScalar>();
-    out = arrow::compute::call("divide_checked", {
-        arrow::compute::call("cast", {children[0]->arrow_expr()}, arrow::compute::CastOptions::Unsafe(arrow::float64())),
+    out = arrow::compute::call("divide", {
+        children[0]->arrow_expr(),
         arrow::compute::call("if_else", {
                 arrow::compute::call("equal", {children[1]->arrow_expr(), arrow::compute::literal(0)}), 
                 arrow::compute::literal(null_datum), 
-                arrow::compute::call("cast", {children[1]->arrow_expr()}, arrow::compute::CastOptions::Unsafe(arrow::float64()))
+                children[1]->arrow_expr()
         })
     });
     return 0;
@@ -483,7 +547,7 @@ int arrow_least(std::vector<ExprNode*>& children, pb::Function* fn, const pb::Pr
     }
     for (auto i = 0; i < arguments.size(); ++i) {
         if (is_string(children[i]->col_type())) {
-            arguments[i] = arrow::compute::call("cast", {arguments[i]}, arrow::compute::CastOptions::Unsafe(arrow::float64()));
+            arguments[i] = arrow_cast(arguments[i], children[i]->col_type(), pb::DOUBLE);
         }
     }
     arrow::compute::ElementWiseAggregateOptions options(/*skip_nulls*/false);
@@ -498,7 +562,7 @@ int arrow_greatest(std::vector<ExprNode*>& children, pb::Function* fn, const pb:
     }
     for (auto i = 0; i < arguments.size(); ++i) {
         if (is_string(children[i]->col_type())) {
-            arguments[i] = arrow::compute::call("cast", {arguments[i]}, arrow::compute::CastOptions::Unsafe(arrow::float64()));
+            arguments[i] = arrow_cast(arguments[i], children[i]->col_type(), pb::DOUBLE);
         }
     }
     arrow::compute::ElementWiseAggregateOptions options(/*skip_nulls*/false);
@@ -826,7 +890,7 @@ static arrow::Status ExecStringInput(arrow::compute::KernelContext* ctx, const a
     if (type != pb::STRING) {
         return arrow::Status::TypeError("not support");
     }
-    arrow::compute::internal::VisitArrayValuesInline<arrow::LargeBinaryType>(
+    arrow::compute::internal::VisitArrayValuesInline<I>(
         input,
         [&](std::string_view v) {
             *out_values++ = datetime_to_date(str_to_datetime(v.data(), v.length()));
@@ -885,7 +949,7 @@ static arrow::Status ExecStringInput(arrow::compute::KernelContext* ctx, const a
     if (type != pb::STRING) {
         return arrow::Status::TypeError("not support");
     }
-    arrow::compute::internal::VisitArrayValuesInline<arrow::LargeBinaryType>(
+    arrow::compute::internal::VisitArrayValuesInline<I>(
         input,
         [&](std::string_view v) {
             *out_values++ = str_to_time(v.data(), v.length());
@@ -944,7 +1008,7 @@ static arrow::Status ExecStringInput(arrow::compute::KernelContext* ctx, const a
     if (type != pb::STRING) {
         return arrow::Status::TypeError("not support");
     }
-    arrow::compute::internal::VisitArrayValuesInline<arrow::LargeBinaryType>(
+    arrow::compute::internal::VisitArrayValuesInline<I>(
         input,
         [&](std::string_view v) {
             *out_values++ = str_to_datetime(v.data(), v.length());
@@ -1003,7 +1067,7 @@ static arrow::Status ExecStringInput(arrow::compute::KernelContext* ctx, const a
     if (type != pb::STRING) {
         return arrow::Status::TypeError("not support");
     }
-    arrow::compute::internal::VisitArrayValuesInline<arrow::LargeBinaryType>(
+    arrow::compute::internal::VisitArrayValuesInline<I>(
         input,
         [&](std::string_view v) {
             *out_values++ = datetime_to_timestamp(str_to_datetime(v.data(), v.length()));
@@ -1096,6 +1160,85 @@ static arrow::Status Exec(arrow::compute::KernelContext* ctx, const arrow::compu
     out->value = std::move(output_array->data());
     return arrow::Status::OK();
 }
+};
+
+template <typename OutputValueCType>
+inline OutputValueCType string_view_to_intergal(const std::string_view& v) {
+    // 不用stollu, 避免string_view转string
+    // + : uint64; - : int64; 兼容前面空格和正负号，判断溢出
+    char* pos = const_cast<char*>(v.data());
+    const char* end = v.data() + v.length();
+    while (pos < end && *pos == ' ') {
+        pos++;
+    }
+    if (pos < end) {
+        if (*pos == '-') {
+            int64_t result = 0;
+            auto res = std::from_chars(pos, end, result);
+            if (res.ec == std::errc::result_out_of_range) {
+                // 溢出
+                return std::numeric_limits<int64_t>::max();
+            } 
+            return result;
+        } else {
+            if (*pos == '+' && pos + 1 < end) {
+                pos++;
+            }
+            uint64_t result = 0;
+            auto res = std::from_chars(pos, end, result);
+            if (res.ec == std::errc::result_out_of_range) {
+                // 溢出
+                return std::numeric_limits<uint64_t>::max();
+            }
+            return result;
+        } 
+    } 
+    return 0;
+}
+
+template <typename I, typename O>
+struct ExecStringCastNumberic {
+    using OutputValueCType = typename arrow::TypeTraits<O>::CType;
+    static arrow::Status Exec(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) {
+        const arrow::ArraySpan& input = batch[0].array;
+        arrow::ArraySpan* out_data = out->array_span_mutable();
+        OutputValueCType* out_values = out_data->GetValues<OutputValueCType>(1);
+        if (std::is_floating_point<OutputValueCType>::value) {
+            arrow::compute::internal::VisitArrayValuesInline<I>(
+            input,
+            [&](std::string_view v) {
+                double result = 0.0;
+                using ::arrow_vendored::fast_float::from_chars;
+                from_chars(v.data(), v.data() + v.length(), result);
+                *out_values++ = OutputValueCType(result);
+            },
+            [&]() {
+                // null
+                *out_values++ = OutputValueCType{};
+            });
+        } else if (std::is_integral<OutputValueCType>::value) {
+            arrow::compute::internal::VisitArrayValuesInline<I>(
+            input,
+            [&](std::string_view v) {
+                *out_values++ = string_view_to_intergal<OutputValueCType>(v);
+            },
+            [&]() {
+                // null
+                *out_values++ = OutputValueCType{};
+            });
+        } else {
+            return arrow::Status::TypeError("StringCastNumbericFunctor type error");
+        }
+        return arrow::Status::OK();
+    }
+};
+
+struct ParseStringToBoolean {
+    template <typename OutValue, typename Arg0Value>
+    static OutValue Call(arrow::compute::KernelContext*, Arg0Value val, arrow::Status* st) {
+        auto result = string_view_to_intergal<uint64_t>(val);
+        return (bool)result;
+    }
 };
 
 arrow::Status ExecMurmurHash(arrow::compute::KernelContext* ctx, const arrow::compute::ExecSpan& batch, arrow::compute::ExecResult* out) {    
@@ -1232,9 +1375,18 @@ arrow::Status ArrowFunctionManager::RegisterAllDefinedFunction() {
                     arrow::compute::internal::GenerateNumeric<ExecExprValueToDate, arrow::UInt32Type>(*in_ty),
                     InitExprValueCast));
         } 
-        arrow::compute::ScalarKernel k_string_to_date({arrow::large_binary()}, arrow::uint32(), 
+        arrow::compute::ScalarKernel k_binary_to_date({arrow::binary()}, arrow::uint32(), 
+                                                ExecExprValueToDate<arrow::UInt32Type, arrow::BinaryType>::ExecStringInput, InitExprValueCast);
+        arrow::compute::ScalarKernel k_large_binary_to_date({arrow::large_binary()}, arrow::uint32(), 
                                                 ExecExprValueToDate<arrow::UInt32Type, arrow::LargeBinaryType>::ExecStringInput, InitExprValueCast);
-        ARROW_RETURN_NOT_OK(expr_value_to_date_func->AddKernel(k_string_to_date));
+        arrow::compute::ScalarKernel k_utf8_to_date({arrow::utf8()}, arrow::uint32(), 
+                                                ExecExprValueToDate<arrow::UInt32Type, arrow::StringType>::ExecStringInput, InitExprValueCast);
+        arrow::compute::ScalarKernel k_large_utf8_to_date({arrow::large_utf8()}, arrow::uint32(), 
+                                                ExecExprValueToDate<arrow::UInt32Type, arrow::LargeStringType>::ExecStringInput, InitExprValueCast);                                     
+        ARROW_RETURN_NOT_OK(expr_value_to_date_func->AddKernel(k_binary_to_date));
+        ARROW_RETURN_NOT_OK(expr_value_to_date_func->AddKernel(k_large_binary_to_date));
+        ARROW_RETURN_NOT_OK(expr_value_to_date_func->AddKernel(k_utf8_to_date));
+        ARROW_RETURN_NOT_OK(expr_value_to_date_func->AddKernel(k_large_utf8_to_date));
         ARROW_RETURN_NOT_OK(registry->AddFunction(expr_value_to_date_func));
     }
 
@@ -1250,9 +1402,18 @@ arrow::Status ArrowFunctionManager::RegisterAllDefinedFunction() {
                     arrow::compute::internal::GenerateNumeric<ExecExprValueToDateTime, arrow::UInt64Type>(*in_ty),
                     InitExprValueCast));
         } 
-        arrow::compute::ScalarKernel k_string_to_datetime({arrow::large_binary()}, arrow::uint64(), 
+        arrow::compute::ScalarKernel k_binary_to_datetime({arrow::binary()}, arrow::uint64(), 
+                                                ExecExprValueToDateTime<arrow::UInt64Type, arrow::BinaryType>::ExecStringInput, InitExprValueCast);
+        arrow::compute::ScalarKernel k_large_binary_to_datetime({arrow::large_binary()}, arrow::uint64(), 
                                                 ExecExprValueToDateTime<arrow::UInt64Type, arrow::LargeBinaryType>::ExecStringInput, InitExprValueCast);
-        ARROW_RETURN_NOT_OK(expr_value_to_datetime_func->AddKernel(k_string_to_datetime));
+        arrow::compute::ScalarKernel k_utf8_to_datetime({arrow::utf8()}, arrow::uint64(), 
+                                                ExecExprValueToDateTime<arrow::UInt64Type, arrow::StringType>::ExecStringInput, InitExprValueCast);
+        arrow::compute::ScalarKernel k_large_utf8_to_datetime({arrow::large_utf8()}, arrow::uint64(), 
+                                                ExecExprValueToDateTime<arrow::UInt64Type, arrow::LargeStringType>::ExecStringInput, InitExprValueCast);
+        ARROW_RETURN_NOT_OK(expr_value_to_datetime_func->AddKernel(k_binary_to_datetime));
+        ARROW_RETURN_NOT_OK(expr_value_to_datetime_func->AddKernel(k_large_binary_to_datetime));
+        ARROW_RETURN_NOT_OK(expr_value_to_datetime_func->AddKernel(k_utf8_to_datetime));
+        ARROW_RETURN_NOT_OK(expr_value_to_datetime_func->AddKernel(k_large_utf8_to_datetime));
         ARROW_RETURN_NOT_OK(registry->AddFunction(expr_value_to_datetime_func));
     }
 
@@ -1268,9 +1429,18 @@ arrow::Status ArrowFunctionManager::RegisterAllDefinedFunction() {
                     arrow::compute::internal::GenerateNumeric<ExecExprValueToTime, arrow::Int32Type>(*in_ty),
                     InitExprValueCast));
         } 
-        arrow::compute::ScalarKernel k_string_to_time({arrow::large_binary()}, arrow::int32(), 
+        arrow::compute::ScalarKernel k_binary_to_time({arrow::binary()}, arrow::int32(), 
+                                                ExecExprValueToTime<arrow::Int32Type, arrow::BinaryType>::ExecStringInput, InitExprValueCast);
+        arrow::compute::ScalarKernel k_large_binary_to_time({arrow::large_binary()}, arrow::int32(), 
                                                 ExecExprValueToTime<arrow::Int32Type, arrow::LargeBinaryType>::ExecStringInput, InitExprValueCast);
-        ARROW_RETURN_NOT_OK(expr_value_to_time_func->AddKernel(k_string_to_time));
+        arrow::compute::ScalarKernel k_utf8_to_time({arrow::utf8()}, arrow::int32(), 
+                                                ExecExprValueToTime<arrow::Int32Type, arrow::StringType>::ExecStringInput, InitExprValueCast);
+        arrow::compute::ScalarKernel k_large_utf8_to_time({arrow::large_utf8()}, arrow::int32(), 
+                                                ExecExprValueToTime<arrow::Int32Type, arrow::LargeStringType>::ExecStringInput, InitExprValueCast);
+        ARROW_RETURN_NOT_OK(expr_value_to_time_func->AddKernel(k_binary_to_time));
+        ARROW_RETURN_NOT_OK(expr_value_to_time_func->AddKernel(k_large_binary_to_time));
+        ARROW_RETURN_NOT_OK(expr_value_to_time_func->AddKernel(k_utf8_to_time));
+        ARROW_RETURN_NOT_OK(expr_value_to_time_func->AddKernel(k_large_utf8_to_time));
         ARROW_RETURN_NOT_OK(registry->AddFunction(expr_value_to_time_func));
     }
 
@@ -1280,17 +1450,58 @@ arrow::Status ArrowFunctionManager::RegisterAllDefinedFunction() {
     {
         auto expr_value_to_timestamp_func = std::make_shared<arrow::compute::ScalarFunction>("expr_value_to_timestamp", arrow::compute::Arity::Unary(),
                                                     /*doc=*/arrow::compute::FunctionDoc::Empty());
-         for (const std::shared_ptr<arrow::DataType>& in_ty : arrow::IntTypes()) {
+        for (const std::shared_ptr<arrow::DataType>& in_ty : arrow::IntTypes()) {
             ARROW_RETURN_NOT_OK(expr_value_to_timestamp_func->AddKernel({in_ty},  // 输入类型
                     arrow::uint32(),  // 输出类型
                     arrow::compute::internal::GenerateNumeric<ExecExprValueToTimeStamp, arrow::UInt32Type>(*in_ty),
                     InitExprValueCast));
         } 
-        arrow::compute::ScalarKernel k_string_to_timestamp({arrow::large_binary()}, arrow::uint32(), 
+        arrow::compute::ScalarKernel k_binary_to_timestamp({arrow::binary()}, arrow::uint32(), 
+                                                ExecExprValueToTimeStamp<arrow::UInt32Type, arrow::BinaryType>::ExecStringInput, InitExprValueCast);
+        arrow::compute::ScalarKernel k_large_binary_to_timestamp({arrow::large_binary()}, arrow::uint32(), 
                                                 ExecExprValueToTimeStamp<arrow::UInt32Type, arrow::LargeBinaryType>::ExecStringInput, InitExprValueCast);
-        ARROW_RETURN_NOT_OK(expr_value_to_timestamp_func->AddKernel(k_string_to_timestamp));
+        arrow::compute::ScalarKernel k_utf8_to_timestamp({arrow::utf8()}, arrow::uint32(), 
+                                                ExecExprValueToTimeStamp<arrow::UInt32Type, arrow::StringType>::ExecStringInput, InitExprValueCast);
+        arrow::compute::ScalarKernel k_large_utf8_to_timestamp({arrow::large_utf8()}, arrow::uint32(), 
+                                                ExecExprValueToTimeStamp<arrow::UInt32Type, arrow::LargeStringType>::ExecStringInput, InitExprValueCast);
+        ARROW_RETURN_NOT_OK(expr_value_to_timestamp_func->AddKernel(k_binary_to_timestamp));
+        ARROW_RETURN_NOT_OK(expr_value_to_timestamp_func->AddKernel(k_large_binary_to_timestamp));
+        ARROW_RETURN_NOT_OK(expr_value_to_timestamp_func->AddKernel(k_utf8_to_timestamp));
+        ARROW_RETURN_NOT_OK(expr_value_to_timestamp_func->AddKernel(k_large_utf8_to_timestamp));
         ARROW_RETURN_NOT_OK(registry->AddFunction(expr_value_to_timestamp_func));
     }
+
+    /*
+     * string to numberic(兼容如'null','123a'不失败)
+     */
+    {
+        // string cast numeric
+        for (const std::shared_ptr<arrow::DataType>& out_ty : arrow::NumericTypes()) {
+            std::string func_name = "string_cast_" + out_ty->ToString();
+            auto string_cast_numberic_func = std::make_shared<arrow::compute::ScalarFunction>(func_name, arrow::compute::Arity::Unary(),
+                                                    /*doc=*/arrow::compute::FunctionDoc::Empty());
+            ARROW_RETURN_NOT_OK(string_cast_numberic_func->AddKernel({arrow::binary()}, out_ty, 
+                    arrow::compute::internal::GenerateNumeric<ExecStringCastNumberic, arrow::BinaryType>(*out_ty)));
+            ARROW_RETURN_NOT_OK(string_cast_numberic_func->AddKernel({arrow::large_binary()}, out_ty, 
+                    arrow::compute::internal::GenerateNumeric<ExecStringCastNumberic, arrow::LargeBinaryType>(*out_ty)));
+            ARROW_RETURN_NOT_OK(string_cast_numberic_func->AddKernel({arrow::utf8()}, out_ty, 
+                    arrow::compute::internal::GenerateNumeric<ExecStringCastNumberic, arrow::StringType>(*out_ty)));
+            ARROW_RETURN_NOT_OK(string_cast_numberic_func->AddKernel({arrow::large_utf8()}, out_ty, 
+                    arrow::compute::internal::GenerateNumeric<ExecStringCastNumberic, arrow::LargeStringType>(*out_ty)));
+            ARROW_RETURN_NOT_OK(registry->AddFunction(string_cast_numberic_func));
+        }
+        // 特殊处理string cast bool
+        std::string func_name = "string_cast_" + arrow::boolean()->ToString();
+        auto string_cast_bool_func = std::make_shared<arrow::compute::ScalarFunction>(func_name, arrow::compute::Arity::Unary(),
+                                                    /*doc=*/arrow::compute::FunctionDoc::Empty());
+        for (const auto& in_ty : arrow::BaseBinaryTypes()) {
+            arrow::compute::ArrayKernelExec exec = arrow::compute::internal::GenerateVarBinaryBase<arrow::compute::internal::applicator::ScalarUnaryNotNull,
+                                                        arrow::BooleanType, ParseStringToBoolean>(*in_ty);
+            ARROW_RETURN_NOT_OK(string_cast_bool_func->AddKernel({in_ty}, arrow::boolean(), exec));
+        }
+        ARROW_RETURN_NOT_OK(registry->AddFunction(string_cast_bool_func));
+    }
+
     /*
      * murmur_hash
      */
@@ -1357,12 +1568,11 @@ arrow::Status ArrowFunctionManager::RegisterAllInteralFunction() {
     register_object("right_shift", arrow_right_shift);
 
     // 选择
-    if (FLAGS_enable_arrow_complex_func) {
-        register_object("case_when", arrow_case_when);
-        register_object("case_expr_when", arrow_case_expr_when);
-        register_object("if", arrow_if);
-        register_object("ifnull", arrow_if_null);
-    }
+    register_object("case_when", arrow_case_when);
+    register_object("case_expr_when", arrow_case_expr_when);
+    register_object("if", arrow_if);
+    register_object("ifnull", arrow_if_null);
+
     // string
     register_object("concat", arrow_concat);
     register_object("concat_ws", arrow_concat_ws);
@@ -1374,6 +1584,9 @@ arrow::Status ArrowFunctionManager::RegisterAllInteralFunction() {
     register_object("lower", arrow_lower);
     register_object("reverse", arrow_reverse);
     register_object("repeat", arrow_repeat);
+    register_object("substring_index", arrow_substring_index);
+    register_object("replace", arrow_replace);
+    
     // 类型转换
     register_object("cast_to_string", arrow_cast_to_string);
     register_object("cast_to_date", arrow_cast_to_date);
@@ -1406,6 +1619,7 @@ arrow::Status ArrowFunctionManager::RegisterAllInteralFunction() {
     register_object("week", arrow_week);
     register_object("yearweek", arrow_yearweek);
     register_object("timestampdiff", arrow_timestampdiff);
+    register_object("datediff", arrow_datediff);
 
     // 其他
     register_object("murmur_hash", arrow_murmur_hash);

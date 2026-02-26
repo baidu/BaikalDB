@@ -29,12 +29,15 @@ public:
         if (statistics.has_histogram()) {
             init_histogram(statistics.histogram());
             _total_rows = statistics.histogram().total_rows();
+            _is_valid = true;
         }
         if (statistics.has_cmsketch()) {
             init_cmsketch(statistics.cmsketch());
+            _is_valid = true;
         }
         if (statistics.has_hll()) {
-            init_hll(statistics.hll()); 
+            init_hll(statistics.hll());
+            _is_valid = true;
         }
     }
 
@@ -48,6 +51,10 @@ public:
 
     int64_t total_rows() const {
         return _total_rows;
+    }
+
+    bool is_valid() const {
+        return _is_valid;
     }
 
     std::shared_ptr<CMsketchColumn> get_cmsketchcolumn_ptr(int field_id) {
@@ -84,19 +91,21 @@ public:
     }
 
     void histogram_to_string(std::vector<std::vector<std::string>>& rows, std::vector<ResultField>& fields) {
-        if (_field_histogram.size() != fields.size()) {
-            DB_FATAL("use select * from table_name");
-            return;
-        }
-        int i = 0;
-        for (auto iter = _field_histogram.begin(); iter != _field_histogram.end(); iter++) {
+        auto statistics_fields = get_field_names();
+        for (const auto& field : fields) {
+            std::string field_name = field.name;
+            auto field_name_id = statistics_fields.find(field_name);
+            if (field_name_id == statistics_fields.end()) {
+                continue;
+            }
+            auto iter = _field_histogram.find(field_name_id->second);
             std::vector<std::string> row;
-            row.push_back(std::to_string(iter->first));
-            row.push_back(fields[i++].name);
-            row.push_back(std::to_string(iter->second->get_distinct_cnt()));
-            row.push_back(std::to_string(iter->second->get_null_value_cnt()));
-            row.push_back(std::to_string(iter->second->get_bucket_count()));
-            rows.push_back(row);
+            row.emplace_back(std::to_string(field_name_id->second));
+            row.emplace_back(field_name);
+            row.emplace_back(std::to_string(iter->second->get_distinct_cnt()));
+            row.emplace_back(std::to_string(iter->second->get_null_value_cnt()));
+            row.emplace_back(std::to_string(iter->second->get_bucket_count()));
+            rows.emplace_back(row);
         }
     }
 
@@ -132,7 +141,7 @@ public:
 
     //get_histogram_count返-2时说明超出取值范围时，根据need_mapping标记判断是否映射到已存在的范围，默认进行映射
     double get_histogram_ratio(const int field_id, const ExprValue& lower, const ExprValue& upper, bool need_mapping = true) {
-        if (_sample_rows == 0) {
+        if (_sample_rows == 0 || _field_histogram.find(field_id) == _field_histogram.end()) {
             return 1.0;
         }
         
@@ -168,7 +177,7 @@ public:
     }
 
     double get_cmsketch_ratio(const int field_id, const ExprValue& value) {
-        if (_total_rows == 0) {
+        if (_total_rows == 0 || _field_histogram.find(field_id) == _field_histogram.end()) {
             return 1.0;
         }
 
@@ -194,8 +203,9 @@ public:
         return iter->second->get_distinct_cnt();
     }
 
-    bool is_cms_exist() {
-        return !_field_cmsketch.empty();
+    bool is_cms_exist(int field_id) {
+        // return !_field_cmsketch.empty();
+        return _field_histogram.find(field_id) != _field_histogram.end();
     }
 
 private:
@@ -228,11 +238,14 @@ private:
         }
     }
 
+    std::map<std::string, int64_t> get_field_names() const;
+
 private:
     int64_t _table_id = 0;
     int64_t _version = 0;
     int64_t _sample_rows = 0;
     int64_t _total_rows = 0;
+    bool _is_valid = false; // 至少有一种统计数据时为真
     std::map<int, std::shared_ptr<Histogram>> _field_histogram;
     std::map<int, std::shared_ptr<CMsketchColumn>> _field_cmsketch;
     std::map<int, std::shared_ptr<HyperLogLogColumn>> _field_hll;

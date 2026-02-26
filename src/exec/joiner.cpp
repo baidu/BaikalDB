@@ -23,11 +23,12 @@
 #include "logical_planner.h"
 #include "literal.h"
 #include "vectorize_helpper.h"
+#include "condition_optimizer.h"
 
 namespace baikaldb {
 DECLARE_bool(use_arrow_vector);
 DECLARE_int64(row_number_to_check_memory);
-
+DEFINE_bool(join_key_cast_like_mysql, false, "Cast join key like MySQL behavior, default: false");
 int Joiner::init(const pb::PlanNode& node) {
     int ret = 0;
     ret = ExecNode::init(node);
@@ -166,6 +167,7 @@ int Joiner::strip_out_equal_slots() {
     auto iter = _conditions.begin();
     _outer_equal_slot.clear();
     _inner_equal_slot.clear();
+    _equal_slot_cast_types.clear();
     while (iter != _conditions.end()) {
         auto expr = *iter;
         if (expr_is_equal_condition_and_build_slot(expr)) {
@@ -184,10 +186,39 @@ int Joiner::strip_out_equal_slots() {
         _use_hash_map = false;
         DB_WARNING("has not eq");
     }
+    // key cast类型:
+    // mysql: string和数字, string转double; string和时间, string转时间
+    for (auto i = 0; i < _outer_equal_slot.size(); ++i) {
+        auto outer_type = _outer_equal_slot[i]->col_type();
+        auto inner_type = _inner_equal_slot[i]->col_type();
+        if (outer_type == inner_type) {
+            _equal_slot_cast_types.emplace_back(outer_type);
+        } else {
+            if (is_signed(outer_type) && is_signed(inner_type)) {
+                _equal_slot_cast_types.emplace_back(pb::INT64);
+            } else if (is_uint(outer_type) && is_uint(inner_type)) {
+                _equal_slot_cast_types.emplace_back(pb::UINT64);
+            } else if (FLAGS_join_key_cast_like_mysql && is_string(outer_type) && !is_string(inner_type)) {
+                if (is_int(inner_type) || is_double(inner_type)) {
+                     _equal_slot_cast_types.emplace_back(pb::DOUBLE);
+                } else {
+                     _equal_slot_cast_types.emplace_back(inner_type);
+                }
+            } else if (FLAGS_join_key_cast_like_mysql && !is_string(outer_type) && is_string(inner_type)) {
+                if (is_int(outer_type) || is_double(outer_type)) {
+                     _equal_slot_cast_types.emplace_back(pb::DOUBLE);
+                } else {
+                     _equal_slot_cast_types.emplace_back(outer_type);
+                }
+            } else {
+                _equal_slot_cast_types.emplace_back(pb::STRING);
+            }
+        }
+    }
     return 0;
 }
 
-int Joiner::do_plan_router(RuntimeState* state, const std::vector<ExecNode*>& scan_nodes, bool& index_has_null, bool is_explain) {
+int Joiner::do_plan_router(RuntimeState* state, const std::vector<ExecNode*>& scan_nodes, bool& index_has_null, bool is_explain, bool in_acero) {
     QueryContext* ctx = state->ctx();
     if (ctx == nullptr) {
         DB_FATAL("ctx is nullptr");
@@ -195,10 +226,10 @@ int Joiner::do_plan_router(RuntimeState* state, const std::vector<ExecNode*>& sc
     }
     //重新做路由选择
     for (auto& exec_node : scan_nodes) {
-        if (!static_cast<ScanNode*>(exec_node)->is_rocksdb_scan_node()) {
+        ScanNode* scan_node = static_cast<ScanNode*>(exec_node);
+        if (!scan_node->is_rocksdb_scan_node() && !scan_node->is_file_scan_node()) {
             continue;
         }
-        RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(exec_node);
         ExecNode* parent_node_ptr = scan_node->get_parent();
         FilterNode* filter_node = nullptr;
         if (parent_node_ptr->node_type() == pb::WHERE_FILTER_NODE
@@ -252,6 +283,8 @@ int Joiner::do_plan_router(RuntimeState* state, const std::vector<ExecNode*>& sc
             auto region_infos = scan_node->region_infos();
             //更改scan_node对应的fethcer_node的region信息
             related_manager_node->set_region_infos(region_infos);
+            //判断是否有in条件太大可能造成db oom, 这种情况调整计划不下推in条件
+            ConditionOptimizer(ctx).adjust_huge_in_condition(scan_node, in_acero);
         }
     }
     return 0;
@@ -295,7 +328,7 @@ int Joiner::runtime_filter(RuntimeState* state, ExecNode* node, std::vector<Expr
         scan_nodes = not_run_scan_nodes;
     }
     bool index_has_null = false;
-    if (do_plan_router(state, scan_nodes, index_has_null, _is_explain) != 0) {
+    if (do_plan_router(state, scan_nodes, index_has_null, _is_explain, in_acero) != 0) {
         DB_WARNING("Fail to do_plan_router");
         return -1;
     }
@@ -344,7 +377,7 @@ int Joiner::runtime_filter(RuntimeState* state, ExecNode* node, std::vector<Expr
             derived_scan_nodes = not_run_scan_nodes;
         }
         bool index_has_null = false;
-        if (do_plan_router(sub_query_runtime_state, derived_scan_nodes, index_has_null, _is_explain) != 0) {
+        if (do_plan_router(sub_query_runtime_state, derived_scan_nodes, index_has_null, _is_explain, in_acero) != 0) {
             DB_WARNING("Fail to do_plan_router");
             return -1;
         }
@@ -457,6 +490,8 @@ int Joiner::construct_in_condition(RuntimeState* state,
                 if (0 != state->memory_limit_exceeded(check_mem_batch, batch_estimate_size)) {
                     DB_WARNING("memory limit exceeded, logid: %lu, in_values size:%lu, estimate_size:%ld", 
                             state->log_id(), in_values.size(), total_estimate_size);
+                    state->error_code = ER_TOO_BIG_SELECT;
+                    state->error_msg.str("select reach memory limit");
                     ExprNode::destroy_tree(conjunct);
                     return -1;
                 }
@@ -505,6 +540,8 @@ int Joiner::construct_in_condition(RuntimeState* state,
                 if (0 != state->memory_limit_exceeded(check_mem_batch, batch_estimate_size)) {
                     DB_WARNING("memory limit exceeded, logid: %lu, in_values size:%lu, estimate_size:%ld", 
                             state->log_id(), in_values.size(), total_estimate_size);
+                    state->error_code = ER_TOO_BIG_SELECT;
+                    state->error_msg.str("select reach memory limit");
                     ExprNode::destroy_tree(conjunct);
                     return -1;
                 }
@@ -571,11 +608,16 @@ bool Joiner::is_satisfy_filter(MemRow* row) {
 void Joiner::encode_hash_key(MemRow* row, 
                      const std::vector<ExprNode*>& slot_ref_exprs,
                      MutTableKey& key) {
+    int idx = 0;
     for (auto& slot_ref_expr : slot_ref_exprs) {
         ExprValue value = row->get_value(static_cast<SlotRef*>(slot_ref_expr)->tuple_id(), 
                                          static_cast<SlotRef*>(slot_ref_expr)->slot_id());
-        // TODO: 同类型可以不转string
-        key.append_value(value.cast_to(pb::STRING)); 
+        if (idx < _equal_slot_cast_types.size()) {
+            key.append_value(value.cast_to(_equal_slot_cast_types[idx]));
+        } else {
+            key.append_value(value.cast_to(pb::STRING)); 
+        }
+        ++idx;
     }
 }
 
@@ -681,6 +723,7 @@ void Joiner::close(RuntimeState* state) {
     _need_add_index_collector_node = false;
     _index_collector_cond.reset();
     _on_condition_column_map.clear();
+    _equal_slot_cast_types.clear();
 }
 
 int Joiner::show_explain(QueryContext* ctx, std::vector<std::map<std::string, std::string>>& output, int& next_id, int display_id) {

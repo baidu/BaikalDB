@@ -39,6 +39,7 @@ struct ExprValueComparator {
 using ExprValueUniqSet = std::unordered_set<ExprValue, ExprValueHashHasher, ExprValueComparator>;
 
 struct AvgIntermediate {
+    // 只能携带原始类型，否则可能出错
     double sum;
     int64_t count;
     AvgIntermediate() : sum(0.0), count(0) {
@@ -219,6 +220,10 @@ public:
                 std::vector<arrow::compute::Expression>& generate_projection_exprs,
                 std::vector<std::string>& generate_projection_exprs_names);
     int transfer_to_arrow_avg(std::vector<arrow::compute::Aggregate>& aggs, 
+                bool is_merge, 
+                std::vector<arrow::compute::Expression>& generate_projection_exprs,
+                std::vector<std::string>& generate_projection_exprs_names);
+    int transfer_to_arrow_group_concat(std::vector<arrow::compute::Aggregate>& aggs, 
                 bool is_merge, 
                 std::vector<arrow::compute::Expression>& generate_projection_exprs,
                 std::vector<std::string>& generate_projection_exprs_names);

@@ -348,6 +348,8 @@ public:
         DB_WARNING("_multi_thread_cond wait finish");
         _rocksdb->close();
         DB_WARNING("rockdb close, quit success");
+        ParquetFileManager::get_instance()->close();
+        DB_WARNING("parquet file manager close");
     }
     MetaServerInteract& get_meta_server_interact() {
         return _meta_server_interact;
@@ -376,7 +378,7 @@ private:
         bool now_in_interval_period() {
             struct tm ptm;
             time_t timep = time(NULL);
-            localtime_r(&timep, &ptm);
+            localtime_fixed_r(&timep, &ptm);
             int now = ptm.tm_hour;
             // 跨夜
             if (_end_hour < _start_hour) {
@@ -400,7 +402,7 @@ private:
 
     void update_schema_info(const pb::SchemaInfo& table, 
                             std::map<int64_t, std::set<int64_t>>* reverse_index_map,
-                            std::unordered_set<int64_t>* vector_table_set = nullptr);
+                            std::unordered_map<int64_t, std::unordered_map<int64_t, pb::IndexState>>* vector_index_map = nullptr);
 
     //判断分裂在3600S内是否完成，不完成，则自动删除该region
     void check_region_legal_complete(int64_t region_id);

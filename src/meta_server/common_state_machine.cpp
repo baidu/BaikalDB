@@ -198,8 +198,9 @@ void CommonStateMachine::start_check_bns() {
     }
 }
 void CommonStateMachine::on_leader_start() {
-    start_check_bns();
     _is_leader.store(true);
+    start_check_bns();
+
 }
 
 void CommonStateMachine::on_leader_start(int64_t term) {
@@ -241,14 +242,15 @@ void CommonStateMachine::start_check_migrate() {
     while (_node.is_leader()) {
         int time = 0;
         while (time < sleep_time_count) {
-            if (!_node.is_leader()) {
+            if (!_node.is_leader() || !_is_leader.load()) {
                 return;
             }
              bthread_usleep(1000 * 1000LL);
              ++time;
         }
-        SELF_TRACE("start check migrate, count: %ld", count);
-        ++count;
+        if (++count % 10 == 0) {
+            DB_WARNING("start check migrate, region_id: %ld, count: %ld", _dummy_region_id, count);
+        }
         check_migrate();
     }
 }

@@ -54,19 +54,19 @@ DEFINE_bool(fetch_instance_id, false, "fetch baikaldb instace id, used for gener
 DEFINE_string(hostname, "HOSTNAME", "matrix instance name");
 DEFINE_bool(insert_agg_sql, false, "whether insert agg_sql");
 DEFINE_int32(batch_insert_agg_sql_size, 50, "batch size for insert");
-DEFINE_int32(batch_insert_sign_sql_interval_us, 10 * 60 * 1000 * 1000, "batch_insert_sign_sql_interval_us default 10min");
 DEFINE_bool(enable_tcp_keep_alive, false, "enable tcp keepalive flag");
 DECLARE_int32(baikal_heartbeat_interval_us);
 DEFINE_bool(open_to_collect_slow_query_infos, false, "open to collect slow_query_infos, default: false");
 DEFINE_uint64(limit_slow_sql_size, 50, "each sign to slow query sql counts, default: 50");
 DEFINE_int32(slow_query_batch_size, 100, "slow query sql batch size, default: 100");
 DECLARE_bool(auto_update_meta_list);
-DEFINE_string(afs_gc_hostname, "", "afs_gc_hostname");
+DEFINE_string(afs_gc_hostname, "", "AFS garbage collection hostname, default: empty");
 DECLARE_string(baikal_resource_tag);
 DEFINE_bool(dump_slow_sqls, false, "whether dump slow sqls");
 DEFINE_bool(auto_kill_timeout_query, false, "auto kill timeout query");
 DEFINE_uint64(load_mpp_sign_interval_min, 0, "load mpp sign interval min, default: 0, disable load mpp sign");
 DECLARE_string(baikal_resource_tag);
+DECLARE_string(log_plat_name);
 
 static const std::string instance_table_name = "INTERNAL.baikaldb.__baikaldb_instance";
 
@@ -555,10 +555,12 @@ void NetworkServer::print_agg_sql() {
     static std::map<uint64_t, std::set<std::uint64_t>> parent_sign_to_subquery_signs;
     static std::set<uint64_t> sign_to_counts;
     static std::set<uint64_t> parent_sign_to_counts;
+    static std::unordered_map<uint64_t, std::string> special_signs;
     TimeCost cost;
     TimeCost reset_counter_cost;
     TimeCost degrade_cost;
     TimeCost load_mpp_signs_time;
+    TimeCost handle_special_sings_time;
     while (!_shutdown) {
         bool need_reset_counter = false;
         if (reset_counter_cost.get_time() > 24 * 3600 * 1000 * 1000LL) {
@@ -599,7 +601,7 @@ void NetworkServer::print_agg_sql() {
         time_t timep;
         struct tm tm;
         time(&timep);
-        localtime_r(&timep, &tm);
+        localtime_fixed_r(&timep, &tm);
 
         struct CountErr {
             int64_t count = 0;
@@ -620,6 +622,42 @@ void NetworkServer::print_agg_sql() {
         std::string sql_values;
         if (FLAGS_insert_agg_sql) {
             sql_values.reserve(4096);
+        }
+
+        if (handle_special_sings_time.get_time() > 600 * 1000 * 1000ULL) {
+            handle_special_sings_time.reset();
+            auto func = [](const SmartTable& table) -> bool {
+                for (auto sign : table->sign_blacklist) {
+                    special_signs.insert({sign, ""});
+                }
+                for (auto sign : table->sign_forcelearner) {
+                    special_signs.insert({sign, ""});
+                } 
+                for (auto sign : table->sign_rolling) {
+                    special_signs.insert({sign, ""});
+                }
+                for (auto& sign_index : table->sign_forceindex) {
+                    std::vector<std::string> vec;
+                    boost::split(vec, sign_index, boost::is_any_of(":"));
+                    if (vec.size() != 2) {
+                        continue;
+                    }
+                    uint64_t sign_num = strtoull(vec[0].c_str(), nullptr, 10);
+                    special_signs.insert({sign_num, ""});
+                }
+                for (auto& sign_index : table->sign_exec_type) {
+                    std::vector<std::string> vec;
+                    boost::split(vec, sign_index, boost::is_any_of(":"));
+                    if (vec.size() != 2) {
+                        continue;
+                    }
+                    uint64_t sign_num = strtoull(vec[0].c_str(), nullptr, 10);
+                    special_signs.insert({sign_num, ""});
+                }
+                return false;
+            };
+            std::vector<std::string> database_table;
+            factory->get_table_by_filter(database_table, func);
         }
 
         for (auto& pair : sample.internal_map) {
@@ -725,6 +763,15 @@ void NetworkServer::print_agg_sql() {
                     std::string plat = sql_agg.substr(pos, sql_agg.find_first_of(']', pos) - pos);
                     pos = sql_agg.find_first_of('[') + 1;
                     std::string sql_text = sql_agg.substr(pos, sql_agg.find_first_of(']', pos) - pos);
+                    resource_tag = pair2.second.resource_tag;
+
+                    if (special_signs.count(out_sign) > 0) {
+                        std::string sample_sql_without_sign = "family_table_tag_optype_plat=[" + family + "\t"
+                            + tbl + "\t" + "" + "\t" + op_type + "\t"
+                            + FLAGS_log_plat_name + "] sql=[" + sql_text + "]";
+                        special_signs[out_sign] = sample_sql_without_sign;
+                    }
+                    
                     sql_text = boost::replace_all_copy(sql_text, "'", "\\'");
                     // 避免REPLACE INTO的执行发生递归
                     if (family == "BaikalStat" && tbl == "baikaldb_trace_info" &&
@@ -791,6 +838,7 @@ void NetworkServer::print_agg_sql() {
                 DB_WARNING("insert agg_sql_by_sign: %s failed", sql_values.c_str());
             }
         }
+        SchemaFactory::get_instance()->set_special_signs(special_signs);
         for (auto& pair : table_count_err) {
             // 10s pv>50 出错率>0.5则读路由去备库
             if (pair.second.count > FLAGS_backup_pv_threshold && 
@@ -1337,8 +1385,8 @@ void NetworkServer::process_slow_query_map() {
             struct tm local_end_time;
             time_t start_time = slow_query_info.start_time;
             time_t end_time = slow_query_info.end_time;
-            localtime_r(&start_time, &local_start_time);
-            localtime_r(&end_time, &local_end_time);
+            localtime_fixed_r(&start_time, &local_start_time);
+            localtime_fixed_r(&end_time, &local_end_time);
             //localtime => format("%Y-%m-%d %H:%M:%S")
             char start_time_str[40], end_time_str[40];
             snprintf(start_time_str, 40, "%04d-%02d-%02d %02d:%02d:%02d:%03d",
@@ -1744,7 +1792,7 @@ int NetworkServer::make_worker_process() {
     }
 
     _conn_bvars_update_bth.run([this](){client_conn_bvars_update();});
-#ifdef BAIDU_INTERNAL
+#if defined(BAIDU_INTERNAL)
     _ext_fs_gc_bth.run([this]() {
         while (!_shutdown) {
             if (FLAGS_afs_gc_hostname == FLAGS_hostname) {
@@ -1984,6 +2032,10 @@ void NetworkServer::client_conn_bvars_update() {
         int32_t client_cnt = 0;
         int32_t max_running_time = 0;
         EpollInfo* epoll_info = NetworkServer::get_instance()->get_epoll_info();
+        if (epoll_info == NULL) {
+            DB_WARNING("epoll_info not initialized yet.");
+            continue;
+        }
         for (int32_t idx = 0; idx < CONFIG_MPL_EPOLL_MAX_SIZE; ++idx) {
             const SmartSocket& sock = epoll_info->get_fd_mapping(idx);
             if (sock == NULL || sock->is_free || sock->fd == -1 || sock->ip == "") {

@@ -518,7 +518,9 @@ int ExecNode::push_cmd_to_cache(RuntimeState* state,
 bool ExecNode::shrink_partition_property(std::shared_ptr<HashPartitionColumns> my_hash_columns, NodePartitionProperty* child_partition_property) {
     bool is_same_or_shrinked = false;
     for (auto& child_hash_partition : child_partition_property->hash_partition_propertys) {
-        if (my_hash_columns->hash_partition_is_contain(child_hash_partition.get())) {
+        if (child_partition_property->type == pb::HashPartitionType
+                && child_hash_partition->type == pb::HashPartitionType
+                && my_hash_columns->hash_partition_is_contain(child_hash_partition.get())) {
             is_same_or_shrinked = true;
             for (auto iter = my_hash_columns->hash_columns.begin(); iter != my_hash_columns->hash_columns.end();) {
                 if (child_hash_partition->hash_columns.count(iter->first) == 0) {
@@ -527,16 +529,27 @@ bool ExecNode::shrink_partition_property(std::shared_ptr<HashPartitionColumns> m
                     ++iter;
                 }
             }
-            for (auto order_iter = my_hash_columns->ordered_hash_columns.begin(); order_iter != my_hash_columns->ordered_hash_columns.end();) {
-                if (my_hash_columns->hash_columns.count(*order_iter) == 0) {
-                    order_iter = my_hash_columns->ordered_hash_columns.erase(order_iter);
-                } else {
-                    ++order_iter;
-                }
-            }
+            // 按照child hash列顺序调整
+            // 比如 my: b, a, child: a, b
+            // 调整my hash partition分区: a, b. arrow hash值计算和列顺序有关
+            my_hash_columns->ordered_hash_columns = child_hash_partition->ordered_hash_columns;
         }
     }
     return is_same_or_shrinked;
+}
+
+void ExecNode::set_child_node_property_any_type() {
+    _partition_property.set_any_partition();
+    if (_node_type == pb::DUAL_SCAN_NODE) {
+        DualScanNode* dual_scan_node = static_cast<DualScanNode*>(this);
+        ExecNode* sub_query_node = dual_scan_node->sub_query_node();
+        if (sub_query_node != nullptr) {
+            sub_query_node->set_child_node_property_any_type();
+        }
+    }
+    for (auto c : _children) {
+        c->set_child_node_property_any_type();
+    }
 }
 
 void ExecNode::encode_exprs_key(std::vector<ExprNode*>& exprs, MemRow* row, MutTableKey& key) {

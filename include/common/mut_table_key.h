@@ -37,6 +37,23 @@ public:
         _full(full),
         _data(key.data(), key.size()) { }
 
+    MutTableKey(MutTableKey&& key) noexcept :
+        _full(key.get_full()),
+        _data(std::move(key._data)) {}
+
+    MutTableKey(const MutTableKey& key) :
+        _full(key.get_full()),
+        _data(key._data) {}
+
+    MutTableKey& operator=(const MutTableKey& key) {
+        if (this == &key) {
+            return *this;
+        }
+        _full = key.get_full();
+        _data = key._data;
+        return *this;
+    }
+
     MutTableKey(const TableKey& key);
 
     MutTableKey& append_i8(int8_t val) {

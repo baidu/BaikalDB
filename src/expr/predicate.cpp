@@ -594,8 +594,14 @@ int LikePredicate::transfer_to_arrow_expression() {
     } else {
         args.emplace_back(arrow::compute::call("cast", {_children[0]->arrow_expr()}, arrow::compute::CastOptions::Unsafe(arrow::large_binary()))); 
     }
-    arrow::compute::MatchSubstringOptions opt(children(1)->get_value(nullptr).get_string(), /*ignore_case*/false);
-    _arrow_expr = arrow::compute::call("match_like", args, std::move(opt));
+    if (_fn.fn_op() == parser::FT_EXACT_LIKE) {
+        covent_exact_pattern(children(1)->get_value(nullptr).get_string());
+        arrow::compute::MatchSubstringOptions opt(_regex_pattern, /*ignore_case*/false);
+        _arrow_expr = arrow::compute::call("match_substring_regex", args, std::move(opt));
+    } else {
+        arrow::compute::MatchSubstringOptions opt(children(1)->get_value(nullptr).get_string(), /*ignore_case*/false);
+        _arrow_expr = arrow::compute::call("match_like", args, std::move(opt));
+    }
     return 0;
 }
 

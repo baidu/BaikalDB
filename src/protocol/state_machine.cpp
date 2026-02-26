@@ -383,7 +383,8 @@ void StateMachine::_print_query_time(SmartSocket client) {
             sql_agg_cost << BvarMap(stat_info->sample_sql.str(), index_id, stat_info->table_id,
                     stat_info->total_time, err_count * stat_info->total_time, rows, stat_info->num_scan_rows, stat_info->read_disk_size,
                     stat_info->num_filter_rows, stat_info->region_count,
-                    field_range_type, err_count, stat_info->sign, subquery_signs);
+                    field_range_type, err_count, stat_info->sign, subquery_signs,
+                    stat_info->resource_tag);
         }
 
         if (op_type == pb::OP_SELECT || op_type == pb::OP_UNION) {
@@ -1299,6 +1300,11 @@ int StateMachine::_get_json_attributes(std::shared_ptr<QueryContext> ctx) {
                 ctx->no_binlog = json_iter->value.GetBool();
                 DB_WARNING("no_binlog: %d", ctx->no_binlog);
             }
+            json_iter = root.FindMember("disable_on_update");
+            if (json_iter != root.MemberEnd() && root["disable_on_update"].IsBool()) {
+                ctx->disable_on_update = json_iter->value.GetBool();
+                DB_WARNING("disable_on_update: %d", ctx->disable_on_update);
+            }
             json_iter = root.FindMember("mpp");
             if (json_iter != root.MemberEnd() && root["mpp"].IsBool()) {
                 ctx->use_mpp = json_iter->value.GetBool();
@@ -1312,6 +1318,11 @@ int StateMachine::_get_json_attributes(std::shared_ptr<QueryContext> ctx) {
             if (json_iter != root.MemberEnd()) {
                 ctx->efsearch = json_iter->value.GetInt();
                 DB_WARNING("efsearch: %d", ctx->efsearch);
+            }
+            json_iter = root.FindMember("nprobe");
+            if (json_iter != root.MemberEnd()) {
+                ctx->nprobe = json_iter->value.GetInt();
+                DB_WARNING("nprobe: %d", ctx->nprobe);
             }
         } catch (...) {
             DB_WARNING("parse extra file error [%s]", json_str.c_str());

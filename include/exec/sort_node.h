@@ -93,7 +93,9 @@ public:
     std::vector<ExprNode*>& slot_order_exprs() {
         return _slot_order_exprs;
     }
-
+    void clear_slot_order_exprs() {
+        _slot_order_exprs.clear();
+    }
     std::vector<ExprNode*>* mutable_order_exprs() {
         return &_order_exprs;
     }
@@ -104,7 +106,7 @@ public:
     bool is_monotonic() {
         return _monotonic;
     }
-
+    bool need_projection();
     virtual int show_explain(QueryContext* ctx, std::vector<std::map<std::string, std::string>>& output, int& next_id, int display_id) {
         int return_id = ExecNode::show_explain(ctx, output, next_id, display_id);
         if (output.empty()) {

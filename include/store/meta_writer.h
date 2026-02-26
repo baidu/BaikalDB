@@ -49,6 +49,7 @@ public:
     static const std::string COLUMN_HOT_FILE_INDENTIFY;
     static const std::string COLUMN_COLD_FILE_INDENTIFY;
     static const std::string BINLOG_DATA_CF_OLDEST_IDENTIFY;
+    static const std::string COLUMN_TXN_LOG_INDEX_IDENTIFY;
 
     virtual ~MetaWriter() {}
    
@@ -71,7 +72,10 @@ public:
     int write_batch(rocksdb::WriteBatch* updates, int64_t region_id);
     int write_meta_after_commit(int64_t region_id, int64_t num_table_lines,
                                 int64_t applied_index, int64_t data_index, uint64_t txn_id, bool need_write_rollback);
-    int write_meta_begin_index(int64_t region_id, int64_t log_index, int64_t data_index, uint64_t txn_id);
+    int delete_column_txn_log_index(int64_t region_id, std::vector<uint64_t> txn_ids);
+    int64_t read_meta_begin_index(int64_t region_id, uint64_t txn_id);
+    int write_meta_begin_index(int64_t region_id, int64_t log_index, int64_t data_index, 
+        uint64_t txn_id, bool has_column_engine = false);
     int write_meta_index_and_num_table_lines(int64_t region_id, int64_t log_index, int64_t data_index,
                         int64_t num_table_lines, SmartTransaction txn);
     int ingest_meta_sst(const std::string& meta_sst_file, int64_t region_id);
@@ -138,6 +142,7 @@ public:
     std::string num_table_lines_key(int64_t region_id) const;
     std::string transcation_log_index_key(int64_t region_id, uint64_t txn_id) const;
     std::string log_index_key_prefix(int64_t region_id) const;
+    std::string column_txn_log_index_key(int64_t region_id, uint64_t txn_id) const;
     std::string transcation_pb_key(int64_t region_id, uint64_t txn_id, int64_t log_index) const;
     std::string transcation_pb_key_prefix(int64_t region_id) const;
     std::string pre_commit_key_prefix(int64_t region_id) const;

@@ -156,7 +156,7 @@ public:
     void set_table_info(SmartTable& table_info) {
         _table_info = table_info;
     }
-    virtual int create_executor(const std::string& search_data, 
+    virtual int create_executor(myrocksdb::Transaction* txn, const std::string& search_data,
             pb::MatchMode mode, pb::SegmentType segment_type, const pb::Charset& charset) = 0;
     virtual int next(SmartRecord record) = 0;
 
@@ -310,6 +310,14 @@ public:
         }
 
         return schema_info->schema->get_query_words();
+    }
+
+    int64_t get_region_id() const {
+        return _region_id;
+    }
+
+    int64_t get_index_id() const {
+        return _index_id;
     }
 private:
     struct BthreadLocal {

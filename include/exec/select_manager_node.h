@@ -58,7 +58,8 @@ public:
     virtual int get_next(RuntimeState* state, RowBatch* batch, bool* eos);
     virtual void close(RuntimeState* state) {
         ExecNode::close(state);
-        if (_pb_node.derive_node().select_manager_node().slot_order_exprs_size() > 0) {
+        if (_pb_node.derive_node().select_manager_node().slot_order_exprs_size() > 0
+            || _steal_slot_order_exprs) {
             for (auto& expr : _slot_order_exprs) {
                 ExprNode::destroy_tree(expr);
             }
@@ -76,6 +77,10 @@ public:
         _is_asc = sort_node->is_asc();
         _is_null_first = sort_node->is_null_first();
         return 0;
+    }
+    void steal_slot_order_exprs(SortNode* sort_node) {
+        sort_node->clear_slot_order_exprs();
+        _steal_slot_order_exprs = true;
     }
     int single_fetcher_store_open(FetcherInfo* fetcher, RuntimeState* state, ExecNode* exec_node);
 
@@ -106,6 +111,8 @@ public:
                       int64_t main_table_id,
                       SmartIndex pri_info,
                       LimitNode* limit);
+
+    int dblink_scan_run(RuntimeState* state, ExecNode* exec_node);
 
     int subquery_open(RuntimeState* state);
 
@@ -141,14 +148,33 @@ public:
         ExecNode* dual_scan = get_node(pb::DUAL_SCAN_NODE);
         return (dual_scan != nullptr);
     }
-    bool is_mysql_scan() {
+    bool is_dblink_scan() {
         ExecNode* scan = get_node(pb::SCAN_NODE);
         if (scan == nullptr) {
             return false;
         }
-        return static_cast<ScanNode*>(scan)->is_mysql_scan_node();
+        return static_cast<ScanNode*>(scan)->is_file_scan_node() || 
+                    static_cast<ScanNode*>(scan)->is_mysql_scan_node();
+    }
+    void set_db_request_map(const std::map<std::string, pb::DAGFragmentRequest>& db_request_map) {
+        _db_request_map = db_request_map;
     }
 
+    void add_conditions(std::vector<ExprNode*>& conditions) {
+        _conditions.insert(_conditions.end(), conditions.begin(), conditions.end());
+    }
+    std::vector<bool>& is_asc() {
+        return _is_asc;
+    }
+    std::vector<bool>& is_null_first() {
+        return _is_null_first;
+    }
+    std::vector<ExprNode*>& slot_order_exprs() {
+        return _slot_order_exprs;
+    }
+    std::vector<ExprNode*>& conditions() {
+        return _conditions;
+    }
 private:
     //允许fetcher回来后排序
     std::vector<ExprNode*> _slot_order_exprs;
@@ -158,6 +184,8 @@ private:
     std::shared_ptr<Sorter> _sorter;
     SchemaFactory*  _factory = nullptr;
     int32_t         _scan_tuple_id = 0;
+    std::vector<ExprNode*> _conditions;
+    bool _steal_slot_order_exprs = false;
 
     // vectorized
     std::vector<std::shared_ptr<pb::StoreRes>> _arrow_responses;
@@ -166,9 +194,13 @@ private:
     std::vector<RegionReturnData>  _region_batches;
     std::shared_ptr<BthreadArrowExecutor> _arrow_io_executor;
     std::shared_ptr<IndexCollectorCond> _index_collector_cond;
+    arrow::compute::Expression _vectorize_conditions;
 
     // mpp
     bool _has_er_child = false;
+
+    // <db instance, pb::DAGFragmentRequest>
+    std::map<std::string, pb::DAGFragmentRequest> _db_request_map;
 };
 
 class FetcherStoreVectorizedReader : public arrow::RecordBatchReader {
@@ -182,6 +214,8 @@ public:
     }
 
     int init(SelectManagerNode* select_node, RuntimeState* state);
+
+    void init_tuple(SelectManagerNode* select_node, RuntimeState* state);
     
     arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* out) override;
 

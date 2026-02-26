@@ -16,6 +16,8 @@
 #include <unordered_map>
 #include "hll_common.h"
 #include "slot_ref.h"
+#include "row_expr.h"
+#include "arrow_function.h"
 #include <arrow/compute/cast.h>
 
 namespace baikaldb {
@@ -1260,11 +1262,17 @@ bool AggFnCall::can_use_arrow_vector() {
         case MAX: 
         case MULTI_COUNT_DISTINCT:
         case AVG: 
+        case GROUP_CONCAT:
             break;
         default:
             return false;
     }
-    if (_children.size() != 1) {
+    if (_agg_type == GROUP_CONCAT) {
+        if (_children.size() > 2) {
+            // 暂不支持orderby
+            return false;
+        }
+    } else if (_children.size() != 1) {
         return false; // count(distinct fieldA, filedB) not supported.
     }
     if (_agg_type == AVG && _children[0]->is_literal()) {
@@ -1273,7 +1281,12 @@ bool AggFnCall::can_use_arrow_vector() {
         }
     }
     for (auto& c : _children) {
-        if (!c->can_use_arrow_vector()) {
+        if (_agg_type == GROUP_CONCAT && c->node_type() == pb::ROW_EXPR) {
+            RowExpr* expr = static_cast<RowExpr*>(c);
+            if (!expr->children_can_use_arrow_vector()) {
+                return false;
+            }
+        } else if (!c->can_use_arrow_vector()) {
             return false;
         }
     }
@@ -1338,9 +1351,7 @@ int AggFnCall::build_agg_argument(int i,
                 &&  (_children[i]->is_slot_ref()
                     || (_children[i]->col_type() == pb::STRING)
                     || (_children[i]->arrow_expr().type() != nullptr && arrow::is_base_binary_like(_children[i]->arrow_expr().type()->id())))) {
-            generate_projection_exprs.emplace_back(arrow::compute::call("cast", 
-                                                        {_children[i]->arrow_expr()}, 
-                                                        arrow::compute::CastOptions::Unsafe(arrow::float64())));
+            generate_projection_exprs.emplace_back(arrow_cast(_children[i]->arrow_expr(), _children[i]->col_type(), pb::DOUBLE));
         } else {
             generate_projection_exprs.emplace_back(_children[i]->arrow_expr());
         }
@@ -1380,12 +1391,80 @@ int AggFnCall::transfer_to_arrow_avg(std::vector<arrow::compute::Aggregate>& agg
     return 0;
 }
 
-int AggFnCall::transfer_to_arrow_agg_function(std::vector<arrow::compute::Aggregate>& aggs, 
+int AggFnCall::transfer_to_arrow_group_concat(std::vector<arrow::compute::Aggregate>& aggs,
+                                              bool is_merge,
+                                              std::vector<arrow::compute::Expression>& generate_projection_exprs,
+                                              std::vector<std::string>& generate_projection_exprs_names) {
+    std::string intermediate_slot = std::to_string(_tuple_id) + "_" + std::to_string(_intermediate_slot_id);
+    std::string final_slot = std::to_string(_tuple_id) + "_" + std::to_string(_final_slot_id);
+    std::vector<arrow::FieldRef> args;
+    std::shared_ptr<GroupConcatOptions> opt = std::make_shared<GroupConcatOptions>(_sep);
+    if (is_merge && !_is_distinct) {
+        args.emplace_back(arrow::FieldRef(intermediate_slot));
+        aggs.emplace_back("group_concat_intermediate", opt, args, final_slot);
+        if (intermediate_slot != final_slot) {
+            // agg下推需要保留intermediate_slot列
+            aggs.emplace_back("group_concat_intermediate", opt, args, intermediate_slot);
+        }
+    } else {
+        if (_children.size() == 0) {
+            DB_FATAL("group_concat must have at least one child");
+            return -1;
+        }
+        ExprNode* first_row_expr = _children[0];
+        std::vector<ExprNode*> first_row_expr_children = first_row_expr->children();
+        for (auto& c : first_row_expr_children) {
+            if (0 != build_arrow_expr_with_cast(c, pb::STRING)) {
+                return -1;
+            }
+        }
+        if (first_row_expr_children.size() == 1 
+                && first_row_expr_children[0]->is_slot_ref()) {
+            if (first_row_expr_children[0]->col_type() == pb::STRING) {
+                args.emplace_back(*(first_row_expr_children[0]->arrow_expr().field_ref()));
+            } else {
+                // cast string临时列
+                generate_projection_exprs.emplace_back(first_row_expr_children[0]->arrow_expr());
+                std::string tmp_name = "tmp_" + std::to_string(generate_projection_exprs.size());
+                generate_projection_exprs_names.emplace_back(tmp_name);
+                args.emplace_back(arrow::FieldRef(tmp_name));
+            }
+        } else {
+            // 先concat映射
+            std::vector<arrow::compute::Expression> concat_args;
+            concat_args.reserve(first_row_expr_children.size());
+            for (auto& c : first_row_expr_children) {
+                concat_args.emplace_back(c->arrow_expr());
+            }
+            // 连接符放在最后
+            concat_args.emplace_back(arrow::compute::literal(std::make_shared<arrow::LargeBinaryScalar>("")));
+            std::shared_ptr<arrow::compute::JoinOptions> option = std::make_shared<arrow::compute::JoinOptions>();
+            option->null_handling = arrow::compute::JoinOptions::NullHandlingBehavior::SKIP;
+            arrow::compute::Expression concat_expr = arrow::compute::call("binary_join_element_wise", concat_args, option);
+
+            generate_projection_exprs.emplace_back(concat_expr);
+            std::string tmp_name = "tmp_" + std::to_string(generate_projection_exprs.size());
+            generate_projection_exprs_names.emplace_back(tmp_name);
+            args.emplace_back(arrow::FieldRef(tmp_name));
+        }
+        aggs.emplace_back("group_concat_intermediate", opt, args, final_slot);
+        if (intermediate_slot != final_slot) {
+            // agg下推需要保留intermediate_slot列
+            aggs.emplace_back("group_concat_intermediate", opt, args, intermediate_slot);
+        }
+    }
+    return 0;
+}
+
+int AggFnCall::transfer_to_arrow_agg_function(std::vector<arrow::compute::Aggregate>& aggs,
                                               bool is_merge, 
                                               std::vector<arrow::compute::Expression>& generate_projection_exprs,
                                               std::vector<std::string>& generate_projection_exprs_names) {
     if (_agg_type == AVG) {
         return transfer_to_arrow_avg(aggs, is_merge, generate_projection_exprs, generate_projection_exprs_names);
+    }
+    if (_agg_type == GROUP_CONCAT) {
+        return transfer_to_arrow_group_concat(aggs, is_merge, generate_projection_exprs, generate_projection_exprs_names);
     }
     // arrow里有没有group by用的两套算子, 有group by算子需要加前缀hash_
     std::string func_name = "hash_";

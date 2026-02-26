@@ -11,6 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+#include "file_system.h"
+#include "file_scan_node.h"
 #include "index_selector.h"
 #include "slot_ref.h"
 #include "scalar_fn_call.h"
@@ -20,7 +22,7 @@
 #include "parser.h"
 
 namespace baikaldb {
-DEFINE_bool(use_column_storage, false, "whether use column storage");
+DECLARE_int32(file_scan_concurrency);
 using namespace range;
 
 DEFINE_bool(use_index_merge, false, "if use index merge in index select");
@@ -67,7 +69,8 @@ int IndexSelector::analyze(QueryContext* ctx) {
         sort_node->set_limit(limit_node->other_limit());
     }
     for (auto& scan_node_ptr : scan_nodes) {
-        if (!static_cast<ScanNode*>(scan_node_ptr)->is_rocksdb_scan_node()) {
+        ScanNode* scan_node = static_cast<ScanNode*>(scan_node_ptr);
+        if (!scan_node->is_rocksdb_scan_node() && !scan_node->is_file_scan_node()) {
             continue;
         }
         ExecNode* parent_node_ptr = scan_node_ptr->get_parent();
@@ -83,11 +86,12 @@ int IndexSelector::analyze(QueryContext* ctx) {
         int ret = 0;
         std::map<int32_t, int> field_range_type;
         bool index_has_null = false;
+        
         if (join_node != NULL || agg_node != NULL) {
             IndexSelectorOptions options;
             options.execute_type = ctx->runtime_state == nullptr ? pb::EXEC_ROW : ctx->runtime_state->execute_type;
             ret = index_selector(ctx->tuple_descs(),
-                            static_cast<ScanNode*>(scan_node_ptr), 
+                            scan_node, 
                             filter_node, 
                             NULL,
                             join_node,
@@ -102,7 +106,7 @@ int IndexSelector::analyze(QueryContext* ctx) {
             IndexSelectorOptions options;
             options.execute_type = ctx->runtime_state == nullptr ? pb::EXEC_ROW : ctx->runtime_state->execute_type;
             ret = index_selector(ctx->tuple_descs(),
-                           static_cast<ScanNode*>(scan_node_ptr), 
+                           scan_node, 
                            filter_node, 
                            sort_node,
                            join_node,
@@ -157,7 +161,7 @@ void IndexSelector::analyze_join_index(QueryContext* ctx, ScanNode* scan_node, E
     }
     _ctx = ctx;
     // 和joiner真正下推in一样的逻辑
-    if (!scan_node->is_rocksdb_scan_node()) {
+    if (!scan_node->is_rocksdb_scan_node() && !scan_node->is_file_scan_node()) {
         return;
     }
     ExecNode* parent_node_ptr = scan_node->get_parent();
@@ -183,6 +187,7 @@ void IndexSelector::analyze_join_index(QueryContext* ctx, ScanNode* scan_node, E
     IndexSelectorOptions options;
     options.join_on_conditions = in_condition;
     options.execute_type = ctx->runtime_state == nullptr ? pb::EXEC_ROW : ctx->runtime_state->execute_type;
+    
     index_selector(ctx->tuple_descs(),
                     scan_node, 
                     filter_node,
@@ -406,7 +411,7 @@ void IndexSelector::hit_field_or_like_range(ExprNode* expr, std::map<int32_t, Fi
     {
         // or 只能全部是倒排索引才能选择。
         // 倒排索引 or 普通索引时，不选择倒排索引（针对该 expr，不排除其他 expr 选择该倒排索引）。
-        auto table_info_ptr = _factory->get_table_info_ptr(table_id);
+        auto table_info_ptr = SchemaFactory::get_instance()->get_table_info_ptr(table_id);
         if (table_info_ptr == nullptr) {
             return;
         }
@@ -549,7 +554,7 @@ void IndexSelector::hit_field_range(ExprNode* expr,
     }
     RangeType tmp_type;
 
-    auto try_add_into_fulltext = [this, field_id](FulltextInfoNode* index_node, range::FieldRange&& range, int64_t index_id) {
+    auto try_add_into_fulltext = [field_id](FulltextInfoNode* index_node, range::FieldRange&& range, int64_t index_id) {
         if (index_node != nullptr && index_id > 0) {
             auto& inner_node = boost::get<FulltextInfoNode::FulltextChildType>(index_node->info);
             inner_node.children.emplace_back(new FulltextInfoNode);
@@ -732,6 +737,10 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
                                     std::map<int32_t, int>& field_range_type,
                                     const std::string& sample_sql,
                                     const IndexSelectorOptions& options) {
+    if (scan_node == nullptr) {
+        DB_WARNING("scan_node is nullptr ");
+        return -1;
+    }
     int64_t table_id = scan_node->table_id();
     int32_t tuple_id = scan_node->tuple_id();
     auto table_info = _factory->get_table_info_ptr(table_id);
@@ -739,11 +748,19 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
         DB_WARNING("table info not found:%ld", table_id);
         return -1;
     }
+    if (scan_node->is_file_scan_node()) {
+        TimeCost tm;
+        if (select_partition_files(table_info, scan_node, filter_node, options.join_on_conditions) != 0) {
+            DB_WARNING("Fail to select_partition_files, table_id: %ld", table_id);
+            return -1;
+        }
+        DB_WARNING("select_partition_files tm: %ld", tm.get_time());
+        return 0;
+    }
 
     bool can_use_column_storage = false;
-    if (FLAGS_use_column_storage && options.execute_type == pb::EXEC_ARROW_ACERO && table_info->schema_conf.use_column_storage()) {
+    if (options.execute_type == pb::EXEC_ARROW_ACERO && table_info->schema_conf.use_column_storage()) {
         // db侧判断是否使用列存:
-        //     1. FLAGS_use_column_storage是否为true
         //     2. 是否走列式执行
         //     3. 表是否支持列存
         // store侧判断是否使用列存:
@@ -916,6 +933,9 @@ int64_t IndexSelector::index_selector(const std::vector<pb::TupleDescriptor>& tu
         }
         if (_ctx != nullptr && _ctx->efsearch != -1) {
             sort_property.efsearch = _ctx->efsearch;
+        }
+        if (_ctx != nullptr && _ctx->nprobe != -1) {
+            sort_property.nprobe = _ctx->nprobe;
         }
         access_path->calc_index_match(sort_property);
 
@@ -1099,6 +1119,257 @@ int IndexSelector::select_partition(SmartTable& table_info, ScanNode* scan_node,
             }
             scan_node->replace_partition(partition_ids, false);
         }
+    }
+    return 0;
+}
+
+int IndexSelector::select_partition_files(
+        SmartTable& table_info, ScanNode* scan_node, FilterNode* filter_node, ExprNode* join_on_conditions) {
+    if (table_info == nullptr) {
+        DB_WARNING("table_info is nullptr");
+        return -1;
+    }
+    FileScanNode* file_scan_node = static_cast<FileScanNode*>(scan_node);
+    if (file_scan_node == nullptr) {
+        DB_WARNING("file_scan_node is nullptr");
+        return -1;
+    }
+    const pb::FileInfo& pb_file_info = table_info->dblink_info.file_info();
+    std::shared_ptr<FileSystem> fs = create_filesystem(pb_file_info.cluster(), 
+                                                       pb_file_info.username(), 
+                                                       pb_file_info.password(), 
+                                                       AFS_CLIENT_CONF_PATH);
+    ScopeGuard guard([&fs] () {
+        destroy_filesystem(fs);
+    });
+    if (fs == nullptr) {
+        DB_WARNING("Fail to create_filesystem, %s", pb_file_info.ShortDebugString().c_str());
+        return -1;
+    }
+    std::vector<pb::PartitionFile> partition_files;
+    partition_files.reserve(100);
+    const std::string& table_file_path = pb_file_info.path();
+    FileInfo file_info;
+    int ret = fs->get_file_info(table_file_path, file_info, nullptr);
+    if (ret < 0) {
+        DB_WARNING("Fail to get_file_info, path: %s", table_file_path.c_str());
+        return -1;
+    }
+    // 非分区表
+    //  - 如果file_info path是文件，则选择该文件；
+    //  - 如果file_info path是目录，则选择该目录下的文件集合（不递归子目录）；
+    if (pb_file_info.partition_fields().empty()) {
+        if (file_info.mode == FileMode::I_FILE) {
+            pb::PartitionFile partition_file;
+            partition_file.set_file_path(table_file_path);
+            partition_files.emplace_back(partition_file);
+        } else if (file_info.mode == FileMode::I_DIR) {
+            std::vector<std::string> file_paths;
+            ret = ReadDirImpl::get_all_files(fs.get(), table_file_path, file_paths);
+            if (ret < 0) {
+                DB_WARNING("Fail to get_all_files");
+                return -1;
+            }
+            for (const auto& file_path : file_paths) {
+                pb::PartitionFile partition_file;
+                partition_file.set_file_path(table_file_path + "/" + file_path);
+                partition_files.emplace_back(partition_file);
+            }
+        } else {
+            DB_WARNING("Invalid mode: %d, %s", (int)file_info.mode, table_file_path.c_str());
+            return -1;
+        }
+        if (partition_files.empty()) {
+            file_scan_node->partition_property()->has_no_input_data = true;
+        } else {
+            file_scan_node->set_files(partition_files);
+        }
+        return 0;
+    }
+    // 分区表
+    if (file_info.mode != FileMode::I_DIR) {
+        DB_WARNING("Invalid file mode: %d", (int)file_info.mode);
+        return -1;
+    }
+    int32_t tuple_id = file_scan_node->tuple_id();
+    pb::TupleDescriptor* tuple_desc = nullptr;
+    if (_ctx != nullptr) {
+        tuple_desc = _ctx->get_tuple_desc(tuple_id);
+    }
+    if (tuple_desc == nullptr) {
+        DB_WARNING("tuple_desc is nullptr");
+        return -1;
+    }
+    std::vector<int32_t> field_id2slot(table_info->fields.back().id + 1, 0);
+    for (const auto& slot : tuple_desc->slots()) {
+        if (slot.field_id() >= field_id2slot.size()) {
+            DB_WARNING("vector out of range, field_id: %d", slot.field_id());
+            continue;
+        }
+        field_id2slot[slot.field_id()] = slot.slot_id();
+    }
+    size_t partition_fields_size = pb_file_info.partition_fields().size();
+    std::vector<int32_t> partition_slot_ids(partition_fields_size, 0);
+    std::vector<pb::PrimitiveType> partition_field_types(partition_fields_size);
+    for (int i = 0; i < partition_fields_size; ++i) {
+        const auto& partition_field = pb_file_info.partition_fields(i);
+        FieldInfo* partition_field_info = table_info->get_field_ptr(partition_field);
+        if (partition_field_info == nullptr) {
+            DB_WARNING("Fail to get_field_ptr, %s", partition_field.c_str());
+            return -1;
+        }
+        int32_t partition_field_id = partition_field_info->id;
+        if (partition_field_id < 0 || partition_field_id >= field_id2slot.size()) {
+            DB_WARNING("Invalid partition_field_id: %d, %s", partition_field_id, partition_field.c_str());
+            return -1;
+        }
+        int32_t partition_slot_id = field_id2slot[partition_field_id];
+        if (partition_slot_id <= 0) {
+            continue;
+        }
+        partition_slot_ids[i] = partition_slot_id;
+        partition_field_types[i] = partition_field_info->type;
+    }
+    // 获取每个分区字段涉及的条件
+    std::unordered_map<int32_t, std::vector<ExprNode*>> slot_conjuncts_map;
+    ScopeGuard conjunct_guard([&slot_conjuncts_map] () {
+        for (auto& [_, conjuncts] : slot_conjuncts_map) {
+            for (auto* conjunct : conjuncts) {
+                conjunct->close();
+            }
+        }
+    });
+    if (filter_node != nullptr && filter_node->mutable_conjuncts() != nullptr) {
+        for (auto* conjunct : *filter_node->mutable_conjuncts()) {
+            if (conjunct != nullptr) {
+                // TODO - 一个条件涉及多个分区字段不会进行过滤，后续有需要可以升级
+                std::set<std::pair<int32_t, int32_t>> tuple_slot_ids;
+                conjunct->get_all_tuple_slot_ids(tuple_slot_ids);
+                if (tuple_slot_ids.size() == 1) {
+                    const auto& tuple_slot_id = *tuple_slot_ids.begin();
+                    if (tuple_slot_id.first == tuple_id &&
+                            std::find(partition_slot_ids.begin(), partition_slot_ids.end(), tuple_slot_id.second) != partition_slot_ids.end()) {
+                        slot_conjuncts_map[tuple_slot_id.second].emplace_back(conjunct);
+                    }
+                }
+            }
+        }
+    }
+    if (join_on_conditions != nullptr) {
+        std::set<std::pair<int32_t, int32_t>> tuple_slot_ids;
+        join_on_conditions->get_all_tuple_slot_ids(tuple_slot_ids);
+        if (tuple_slot_ids.size() == 1) {
+            const auto& tuple_slot_id = *tuple_slot_ids.begin();
+            if (tuple_slot_id.first == tuple_id &&
+                    std::find(partition_slot_ids.begin(), partition_slot_ids.end(), tuple_slot_id.second) != partition_slot_ids.end()) {
+                slot_conjuncts_map[tuple_slot_id.second].emplace_back(join_on_conditions);
+            }
+        }
+    }
+    for (auto& [_, conjuncts] : slot_conjuncts_map) {
+        for (auto& conjunct : conjuncts) {
+            ret = conjunct->open();
+            if (ret < 0) {
+                DB_WARNING("expr open fail, ret: %d", ret);
+                return ret;
+            }
+        }
+    }
+    // 获取符合条件的分区文件集合
+    std::shared_ptr<MemRowDescriptor> mem_row_desc = std::make_shared<MemRowDescriptor>();
+    std::vector<pb::TupleDescriptor> tuple_descs;
+    tuple_descs.emplace_back(*tuple_desc);
+    ret = mem_row_desc->init(tuple_descs);
+    if (ret < 0) {
+        DB_WARNING("_mem_row_desc init fail");
+        return -1;
+    }
+    std::vector<std::string> partition_vals;
+    partition_vals.reserve(2);
+    // 存储各个分区的分区值，[["20250610","12"], ["20250611","13"]]
+    std::vector<std::vector<std::string>> partition_vals_vec;
+    partition_vals_vec.reserve(100);
+    // 存储各个分区的分区目录，eventday=20250610/hour=12、eventday=20250611/hour=13
+    // 长度与partition_vals_vec相等
+    std::vector<std::string> partition_dirs;
+    partition_dirs.reserve(100);
+    // @breif 递归处理每一层目录，获取符合条件的分区目录
+    // @param dir_path 当前目录
+    // @param idx 当前目录层级
+    std::function<int(const std::string&, const int)> 
+            recurse_calc_partition_dirs = [&] (const std::string& dir_path, const int idx) {
+        if (idx >= partition_slot_ids.size()) {
+            partition_vals_vec.emplace_back(partition_vals);
+            partition_dirs.emplace_back(dir_path);
+            return 0;
+        }
+        std::vector<std::string> child_dirs;
+        TimeCost tm;
+        int ret = ReadDirImpl::get_all_dirs(fs.get(), dir_path, child_dirs);
+        if (ret < 0) {
+            DB_WARNING("Fail to get_all_files");
+            return -1;
+        }
+        int32_t partition_slot_id = partition_slot_ids[idx];
+        pb::PrimitiveType field_type = partition_field_types[idx];
+        for (const auto& child_dir : child_dirs) {
+            const std::string& pattern = pb_file_info.partition_fields(idx) + "=";
+            // 是否以pattern开头
+            if (child_dir.find(pattern) == 0) {
+                const std::string& value = child_dir.substr(pattern.size());
+                bool is_valid = true;
+                if (partition_slot_id > 0 && 
+                        slot_conjuncts_map.find(partition_slot_id) != slot_conjuncts_map.end()) {
+                    ExprValue expr_value(field_type, value);
+                    std::unique_ptr<MemRow> row = mem_row_desc->fetch_mem_row();
+                    row->set_value(tuple_id, partition_slot_id, expr_value);
+                    for (auto* conjunct : slot_conjuncts_map[partition_slot_id]) {
+                        ExprValue conjunct_value = conjunct->get_value(row.get());
+                        if (conjunct_value.is_null() || conjunct_value.get_numberic<bool>() == false) {
+                            is_valid = false;
+                            break;
+                        }
+                    }
+                }
+                if (is_valid) {
+                    partition_vals.emplace_back(value);
+                    ret = recurse_calc_partition_dirs(dir_path + "/" + child_dir, idx + 1);
+                    partition_vals.pop_back();
+                    if (ret < 0) {
+                        DB_WARNING("Fail to calc_partition_files");
+                        return ret;
+                    }
+                }
+            }
+        }
+        return 0;
+    };
+    ret = recurse_calc_partition_dirs(table_file_path, 0); 
+    if (ret < 0) {
+        DB_WARNING("Fail to calc_partition_files");
+        return -1;
+    }
+    for (int i = 0; i < partition_dirs.size(); ++i) {
+        std::vector<std::string> file_paths;
+        TimeCost tm;
+        ret = ReadDirImpl::get_all_files(fs.get(), partition_dirs[i], file_paths);
+        if (ret < 0) {
+            DB_WARNING("Fail to get_all_files");
+            return -1;
+        }
+        for (const auto& file_path : file_paths) {
+            pb::PartitionFile partition_file;
+            for (const auto& partition_val : partition_vals_vec[i]) {
+                partition_file.add_partition_vals(partition_val);
+            }
+            partition_file.set_file_path(partition_dirs[i] + "/" + file_path);
+            partition_files.emplace_back(partition_file);
+        }
+    }
+    if (partition_files.empty()) {
+        file_scan_node->partition_property()->has_no_input_data = true;
+    } else {
+        file_scan_node->set_files(partition_files);
     }
     return 0;
 }

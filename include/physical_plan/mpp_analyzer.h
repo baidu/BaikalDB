@@ -54,6 +54,9 @@ private:
 
     int build_fragment(QueryContext* ctx, SmartFragment& fragment);
 
+    // 构建包含ScanNode的Fragment
+    int build_scan_fragment(QueryContext* ctx, SmartFragment& fragment);
+
     int do_separate(QueryContext* ctx, 
                     ExecNode* node, 
                     std::vector<ExecNode*>& child_fragment_exchange_senders);

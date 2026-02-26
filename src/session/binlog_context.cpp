@@ -25,7 +25,7 @@
 #endif
 
 namespace baikaldb {
-DEFINE_bool(meta_tso_autoinc_degrade, false, "meta_tso_autoinc_degrade");
+DEFINE_bool(meta_tso_autoinc_degrade, false, "Enable meta TSO autoinc degrade, default: false");
 BRPC_VALIDATE_GFLAG(meta_tso_autoinc_degrade, brpc::PassValidate);
 DECLARE_int64(print_time_us);
 DECLARE_int64(retry_interval_us);

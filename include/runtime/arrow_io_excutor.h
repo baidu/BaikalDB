@@ -16,6 +16,7 @@
 #include "arrow/util/thread_pool.h"
 #include "arrow/util/functional.h"
 #include "arrow/util/cancel.h"
+#include "arrow/memory_pool.h"
 #include "common.h"
 #include "fragment.h"
 #ifdef BAIDU_INTERNAL
@@ -97,5 +98,8 @@ public:
     static int init();
     static void execute(RuntimeState* state, arrow::Result<std::shared_ptr<arrow::Table>>* result);
     static void execute_fragment(RuntimeState* state, FragmentInfo* fragment);
+    static void shutdown();
 };
+
+arrow::MemoryPool* GetMemoryPoolForRead();
 };

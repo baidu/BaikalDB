@@ -65,7 +65,7 @@ public:
     void update_region(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void restore_region(const pb::MetaManagerRequest& request, pb::MetaManagerResponse* response);
     void drop_region(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
-    void split_region(const pb::MetaManagerRequest& request, braft::Closure* done);
+    void split_region(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void send_remove_region_request(const std::vector<int64_t>& drop_region_ids);
 
     // MIGRATE/DEAD可以任意使用add_peer_for_store/delete_all_region_for_store
@@ -107,14 +107,24 @@ public:
                                      const pb::LeaderHeartBeat& leader_region,
                                      const SmartRegionInfo& master_region_info,
                                      pb::StoreHeartBeatResponse* response);
-    bool peer_is_equal(const pb::RegionInfo& left, const pb::RegionInfo& right) {
+    bool peer_is_equal(const pb::RegionInfo& left, const pb::RegionInfo& right, bool check_learner) {
         size_t hash_left = 0;
         size_t hash_right = 0;
         for (auto& state : left.peers()) {
             hash_left += std::hash<std::string>{}(state);
         }
+        if (check_learner) {
+            for (auto& state : left.learners()) {
+                hash_left += std::hash<std::string>{}(state);
+            }
+        }
         for (auto& state : right.peers()) {
             hash_right += std::hash<std::string>{}(state);
+        }
+        if (check_learner) {
+            for (auto& state : right.learners()) {
+                hash_right += std::hash<std::string>{}(state);
+            }
         }
         return hash_left == hash_right;
     }

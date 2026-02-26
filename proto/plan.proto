@@ -58,6 +58,7 @@ message SelectManagerNode {
     repeated bool  is_asc                               = 3;
     repeated bool  is_null_first                        = 4;
     optional bool  is_return_empty                      = 5;
+    repeated Expr  filter_conditions                    = 6;
 }
 
 enum TxnCmdType {
@@ -105,6 +106,7 @@ message PossibleIndex {
         optional int32 topk = 16;
         optional uint64 separate_value = 17; // 向量索引使用
         optional int32 efsearch = 18; // 向量索引使用
+        optional int32 nprobe = 19; // 向量索引使用
     };
 
     message SortIndex {
@@ -149,6 +151,11 @@ enum DDLType {
     DDL_COLUMN                      = 3;
 };
 
+message PartitionFile {
+    repeated bytes partition_vals = 1; // 文件所在分区
+    optional bytes file_path      = 2; // 文件路径
+};
+
 message ScanNode {
     required int32 tuple_id = 1;  //tuple中记录有读取列信息与table信息
     required int64 table_id = 2;
@@ -167,6 +174,7 @@ message ScanNode {
     optional uint64 watt_stats_version = 15; // watt stats写入version幂等, 用于ROLLUP基准
     optional int32 union_tuple_id = 16; // union子查询对应的union_tuple_id
     optional bool use_column_storage = 17; // 是否使用列存，读取时使用
+    repeated PartitionFile files = 18; // 离线查询文件集合，用于FileScanNode场景
 };
 
 message LimitNode {
@@ -371,7 +379,7 @@ enum PartitionPropertyType {
     SinglePartitionType    = 2;
     HashPartitionType      = 3;
     BroadcastPartitionType = 4;
-    RandomPartitionType    = 5; // TODO
+    RandomPartitionType    = 5;
 };
 
 message PartitionProperty {
@@ -413,6 +421,7 @@ message ExchangeReceiverNode {
     repeated Expr  slot_order_exprs                  = 10;
     repeated bool  is_asc                            = 11;
     repeated bool  is_null_first                     = 12;
+    repeated Expr  filter_conditions                 = 13;
 };
 
 enum FrameType {

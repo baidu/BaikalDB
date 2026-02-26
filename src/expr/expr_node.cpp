@@ -822,7 +822,7 @@ int ExprNode::serialize_tree(uint64_t& serialize_slot_id) {
             if (slot_id > 63) {
                 return -1;
             }
-            serialize_slot_id |= 1 << slot_id;
+            serialize_slot_id |= 1LL << slot_id;
         }
     } else if (is_function_eq()) {
         if (_children[0] == nullptr) {
@@ -833,7 +833,7 @@ int ExprNode::serialize_tree(uint64_t& serialize_slot_id) {
         if (slot_id > 63) {
             return -1;
         }
-        serialize_slot_id |= 1 << slot_id;
+        serialize_slot_id |= 1LL << slot_id;
     }
     return 0;
 }

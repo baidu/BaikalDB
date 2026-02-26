@@ -270,7 +270,7 @@ int UpdatePlanner::parse_kv_list() {
         if (update_field_ids.count(field.id) != 0) {
             continue;
         }
-        if (field.on_update_value == "(current_timestamp())") {
+        if (field.on_update_value == "(current_timestamp())" && !_ctx->disable_on_update) {
             pb::Expr value_expr;
             auto node = value_expr.add_nodes();
             node->set_num_children(0);

@@ -31,6 +31,7 @@ DEFINE_int32(max_ddl_retry_time, 30, "max ddl retry time");
 DECLARE_int32(baikal_heartbeat_interval_us);
 DEFINE_bool(all_rollup_region_need_execute, false, "all rollup region need execute");
 DEFINE_int32(single_store_max_ddlwork_num, 3, "store max ddlwork num");
+DEFINE_int32(single_store_max_delete_ddl_num, 1, "store max delete ddlwork num");
 DEFINE_bool(cold_data_rollup_done, true, "cold data rollup done");
 
 std::string construct_ddl_work_key(const std::string& identify, const std::initializer_list<int64_t>& ids) {
@@ -214,7 +215,7 @@ void DBManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* reque
     DB_DEBUG("dll_response : %s address %s", response->ShortDebugString().c_str(), address.c_str());
 }
 
-bool DBManager::round_robin_select(std::string* selected_address, bool is_column_ddl) {
+bool DBManager::round_robin_select(std::string* selected_address, bool is_column_update_ddl) {
     BAIDU_SCOPED_LOCK(_address_instance_mutex);
     auto iter = _address_instance_map.find(_last_rolling_instance);
     if (iter == _address_instance_map.end() || (++iter) == _address_instance_map.end()) {
@@ -234,7 +235,7 @@ bool DBManager::round_robin_select(std::string* selected_address, bool is_column
         auto find_task_map = _common_task_map.init_if_not_exist_else_update(iter->first, false, [&current_task_number](CommonTaskMap& db_task_map){
             current_task_number = db_task_map.doing_task_map.size() + db_task_map.to_do_task_map.size();
         });
-        int32_t max_concurrent = is_column_ddl ? FLAGS_baikaldb_max_concurrent * 5 : FLAGS_baikaldb_max_concurrent;
+        int32_t max_concurrent = is_column_update_ddl ? FLAGS_baikaldb_max_concurrent * 5 : FLAGS_baikaldb_max_concurrent;
         if (!find_task_map || current_task_number < max_concurrent) {
             _last_rolling_instance = iter->first;
             *selected_address = iter->first;
@@ -246,8 +247,8 @@ bool DBManager::round_robin_select(std::string* selected_address, bool is_column
     return false;
 }
 
-bool DBManager::select_instance(std::string* selected_address, bool is_column_ddl) {
-    return round_robin_select(selected_address, is_column_ddl);
+bool DBManager::select_instance(std::string* selected_address, bool is_column_update_ddl) {
+    return round_robin_select(selected_address, is_column_update_ddl);
 }
 
 int DBManager::execute_task(MemRegionDdlWork& work) {
@@ -269,7 +270,12 @@ int DBManager::execute_task(MemRegionDdlWork& work) {
             ++iter2;
         }
     });
-    int32_t max_concurrent = work.region_info.op_type() == pb::OP_MODIFY_FIELD ?
+
+    bool is_column_update = work.region_info.op_type() == pb::OP_MODIFY_FIELD
+            && !work.region_info.column_ddl_info().update_slots().empty();
+    bool is_column_delete = work.region_info.op_type() == pb::OP_MODIFY_FIELD
+            && work.region_info.column_ddl_info().update_slots().empty();
+    int32_t max_concurrent = is_column_update ?
         FLAGS_single_table_ddl_max_concurrent * 10 : FLAGS_single_table_ddl_max_concurrent;
     if (all_task_count_by_table_id > max_concurrent) {
         DB_NOTICE("table %s ddl task count %d reach max concurrency %d", table_id_prefix.c_str(),
@@ -281,13 +287,15 @@ int DBManager::execute_task(MemRegionDdlWork& work) {
     auto& region_ddl_info = work.region_info;
     work.update_timestamp = butil::gettimeofday_us();
     std::string address;
-    if (select_instance(&address, work.region_info.op_type() == pb::OP_MODIFY_FIELD)) {
+    if (select_instance(&address, is_column_update)) {
         auto task_id = std::to_string(region_ddl_info.table_id()) + "_" + std::to_string(region_ddl_info.region_id());
         // 一个store同一时间只能执行single_store_max_ddlwork_num个ddl任务
         SmartRegionInfo region_info = RegionManager::get_instance()->get_region_info(region_ddl_info.region_id());
-        if (region_info != nullptr && work.region_info.op_type() != pb::OP_MODIFY_FIELD) {
+        if (region_info != nullptr && !is_column_update) {
             BAIDU_SCOPED_LOCK(_task_store_mutex);
-            if (store_ddlwork_cnt_map[region_info->leader()] >= FLAGS_single_store_max_ddlwork_num) {
+            int single_store_max_ddlwork_num =
+                    is_column_delete ? FLAGS_single_store_max_delete_ddl_num : FLAGS_single_store_max_ddlwork_num;
+            if (store_ddlwork_cnt_map[region_info->leader()] >= single_store_max_ddlwork_num) {
                 DB_NOTICE("store_check address_%s is doing %d ddl_work", 
                     region_info->leader().c_str(), store_ddlwork_cnt_map[region_info->leader()]);
                 return -2;

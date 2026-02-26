@@ -30,6 +30,7 @@ int LogEntryReader::read_log_entry(int64_t region_id, int64_t log_index, std::st
         DB_FATAL("read log entry fail, region_id: %ld, log_index: %ld", region_id, log_index);
         return -1;
     }
+    RocksdbVars::get_instance()->raft_log_scan_times_count << 1;
     rocksdb::Slice slice(log_value);
     LogHead head(slice);
     if (head.type != braft::ENTRY_TYPE_DATA) {
@@ -66,6 +67,7 @@ int LogEntryReader::read_log_entry(int64_t region_id, int64_t start_log_index, i
     options.fill_cache = false;
     std::unique_ptr<rocksdb::Iterator> iter(_rocksdb->new_iterator(options, _log_cf));
     iter->Seek(log_data_key.data());
+    RocksdbVars::get_instance()->raft_log_scan_times_count << 1;
     for (; iter->Valid(); iter->Next()) {
         if (!iter->key().starts_with(prefix.data())) {
             DB_WARNING("read end info, region_id: %ld, key:%s", region_id, iter->key().ToString(true).c_str());
@@ -129,6 +131,7 @@ int LogEntryReader::read_txn_last_log_entry(int64_t region_id, int64_t start_log
     std::map<int64_t, uint64_t> log_index_txn_map;
     std::unique_ptr<rocksdb::Iterator> iter(_rocksdb->new_iterator(options, _log_cf));
     iter->Seek(log_data_key.data());
+    RocksdbVars::get_instance()->raft_log_scan_times_count << 1;
     for (; iter->Valid(); iter->Next()) {
         if (!iter->key().starts_with(prefix.data())) {
             DB_WARNING("read end info, region_id: %ld, key:%s", region_id, iter->key().ToString(true).c_str());

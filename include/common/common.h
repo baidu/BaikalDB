@@ -20,6 +20,7 @@
 #include <type_traits>
 #include <fstream>
 #include <cmath>
+#include <queue>
 #include <set>
 #include <unordered_set>
 #include <unordered_map>
@@ -54,6 +55,7 @@
 #include "brpc/reloadable_flags.h"
 #endif
 #include <bthread/execution_queue.h>
+#include <bthread/condition_variable.h>
 #include <gflags/gflags.h>
 #include "log.h"
 #include "proto/common.pb.h"
@@ -1150,11 +1152,12 @@ struct BvarMap {
                 int64_t affected_rows, int64_t scan_rows, int64_t read_disk_size,
                 int64_t filter_rows, int64_t region_count,
                 const std::map<int32_t, int>& field_range_type_,
-                const uint64_t sign_, const std::set<uint64_t>& subquery_signs_) 
+                const uint64_t sign_, const std::set<uint64_t>& subquery_signs_,
+                const std::string& tag) 
             : table_id(table_id), sum(sum), err_sum(err_sum), count(count), err_count(err_count),
             affected_rows(affected_rows), scan_rows(scan_rows), 
             read_disk_size(read_disk_size), filter_rows(filter_rows),
-            region_count(region_count) {
+            region_count(region_count), resource_tag(tag) {
                 field_range_type = field_range_type_;
                 parent_sign = sign_;
                 if (subquery_signs_.size() > 0) {
@@ -1176,6 +1179,9 @@ struct BvarMap {
                 if (other.subquery_signs.size() > 0) {
                     subquery_signs = other.subquery_signs;
                 }
+            }
+            if (resource_tag.empty()) {
+                resource_tag = other.resource_tag;
             }
 
             sum += other.sum;
@@ -1215,6 +1221,7 @@ struct BvarMap {
         std::map<int32_t, int> field_range_type;
         uint64_t parent_sign;
         std::set<uint64_t> subquery_signs;
+        std::string resource_tag;
     };
 public:
     BvarMap() {}
@@ -1222,9 +1229,10 @@ public:
         int64_t affected_rows, int64_t scan_rows, int64_t read_disk_size, 
         int64_t filter_rows, int64_t region_count,
         const std::map<int32_t, int>& field_range_type_, int64_t err_count, 
-        uint64_t parent_sign, std::set<uint64_t>& subquery_signs) {
+        uint64_t parent_sign, std::set<uint64_t>& subquery_signs,
+        const std::string& tag) {
         internal_map[key][index_id] = SumCount(table_id, cost, err_cost, 1, err_count, affected_rows,
-            scan_rows, read_disk_size, filter_rows, region_count, field_range_type_, parent_sign, subquery_signs);
+            scan_rows, read_disk_size, filter_rows, region_count, field_range_type_, parent_sign, subquery_signs, tag);
     }
 
     BvarMap& operator+=(const BvarMap& other) {
@@ -1376,6 +1384,9 @@ struct RocksdbVars {
     // 统计未提交的binlog最大时间
     bvar::Maxer<int64_t>     binlog_not_commit_max_cost;
     bvar::Window<bvar::Maxer<int64_t>> binlog_not_commit_max_cost_minute;
+    // 对于vector memtable, 只要读取就需要排序，因此只记录读取次数而非扫描量
+    bvar::Adder<int64_t>     raft_log_scan_times_count;
+    bvar::PerSecond<bvar::Adder<int64_t>> raft_log_scan_count_qps;
 
 private:
     RocksdbVars(): rocksdb_put_time_cost_latency("rocksdb_put_time_cost_latency", &rocksdb_put_time, -1),
@@ -1392,7 +1403,9 @@ private:
                    qos_fetch_tokens_wait_count("qos_fetch_tokens_wait_count"),
                    qos_fetch_tokens_qps("qos_fetch_tokens_qps", &qos_fetch_tokens_count),
                    qos_token_waste_qps("qos_token_waste_qps", &qos_token_waste_count),
-                   binlog_not_commit_max_cost_minute("binlog_not_commit_max_cost_minute", &binlog_not_commit_max_cost, 60) {
+                   binlog_not_commit_max_cost_minute("binlog_not_commit_max_cost_minute", &binlog_not_commit_max_cost, 60),
+                   raft_log_scan_times_count("raft_log_scan_times_count"),
+                   raft_log_scan_count_qps("raft_log_scan_count_qps", &raft_log_scan_times_count, 60) {
                    }
 };
 
@@ -1641,6 +1654,55 @@ public:
         static Class instance;
         return &instance;
     }
+};
+
+template <typename T>
+class BlockingQueue {
+public:
+    explicit BlockingQueue(size_t capacity = 0) : _capacity(capacity) {}
+    ~BlockingQueue() {}
+
+    bool blocking_get(T* out) {
+        std::unique_lock<bthread::Mutex> l(_mutex);
+        while (!_shutdown && _queue.empty()) {
+            _not_empty_cv.wait(l);
+        }
+        if (!_queue.empty()) {
+            *out = _queue.front();
+            _queue.pop();
+            _not_full_cv.notify_one();
+            return true;
+        }
+        return false;
+    }
+
+    bool blocking_put(const T& val) {
+        std::unique_lock<bthread::Mutex> l(_mutex);
+        while (!_shutdown && _capacity != 0 && _queue.size() >= _capacity) {
+            _not_full_cv.wait(l);
+        }
+        if (!_shutdown) {
+            _queue.push(val);
+            _not_empty_cv.notify_one();
+            return true;
+        }
+        return false;
+    }
+
+    void shutdown() {
+        std::unique_lock<bthread::Mutex> l(_mutex);
+        _shutdown = true;
+        _not_empty_cv.notify_all();
+        _not_full_cv.notify_all();
+    }
+
+private:
+    const size_t _capacity = 0; // 0表示无界队列
+    bool _shutdown = false;
+    bthread::Mutex _mutex;
+    bthread::ConditionVariable _not_empty_cv;
+    bthread::ConditionVariable _not_full_cv;
+    std::queue<T> _queue;
 };
 
 enum class IconvOnError {

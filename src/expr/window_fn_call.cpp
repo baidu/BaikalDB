@@ -89,7 +89,7 @@ int WindowFnCall::open() {
     case DENSE_RANK:
     case PERCENT_RANK: 
     case CUME_DIST: {
-        WindowRankIntermediate* window_intermediate = (WindowRankIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowRankIntermediate>(_window_intermediate);
         window_intermediate->mem_row_compare = _mem_row_compare;
         break;
     }
@@ -103,11 +103,11 @@ int WindowFnCall::open() {
             return -1;
         }
         if (_children[0]->node_type() != pb::INT_LITERAL) {
-            DB_WARNING("_window_type: %d, invalid children node_type: %d", 
+            DB_WARNING("_window_type: %d, invalid children node_type: %d",
                         _window_type, _children[0]->node_type());
             return -1;
         }
-        WindowNtileIntermediate* window_intermediate = (WindowNtileIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowNtileIntermediate>(_window_intermediate);
         window_intermediate->n = _children[0]->get_value(nullptr).cast_to(pb::INT64).get_numberic<int64_t>();
         if (window_intermediate->n <= 0) {
             DB_WARNING("Invalid n: %ld", window_intermediate->n);
@@ -131,11 +131,11 @@ int WindowFnCall::open() {
                 return -1;
             }
             if (_children[1]->node_type() != pb::INT_LITERAL) {
-                DB_WARNING("_window_type: %d, invalid children node_type: %d", 
+                DB_WARNING("_window_type: %d, invalid children node_type: %d",
                             _window_type, _children[1]->node_type());
                 return -1;
             }
-            WindowLeadLagIntermediate* window_intermediate = (WindowLeadLagIntermediate*)_window_intermediate.c_str();
+            auto window_intermediate = &std::get<WindowLeadLagIntermediate>(_window_intermediate);
             window_intermediate->offset = _children[1]->get_value(nullptr).cast_to(pb::INT64).get_numberic<int64_t>();
             if (window_intermediate->offset < 0) {
                 DB_WARNING("Invalid offset: %ld", window_intermediate->offset);
@@ -177,11 +177,11 @@ int WindowFnCall::open() {
             return -1;
         }
         if (_children[1]->node_type() != pb::INT_LITERAL) {
-            DB_WARNING("_window_type: %d, invalid children node_type: %d", 
+            DB_WARNING("_window_type: %d, invalid children node_type: %d",
                         _window_type, _children[1]->node_type());
             return -1;
         }
-        WindowValueIntermediate* window_intermediate = (WindowValueIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowValueIntermediate>(_window_intermediate);
         window_intermediate->n = _children[1]->get_value(nullptr).cast_to(pb::INT64).get_numberic<int64_t>();
         if (window_intermediate->n <= 0) {
             DB_WARNING("Invalid n: %ld", window_intermediate->n);
@@ -200,7 +200,6 @@ void WindowFnCall::close() {
     ExprNode::close();
     _tuple_id = -1;
     _slot_id = -1;
-    _window_intermediate.clear();
     _mem_row_compare = nullptr;
 }
 
@@ -234,7 +233,7 @@ int WindowFnCall::type_inferer() {
         _col_type = pb::DOUBLE;
         break;
     }
-    case MIN: 
+    case MIN:
     case MAX: {
         if (_children.size() == 0) {
             DB_WARNING("has no child");
@@ -244,12 +243,12 @@ int WindowFnCall::type_inferer() {
         break;
     }
     case ROW_NUMBER:
-    case RANK: 
+    case RANK:
     case DENSE_RANK: {
         _col_type = pb::INT64;
         break;
     }
-    case PERCENT_RANK: 
+    case PERCENT_RANK:
     case CUME_DIST: {
         _col_type = pb::DOUBLE;
         break;
@@ -312,55 +311,46 @@ int WindowFnCall::initialize() {
     switch (_window_type) {
     case COUNT_STAR:
     case COUNT: {
-        WindowCountIntermediate window_intermediate;
-        _window_intermediate.assign((char*)&window_intermediate, sizeof(WindowCountIntermediate));
+        _window_intermediate.emplace<WindowCountIntermediate>();
         break;
     }
     case SUM: {
-        WindowSumIntermediate window_intermediate;
-        _window_intermediate.assign((char*)&window_intermediate, sizeof(WindowSumIntermediate));
+        _window_intermediate.emplace<WindowSumIntermediate>();
         break;
     }
     case AVG: {
-        WindowAvgIntermediate window_intermediate;
-        _window_intermediate.assign((char*)&window_intermediate, sizeof(WindowAvgIntermediate));
+        _window_intermediate.emplace<WindowAvgIntermediate>();
         break;
     }
     case MIN:
     case MAX: {
-        WindowMinMaxIntermediate window_intermediate;
-        _window_intermediate.assign((char*)&window_intermediate, sizeof(WindowMinMaxIntermediate));
+        _window_intermediate.emplace<WindowMinMaxIntermediate>();
         break;
     }
     case ROW_NUMBER: {
-        WindowRowNumberIntermediate window_intermediate;
-        _window_intermediate.assign((char*)&window_intermediate, sizeof(WindowRowNumberIntermediate));
+        _window_intermediate.emplace<WindowRowNumberIntermediate>();
         break;
     }
     case RANK:
     case DENSE_RANK:
-    case PERCENT_RANK: 
+    case PERCENT_RANK:
     case CUME_DIST: {
-        WindowRankIntermediate window_intermediate;
-        _window_intermediate.assign((char*)&window_intermediate, sizeof(WindowRankIntermediate));
+        _window_intermediate.emplace<WindowRankIntermediate>();
         break;
     }
     case NTILE: {
-        WindowNtileIntermediate window_intermediate;
-        _window_intermediate.assign((char*)&window_intermediate, sizeof(WindowNtileIntermediate));
+        _window_intermediate.emplace<WindowNtileIntermediate>();
         break;
     }
     case LEAD:
     case LAG: {
-        WindowLeadLagIntermediate window_intermediate;
-        _window_intermediate.assign((char*)&window_intermediate, sizeof(WindowLeadLagIntermediate));
+        _window_intermediate.emplace<WindowLeadLagIntermediate>();
         break;
     }
     case FIRST_VALUE:
     case LAST_VALUE:
     case NTH_VALUE: {
-        WindowValueIntermediate window_intermediate;
-        _window_intermediate.assign((char*)&window_intermediate, sizeof(WindowValueIntermediate));
+        _window_intermediate.emplace<WindowValueIntermediate>();
         break;
     }
     default: {
@@ -382,12 +372,12 @@ int WindowFnCall::call(RowBatch* batch, const int start, const int end) {
     }
     switch (_window_type) {
     case COUNT_STAR: {
-        WindowCountIntermediate* window_intermediate = (WindowCountIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowCountIntermediate>(_window_intermediate);
         window_intermediate->cnt += (end - start);
         break;
     }
     case COUNT: {
-        WindowCountIntermediate* window_intermediate = (WindowCountIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowCountIntermediate>(_window_intermediate);
         for (int i = start; i < end; ++i) {
             bool can_count = true;
             for (auto child : _children) {
@@ -403,7 +393,7 @@ int WindowFnCall::call(RowBatch* batch, const int start, const int end) {
         break;
     }
     case SUM: {
-        WindowSumIntermediate* window_intermediate = (WindowSumIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowSumIntermediate>(_window_intermediate);
         for (int i = start; i < end; ++i) {
             ExprValue value = _children[0]->get_value(batch->get_row(i).get()).cast_to(_col_type);
             if (!value.is_null()) {
@@ -417,7 +407,7 @@ int WindowFnCall::call(RowBatch* batch, const int start, const int end) {
         break;
     }
     case AVG: {
-        WindowAvgIntermediate* window_intermediate = (WindowAvgIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowAvgIntermediate>(_window_intermediate);
         for (int i = start; i < end; ++i) {
             ExprValue value = _children[0]->get_value(batch->get_row(i).get()).cast_to(_col_type);
             if (!value.is_null()) {
@@ -428,7 +418,7 @@ int WindowFnCall::call(RowBatch* batch, const int start, const int end) {
         break;
     }
     case MIN: {
-        WindowMinMaxIntermediate* window_intermediate = (WindowMinMaxIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowMinMaxIntermediate>(_window_intermediate);
         for (int i = start; i < end; ++i) {
             ExprValue value = _children[0]->get_value(batch->get_row(i).get()).cast_to(_col_type);
             if (!value.is_null()) {
@@ -441,7 +431,7 @@ int WindowFnCall::call(RowBatch* batch, const int start, const int end) {
         break;
     }
     case MAX: {
-        WindowMinMaxIntermediate* window_intermediate = (WindowMinMaxIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowMinMaxIntermediate>(_window_intermediate);
         for (int i = start; i < end; ++i) {
             ExprValue value = _children[0]->get_value(batch->get_row(i).get()).cast_to(_col_type);
             if (!value.is_null()) {
@@ -458,14 +448,14 @@ int WindowFnCall::call(RowBatch* batch, const int start, const int end) {
     }
     case RANK:
     case DENSE_RANK:
-    case PERCENT_RANK: 
+    case PERCENT_RANK:
     case CUME_DIST: {
-        WindowRankIntermediate* window_intermediate = (WindowRankIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowRankIntermediate>(_window_intermediate);
         window_intermediate->cur_batch = batch;
         break;
     }
     case NTILE: {
-        WindowNtileIntermediate* window_intermediate = (WindowNtileIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowNtileIntermediate>(_window_intermediate);
         if (window_intermediate->n <= 0) {
             DB_WARNING("invalid n: %ld", window_intermediate->n);
             return -1;
@@ -477,22 +467,22 @@ int WindowFnCall::call(RowBatch* batch, const int start, const int end) {
     }
     case LEAD:
     case LAG: {
-        WindowLeadLagIntermediate* window_intermediate = (WindowLeadLagIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowLeadLagIntermediate>(_window_intermediate);
         window_intermediate->cur_batch = batch;
         break;
     }
     case FIRST_VALUE: {
-        WindowValueIntermediate* window_intermediate = (WindowValueIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowValueIntermediate>(_window_intermediate);
         window_intermediate->value = _children[0]->get_value(batch->get_row(start).get()).cast_to(_col_type);
         break;
     }
     case LAST_VALUE: {
-        WindowValueIntermediate* window_intermediate = (WindowValueIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowValueIntermediate>(_window_intermediate);
         window_intermediate->value = _children[0]->get_value(batch->get_row(end - 1).get()).cast_to(_col_type);
         break;
     }
     case NTH_VALUE: {
-        WindowValueIntermediate* window_intermediate = (WindowValueIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowValueIntermediate>(_window_intermediate);
         int idx = start + window_intermediate->n - 1;
         if (idx >= start && idx < end) {
             window_intermediate->value = _children[0]->get_value(batch->get_row(idx).get()).cast_to(_col_type);
@@ -511,18 +501,18 @@ int WindowFnCall::get_result(ExprValue& expr_value) {
     switch (_window_type) {
     case COUNT_STAR:
     case COUNT: {
-        WindowCountIntermediate* window_intermediate = (WindowCountIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowCountIntermediate>(_window_intermediate);
         expr_value.type = _col_type;
         expr_value._u.int64_val = window_intermediate->cnt;
         break;
     }
     case SUM: {
-        WindowSumIntermediate* window_intermediate = (WindowSumIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowSumIntermediate>(_window_intermediate);
         expr_value = window_intermediate->sum;
         break;
     }
     case AVG: {
-        WindowAvgIntermediate* window_intermediate = (WindowAvgIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowAvgIntermediate>(_window_intermediate);
         if (window_intermediate->cnt != 0) {
             expr_value.type = _col_type;
             expr_value._u.double_val = window_intermediate->sum / window_intermediate->cnt;
@@ -533,12 +523,12 @@ int WindowFnCall::get_result(ExprValue& expr_value) {
     }
     case MIN:
     case MAX: {
-        WindowMinMaxIntermediate* window_intermediate = (WindowMinMaxIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowMinMaxIntermediate>(_window_intermediate);
         expr_value = window_intermediate->min_max;
         break;
     }
     case ROW_NUMBER: {
-        WindowRowNumberIntermediate* window_intermediate = (WindowRowNumberIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowRowNumberIntermediate>(_window_intermediate);
         expr_value.type = _col_type;
         window_intermediate->row_number++;
         expr_value._u.int64_val = window_intermediate->row_number;
@@ -551,14 +541,14 @@ int WindowFnCall::get_result(ExprValue& expr_value) {
             expr_value.type = _col_type;
             expr_value._u.int64_val = 1;
         } else {
-            WindowRankIntermediate* window_intermediate = (WindowRankIntermediate*)_window_intermediate.c_str();
+            auto window_intermediate = &std::get<WindowRankIntermediate>(_window_intermediate);
             window_intermediate->cur_idx++;
             if (window_intermediate->cur_idx == 1) {
                 window_intermediate->last_rank = 1;
             } else {
-                if (window_intermediate->cur_idx < 2 || 
+                if (window_intermediate->cur_idx < 2 ||
                         window_intermediate->cur_idx > window_intermediate->cur_batch->size()) {
-                    DB_WARNING("Invalid window index : %ld, batch size: %lu", 
+                    DB_WARNING("Invalid window index : %ld, batch size: %lu",
                                 window_intermediate->cur_idx, window_intermediate->cur_batch->size());
                     return -1;
                 }
@@ -578,13 +568,13 @@ int WindowFnCall::get_result(ExprValue& expr_value) {
         break;
     }
     case PERCENT_RANK: {
-        // 计算「当前行排名 - 1」/ 「总行数 - 1」 
+        // 计算「当前行排名 - 1」/ 「总行数 - 1」
         if (_mem_row_compare->need_not_compare()) {
             // 没有排序列，直接返回0
             expr_value.type = _col_type;
             expr_value._u.double_val = 0;
         } else {
-            WindowRankIntermediate* window_intermediate = (WindowRankIntermediate*)_window_intermediate.c_str();
+            auto window_intermediate = &std::get<WindowRankIntermediate>(_window_intermediate);
             int32_t num_rows = window_intermediate->cur_batch->size();
             if (num_rows == 0) {
                 DB_WARNING("empty batch");
@@ -594,9 +584,9 @@ int WindowFnCall::get_result(ExprValue& expr_value) {
             if (window_intermediate->cur_idx == 1) {
                 window_intermediate->last_rank = 1;
             } else {
-                if (window_intermediate->cur_idx < 2 || 
+                if (window_intermediate->cur_idx < 2 ||
                         window_intermediate->cur_idx > window_intermediate->cur_batch->size()) {
-                    DB_WARNING("Invalid window index : %ld, batch size: %lu", 
+                    DB_WARNING("Invalid window index : %ld, batch size: %lu",
                                 window_intermediate->cur_idx, window_intermediate->cur_batch->size());
                     return -1;
                 }
@@ -622,21 +612,21 @@ int WindowFnCall::get_result(ExprValue& expr_value) {
             expr_value.type = _col_type;
             expr_value._u.double_val = 1;
         } else {
-            WindowRankIntermediate* window_intermediate = (WindowRankIntermediate*)_window_intermediate.c_str();
+            auto window_intermediate = &std::get<WindowRankIntermediate>(_window_intermediate);
             int32_t num_rows = window_intermediate->cur_batch->size();
             if (num_rows == 0) {
                 DB_WARNING("empty batch");
                 return -1;
             }
-            if (window_intermediate->cur_idx < 0 || 
+            if (window_intermediate->cur_idx < 0 ||
                     window_intermediate->cur_idx >= window_intermediate->cur_batch->size()) {
-                DB_WARNING("Invalid window index : %ld, batch size: %lu", 
+                DB_WARNING("Invalid window index : %ld, batch size: %lu",
                             window_intermediate->cur_idx, window_intermediate->cur_batch->size());
                 return -1;
             }
             while (true) {
                 if (window_intermediate->last_rank < 0) {
-                    DB_WARNING("Invalid window last rank: %ld, batch size: %lu", 
+                    DB_WARNING("Invalid window last rank: %ld, batch size: %lu",
                                 window_intermediate->last_rank, window_intermediate->cur_batch->size());
                     return -1;
                 }
@@ -664,7 +654,7 @@ int WindowFnCall::get_result(ExprValue& expr_value) {
         //      - 2号桶: 3行
         //      - 3号桶: 2行
         //      - 4号桶: 2行
-        WindowNtileIntermediate* window_intermediate = (WindowNtileIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowNtileIntermediate>(_window_intermediate);
         expr_value.type = _col_type;
         expr_value._u.int64_val = window_intermediate->cur_group_idx;
         ++window_intermediate->cur_idx;
@@ -682,7 +672,7 @@ int WindowFnCall::get_result(ExprValue& expr_value) {
     case LAG: {
         // LEAD: 返回当前行下方指定偏移量的表达式值
         // LAG: 返回当前行上方指定偏移量的表达式值
-        WindowLeadLagIntermediate* window_intermediate = (WindowLeadLagIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowLeadLagIntermediate>(_window_intermediate);
         int64_t idx = window_intermediate->cur_idx;
         if (_window_type == LEAD) {
             idx += window_intermediate->offset;
@@ -690,7 +680,7 @@ int WindowFnCall::get_result(ExprValue& expr_value) {
             idx -= window_intermediate->offset;
         }
         if (idx >= 0 && idx < window_intermediate->cur_batch->size()) {
-            expr_value = 
+            expr_value =
                 _children[0]->get_value(window_intermediate->cur_batch->get_row(idx).get()).cast_to(_col_type);
         } else {
             if (window_intermediate->default_expr != nullptr) {
@@ -707,9 +697,9 @@ int WindowFnCall::get_result(ExprValue& expr_value) {
         break;
     }
     case FIRST_VALUE:
-    case LAST_VALUE: 
+    case LAST_VALUE:
     case NTH_VALUE: {
-        WindowValueIntermediate* window_intermediate = (WindowValueIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowValueIntermediate>(_window_intermediate);
         expr_value = window_intermediate->value;
         break;
     }
@@ -725,31 +715,31 @@ int WindowFnCall::frame_reset() {
     switch (_window_type) {
     case COUNT_STAR:
     case COUNT: {
-        WindowCountIntermediate* window_intermediate = (WindowCountIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowCountIntermediate>(_window_intermediate);
         window_intermediate->cnt = 0;
         break;
     }
     case SUM: {
-        WindowSumIntermediate* window_intermediate = (WindowSumIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowSumIntermediate>(_window_intermediate);
         window_intermediate->sum = ExprValue::Null();
         break;
     }
     case AVG: {
-        WindowAvgIntermediate* window_intermediate = (WindowAvgIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowAvgIntermediate>(_window_intermediate);
         window_intermediate->sum = 0;
         window_intermediate->cnt = 0;
         break;
     }
     case MIN:
     case MAX: {
-        WindowMinMaxIntermediate* window_intermediate = (WindowMinMaxIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowMinMaxIntermediate>(_window_intermediate);
         window_intermediate->min_max = ExprValue::Null();
         break;
     }
     case ROW_NUMBER:
     case RANK:
     case DENSE_RANK:
-    case PERCENT_RANK: 
+    case PERCENT_RANK:
     case CUME_DIST:
     case NTILE:
     case LEAD:
@@ -758,9 +748,9 @@ int WindowFnCall::frame_reset() {
         break;
     }
     case FIRST_VALUE:
-    case LAST_VALUE: 
+    case LAST_VALUE:
     case NTH_VALUE: {
-        WindowValueIntermediate* window_intermediate = (WindowValueIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowValueIntermediate>(_window_intermediate);
         window_intermediate->value = ExprValue::Null();
         break;
     }
@@ -776,29 +766,29 @@ int WindowFnCall::partition_reset() {
     switch (_window_type) {
     case COUNT_STAR:
     case COUNT: {
-        WindowCountIntermediate* window_intermediate = (WindowCountIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowCountIntermediate>(_window_intermediate);
         window_intermediate->cnt = 0;
         break;
     }
     case SUM: {
-        WindowSumIntermediate* window_intermediate = (WindowSumIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowSumIntermediate>(_window_intermediate);
         window_intermediate->sum = ExprValue::Null();
         break;
     }
     case AVG: {
-        WindowAvgIntermediate* window_intermediate = (WindowAvgIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowAvgIntermediate>(_window_intermediate);
         window_intermediate->sum = 0;
         window_intermediate->cnt = 0;
         break;
     }
     case MIN:
     case MAX: {
-        WindowMinMaxIntermediate* window_intermediate = (WindowMinMaxIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowMinMaxIntermediate>(_window_intermediate);
         window_intermediate->min_max = ExprValue::Null();
         break;
     }
     case ROW_NUMBER: {
-        WindowRowNumberIntermediate* window_intermediate = (WindowRowNumberIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowRowNumberIntermediate>(_window_intermediate);
         window_intermediate->row_number = 0;
         break;
     }
@@ -806,14 +796,14 @@ int WindowFnCall::partition_reset() {
     case DENSE_RANK:
     case PERCENT_RANK:
     case CUME_DIST: {
-        WindowRankIntermediate* window_intermediate = (WindowRankIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowRankIntermediate>(_window_intermediate);
         window_intermediate->cur_idx = 0;
         window_intermediate->last_rank = 0;
         window_intermediate->cur_batch = nullptr;
         break;
     }
     case NTILE: {
-        WindowNtileIntermediate* window_intermediate = (WindowNtileIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowNtileIntermediate>(_window_intermediate);
         window_intermediate->cur_idx = 0;
         window_intermediate->cur_group_idx = 1;
         window_intermediate->quotient = 0;
@@ -822,7 +812,7 @@ int WindowFnCall::partition_reset() {
     }
     case LEAD:
     case LAG: {
-        WindowLeadLagIntermediate* window_intermediate = (WindowLeadLagIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowLeadLagIntermediate>(_window_intermediate);
         window_intermediate->cur_idx = 0;
         window_intermediate->cur_batch = nullptr;
         break;
@@ -830,7 +820,7 @@ int WindowFnCall::partition_reset() {
     case FIRST_VALUE:
     case LAST_VALUE:
     case NTH_VALUE: {
-        WindowValueIntermediate* window_intermediate = (WindowValueIntermediate*)_window_intermediate.c_str();
+        auto window_intermediate = &std::get<WindowValueIntermediate>(_window_intermediate);
         window_intermediate->value = ExprValue::Null();
         break;
     }

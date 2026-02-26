@@ -54,8 +54,6 @@ DEFINE_int32(update_used_size_interval_us, 10 * 1000 * 1000, "update used size i
 DEFINE_int32(init_region_concurrency, 10, "init region concurrency when start");
 DEFINE_int32(split_threshold , 150, "split_threshold, default: 150% * region_size / 100");
 DEFINE_int64(min_split_lines, 200000, "min_split_lines, protected when wrong param put in table");
-DEFINE_int64(flush_region_interval_us, 10 * 60 * 1000 * 1000LL, 
-            "flush region interval, default(10 min)");
 DEFINE_int64(transaction_clear_interval_ms, 5000LL,
             "transaction clear interval, default(5s)");
 DEFINE_int64(binlog_timeout_check_ms, 10 * 1000LL,
@@ -68,6 +66,8 @@ DECLARE_int64(flush_memtable_interval_us);
 DEFINE_int32(max_split_concurrency, 2, "max split region concurrency, default:2");
 DEFINE_int64(none_region_merge_interval_us, 5 * 60 * 1000 * 1000LL, 
              "none region merge interval, default(5 min)");
+DEFINE_int64(region_merge_for_no_write_timeout_s, 0LL, 
+             "region_merge_for_no_write_timeout_s, default not merge");
 DEFINE_int64(region_delay_remove_timeout_s, 3600 * 24LL, 
              "region_delay_remove_time_s, default(1d)");
 DEFINE_bool(use_approximate_size, true, 
@@ -82,8 +82,8 @@ DEFINE_string(network_segment, "", "network segment of store set by user");
 DEFINE_string(container_id, "", "container_id for zoombie instance");
 DEFINE_int32(rocksdb_perf_level, rocksdb::kDisable, "rocksdb_perf_level");
 DEFINE_bool(stop_ttl_data, false, "stop ttl data");
-DEFINE_bool(stop_cold_region_flush, false, "stop_cold_region_flush");
-DEFINE_bool(olap_region_split_enable, false, "olap_region_split_enable");
+DEFINE_bool(stop_cold_region_flush, false, "Stop cold region flush, default: false");
+DEFINE_bool(olap_region_split_enable, false, "Enable OLAP region split, default: false");
 DEFINE_int64(check_peer_delay_min, 1, "check peer delay min");
 DEFINE_bool(process_delete_regions_when_init, false, "process delete regions when init");
 DECLARE_bool(store_rocks_hang_check);
@@ -138,7 +138,7 @@ int Store::init_before_listen(std::vector<std::int64_t>& init_region_ids) {
     boost::trim(FLAGS_resource_tag);
     _resource_tag = FLAGS_resource_tag;
 
-#ifdef BAIDU_INTERNAL
+#if defined(BAIDU_INTERNAL)
     // 初始化外部文件系统，用于olap
     std::vector<AfsExtFileSystem::AfsUgi> ugi_infos;
     ret = get_afs_infos(ugi_infos);
@@ -1442,7 +1442,7 @@ void Store::query_file_system(google::protobuf::RpcController* controller,
         return;
     }
     if (ret != 0) {
-        DB_FATAL("remote_compaction_id: %s fail to do file operation, op: %s",
+        DB_WARNING("remote_compaction_id: %s fail to do file operation, op: %s",
                 request->remote_compaction_id().c_str(),
                 pb::CompactionOpType_Name(request->op_type()).c_str());
         response->set_errcode(pb::COMPACTION_FILE_SYSTEM_ERROR);
@@ -1792,9 +1792,13 @@ void Store::ttl_remove_thread() {
         if (_shutdown) {
             return;
         }
-        
-        traverse_copy_region_map([](const SmartRegion& region) {
-            region->update_ttl_info();
+
+        std::set<int64_t> update_failed_set;
+        traverse_copy_region_map([&update_failed_set](const SmartRegion& region) {
+            if (region->update_ttl_info() != 0) {
+                DB_FATAL("update ttl info failed, region_id: %ld", region->region_info().region_id());
+                update_failed_set.emplace(region->get_region_id());
+            }
         });
         // 控制ttl在ttl_remove_interval_period指定时间范围,典型是晚上流量低峰
         std::vector<std::string> periods = string_split(FLAGS_ttl_remove_interval_period, '-');
@@ -1814,8 +1818,8 @@ void Store::ttl_remove_thread() {
         }
 
         if (time.get_time() > FLAGS_ttl_remove_interval_s * 1000 * 1000LL) {
-            traverse_copy_region_map([](const SmartRegion& region) {
-                if (!FLAGS_stop_ttl_data) {
+            traverse_copy_region_map([&update_failed_set](const SmartRegion& region) {
+                if (!FLAGS_stop_ttl_data && update_failed_set.count(region->get_region_id()) == 0) {
                     region->ttl_remove_expired_data();
                 }
             });
@@ -2758,8 +2762,10 @@ void Store::whether_split_thread() {
                     }
                 }
             }
-            
-            if (!_factory->get_merge_switch(ptr_region->get_table_id())) {
+            // 开启merge开关，或者长时间不写（配置FLAGS_region_merge_for_no_write_timeout_s>0），进行merge操作，防止线上有太多空region
+            if (!_factory->get_merge_switch(ptr_region->get_table_id()) 
+                && (FLAGS_region_merge_for_no_write_timeout_s <= 0
+                || ptr_region->get_timecost() < FLAGS_region_merge_for_no_write_timeout_s * 1000 * 1000LL)) {
                 continue;
             }
             //简化特殊处理，首尾region不merge
@@ -3002,7 +3008,7 @@ int Store::get_used_size_per_region(const std::vector<int64_t>& region_ids, uint
 
 void Store::update_schema_info(const pb::SchemaInfo& table, 
                                std::map<int64_t, std::set<int64_t>>* reverse_index_map,
-                               std::unordered_set<int64_t>* vector_table_set) {
+                               std::unordered_map<int64_t, std::unordered_map<int64_t, pb::IndexState>>* vector_index_map) {
     //锁住的是update_table和table_info_mapping, table_info锁的位置不能改
     _factory->update_table(table);
     if (table.has_deleted() && table.deleted()) {
@@ -3016,8 +3022,8 @@ void Store::update_schema_info(const pb::SchemaInfo& table,
             }
         }
         if (index_info.index_type() == pb::I_VECTOR) {
-            if (vector_table_set != nullptr) {
-                vector_table_set->emplace(table.table_id());
+            if (vector_index_map != nullptr) {
+                (*vector_index_map)[table.table_id()].emplace(std::make_pair(index_info.index_id(), index_info.state()));
             }
         }
     }
@@ -3125,7 +3131,18 @@ void Store::construct_heart_beat_request(
             int64_t applied_index = 0;
             int64_t data_index = 0;
             _meta_writer->read_applied_index(region_id, &applied_index, &data_index);
-            Region::add_peer_info(request, region_info, applied_index, is_learner, true);
+            bool need_report = false;
+            // 刚add peer后，还没收到on_conf_change就重启，重启上报后会误删自己
+            // 所以判断自己在不在peer中，保证收到on_conf_change才上报
+            for (const auto& peer : region_info.peers()) {
+                if (peer == _address) {
+                    need_report = true;
+                    break;
+                }
+            }
+            if (need_report) {
+                Region::add_peer_info(request, region_info, applied_index, is_learner, true);
+            }
         }
     }
 
@@ -3170,10 +3187,10 @@ void Store::process_heart_beat_response(const pb::StoreHeartBeatResponse& respon
         RocksWrapper::get_instance()->adjust_option(_param_map);
     }
     _meta_need_report = response.need_report();
-    std::unordered_set<int64_t> vector_table_set;
+    std::unordered_map<int64_t, std::unordered_map<int64_t, pb::IndexState>> vector_index_map;
     std::map<int64_t, std::set<int64_t>> reverse_index_map;
     for (auto& schema_info : response.schema_change_info()) {
-        update_schema_info(schema_info, &reverse_index_map, &vector_table_set);
+        update_schema_info(schema_info, &reverse_index_map, &vector_index_map);
     }
     if (!reverse_index_map.empty()) {
         traverse_copy_region_map([this, &reverse_index_map](const SmartRegion& region) {
@@ -3185,12 +3202,12 @@ void Store::process_heart_beat_response(const pb::StoreHeartBeatResponse& respon
             }
         });
     }
-    if (!vector_table_set.empty()) {
-        traverse_copy_region_map([this, &vector_table_set](const SmartRegion& region) {
+    if (!vector_index_map.empty()) {
+        traverse_copy_region_map([this, &vector_index_map](const SmartRegion& region) {
             if (!region->removed()) {
-                auto iter = vector_table_set.find(region->get_table_id());
-                if (iter != vector_table_set.end()) {
-                    region->vector_schema_change();
+                auto iter = vector_index_map.find(region->get_table_id());
+                if (iter != vector_index_map.end()) {
+                    region->vector_schema_change(iter->second);
                 }
             }
         });

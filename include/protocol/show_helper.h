@@ -27,6 +27,7 @@ const std::string SQL_SHOW_CREATE_TABLE          = "create_table";          // s
 const std::string SQL_SHOW_CREATE_VIEW           = "create_view";           // show create view test;
 const std::string SQL_SHOW_COLLATION             = "collation";             // show collation;
 const std::string SQL_SHOW_DATABASES             = "databases";             // show databases;
+const std::string SQL_SHOW_SCHEMAS               = "schemas";               // show schemas;
 const std::string SQL_SHOW_NAMESPACE             = "namespace";             // show namespace
 const std::string SQL_SHOW_META                  = "meta";                  // show meta;
 const std::string SQL_SHOW_TABLE_STATUS          = "table";                 // show table status;

@@ -146,7 +146,7 @@ private:
     Cache<std::string, std::string> _cache;
 };
 
-#ifdef BAIDU_INTERNAL
+#if defined(BAIDU_INTERNAL)
 struct AfsRWInfo {
     std::string  uri;
     std::string  absolute_path;
@@ -268,7 +268,6 @@ public:
 private:
     std::vector<AfsRWInfo> _afs_rw_infos;
 };
-
 #endif
 
 class CompactionExtFileReader : public ExtFileReader {
@@ -389,7 +388,8 @@ private:
     DISALLOW_COPY_AND_ASSIGN(ExtFileSystem);
 };
 
-#ifdef BAIDU_INTERNAL
+#if defined(BAIDU_INTERNAL)
+
 class AfsExtFileSystem : public ExtFileSystem {
 public:
 struct AfsUgi {

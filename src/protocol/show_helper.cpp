@@ -30,6 +30,8 @@ void ShowHelper::init() {
             this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_SHOW_DATABASES] = std::bind(&ShowHelper::_show_databases,
             this, std::placeholders::_1, std::placeholders::_2);
+    _calls[SQL_SHOW_SCHEMAS] = std::bind(&ShowHelper::_show_databases,
+            this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_SHOW_TABLES] = std::bind(&ShowHelper::_show_tables,
             this, std::placeholders::_1, std::placeholders::_2);
     _calls[SQL_SHOW_CREATE_TABLE] = std::bind(&ShowHelper::_show_create_table,
@@ -972,8 +974,28 @@ bool ShowHelper::_show_create_table(const SmartSocket& client, const std::vector
         }
         oss << (field.auto_inc ? "AUTO_INCREMENT " : "");
         oss << (field.is_unique_indicator ? "UNIQUE " : "");
+        auto comment_escape_string = [] (const std::string& origin_comment) {
+            // 简单转义规则，按照mysql，'为''其他为backslash转义
+            static std::unordered_map<char, std::string> escape_map {
+                {'\'', "''"},
+                {'\\', "\\\\"},
+                {'\n', "\\n"},
+                {'\0', "\\0"}
+            };
+            std::string escape_comment;
+            escape_comment.reserve(origin_comment.size() + 10);
+            for (auto c: origin_comment) {
+                if (escape_map.count(c) != 0) {
+                    escape_comment.append(escape_map[c]);
+                } else {
+                    escape_comment.push_back(c);
+                }
+            }
+            return escape_comment;
+        };
+
         if (!field.comment.empty()) {
-            oss << "COMMENT '" << field.comment << "'";
+            oss << "COMMENT '" << comment_escape_string(field.comment) << "'";
         }
         oss << ",\n";
     }
@@ -1085,7 +1107,7 @@ bool ShowHelper::_show_create_table(const SmartSocket& client, const std::vector
             oss << " DEFAULT CHARSET=" << charset_map[info.charset];
             oss <<" AVG_ROW_LENGTH=" << info.byte_size_per_record;
         }
-        oss << " COMMENT='{\"resource_tag\":\"" << info.resource_tag << "\"";
+        oss << R"( COMMENT='{"resource_tag":")" << info.resource_tag << "\"";
         if (!info.comment.empty()) {
             oss << ", \"comment\":\"" << info.comment << "\"";
         }
@@ -1094,7 +1116,11 @@ bool ShowHelper::_show_create_table(const SmartSocket& client, const std::vector
             oss << ", \"region_split_lines\":" << info.region_split_lines;
         }
         if (info.ttl_info.ttl_duration_s > 0) {
-            oss << ", \"ttl_duration\":" << info.ttl_info.ttl_duration_s;
+            std::string ttl_field_info = "";
+            if (info.ttl_info.ttl_field != nullptr) {
+                ttl_field_info = "\"field\": \"" + info.ttl_info.ttl_field->short_name + "\", ";
+            }
+            oss << ", \"ttl\":{" << ttl_field_info << "\"duration\": " << info.ttl_info.ttl_duration_s << "}";
         }
         if (info.learner_resource_tags.size() > 0) {
             oss << ", \"learner_resource_tag\": [";
@@ -1189,6 +1215,43 @@ bool ShowHelper::_show_create_table(const SmartSocket& client, const std::vector
                 oss << ",\"database_name\":\"" << info.dblink_info.mysql_info().database_name() << "\"";
                 oss << ",\"table_name\":\"" << info.dblink_info.mysql_info().table_name() << "\"";
                 oss << ",\"charset\":\"" << info.dblink_info.mysql_info().charset() << "\"";
+                oss << "}";
+            } else if (info.dblink_info.has_file_info()) {
+                oss << ", \"file_info\": {";
+                oss << "\"cluster\":\"" << info.dblink_info.file_info().cluster() << "\"";
+                oss << ",\"path\":\"" << info.dblink_info.file_info().path() << "\"";
+                oss << ",\"username\":\"" << info.dblink_info.file_info().username() << "\"";
+                // oss << ",\"password\":\"" << info.dblink_info.file_info().password() << "\""; // 隐去password
+                if (info.dblink_info.file_info().partition_fields().size() > 0) {
+                oss << ",\"partition_fields\":\"[";
+                    std::string partition_fields_str;
+                    for (const auto& partition_field : info.dblink_info.file_info().partition_fields()) {
+                        partition_fields_str += "\"" + partition_field + "\",";
+                    }
+                    if (!partition_fields_str.empty()) {
+                        partition_fields_str.pop_back();
+                    }
+                    oss << partition_fields_str << "]";
+                }
+                oss << ",\"format\":\"" << pb::FileFormat_Name(info.dblink_info.file_info().format()) << "\"";
+                if (!info.dblink_info.file_info().delimiter().empty()) {
+                    static auto process_slash_func = [] (const std::string& str) -> std::string {
+                        static std::unordered_map<char, std::string> slash_map = {
+                            {'\t', "\\\\t"},
+                            {'\u0001', "\\\\u0001"}
+                        };
+                        std::string out;
+                        for (char c : str) {
+                            if (slash_map.find(c) != slash_map.end()) {
+                                out += slash_map[c];
+                            } else {
+                                out += c;
+                            }
+                        }
+                        return out;
+                    };
+                    oss << ",\"delimiter\":\"" << process_slash_func(info.dblink_info.file_info().delimiter()) << "\"";
+                }
                 oss << "}";
             } else {
                 oss << ",\"meta_name\":\"" << info.dblink_info.meta_name() << "\"";
@@ -2519,7 +2582,9 @@ bool ShowHelper::_show_schema_conf(const SmartSocket& client, const std::vector<
                                                     "enable_column_engine",
                                                     "olap_pre_split_cnt",
                                                     "cold_use_column_only",
-                                                    "force_column_storage"};
+                                                    "cold_use_column_only",
+                                                    "force_column_storage",
+                                                    "column_only_read_base"};
     // 前三个conf按照bool解析, pk_prefix_balance按照int32来解析
     if (split_vec.size() != 3 || allowed_conf.find(split_vec[2]) == allowed_conf.end()) {
         client->state = STATE_ERROR;
@@ -2553,7 +2618,8 @@ bool ShowHelper::_show_schema_conf(const SmartSocket& client, const std::vector<
             || split_vec[2] == "enable_column_engine"
             || split_vec[2] == "olap_pre_split_cnt"
             || split_vec[2] == "cold_use_column_only"
-            || split_vec[2] == "force_column_storage") {
+            || split_vec[2] == "force_column_storage"
+            || split_vec[2] == "column_only_read_base") {
         names.emplace_back("value");
     }
 
@@ -2855,6 +2921,25 @@ bool ShowHelper::_show_all_tables(const SmartSocket& client, const std::vector<s
     type_func_map["dblink"] = [] (const SmartTable& table) {
         return table != nullptr && table->engine == pb::DBLINK;
     };
+    type_func_map["statistics"] = [] (const SmartTable& table) {
+        return table != nullptr && table->have_statistics;
+    };
+    type_func_map["cost"] = [] (const SmartTable& table) {
+        auto& pb_conf = table->schema_conf;
+        const google::protobuf::Reflection* reflection = pb_conf.GetReflection();
+        const google::protobuf::Descriptor* descriptor = pb_conf.GetDescriptor();
+        const google::protobuf::FieldDescriptor* field = nullptr;
+        field = descriptor->FindFieldByName(TABLE_SWITCH_COST);
+        if (field == nullptr) {
+            return false;
+        }
+        bool has_field = reflection->HasField(pb_conf, field);
+        if (!has_field) {
+            return false;
+        }
+        return reflection->GetBool(pb_conf, field);
+    };
+
     type_func_map["type_timestamp"] = [](const SmartTable& table) {
         if (table != nullptr) {
             for (auto& f : table->fields) {
@@ -3299,7 +3384,12 @@ bool ShowHelper::_show_user(const SmartSocket& client, const std::vector<std::st
         DB_FATAL("param invalid");
         return false;
     }
-
+    auto user = client->user_info;
+    if (user == nullptr || !user->is_super) {
+        _wrapper->make_err_packet(client, ER_NO_SUCH_USER, "Only Support Super User To Query");
+        client->state = STATE_READ_QUERY_RESULT;
+        return false;
+    }
     auto info = factory->get_user_info(split_vec[2]);
     if (info == nullptr) {
         DB_WARNING("user name not exist [%s]", split_vec[2].c_str());

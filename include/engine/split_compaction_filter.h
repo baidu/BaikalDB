@@ -25,9 +25,9 @@ namespace baikaldb {
 DECLARE_int32(rocks_binlog_ttl_days);
 class SplitCompactionFilter : public rocksdb::CompactionFilter {
 struct FilterRegionInfo {
-    FilterRegionInfo(bool use_ttl, const std::string& end_key, int64_t online_ttl_base_expire_time_us) :
-        use_ttl(use_ttl), end_key(end_key), online_ttl_base_expire_time_us(online_ttl_base_expire_time_us) {}
-    bool use_ttl = false;
+    FilterRegionInfo(bool use_normal_ttl, const std::string& end_key, int64_t online_ttl_base_expire_time_us) :
+        use_normal_ttl(use_normal_ttl), end_key(end_key), online_ttl_base_expire_time_us(online_ttl_base_expire_time_us) {}
+    bool use_normal_ttl = false;
     std::string end_key;
     int64_t online_ttl_base_expire_time_us = 0;
 };
@@ -96,7 +96,7 @@ public:
             rocksdb::Slice key_slice(key);
             key_slice.remove_prefix(sizeof(int64_t) * 2);
             rocksdb::Slice value_slice(value);
-            if (filter_info->use_ttl) {
+            if (filter_info->use_normal_ttl) {
                 ttl_decode(value_slice, index_info, filter_info->online_ttl_base_expire_time_us);
             }
             return !Transaction::fits_region_range(key_slice, value_slice, 
@@ -106,14 +106,14 @@ public:
     }
 
     void set_filter_region_info(int64_t region_id, const std::string& end_key, 
-                                bool use_ttl, int64_t online_ttl_base_expire_time_us) {
+                                bool use_normal_ttl, int64_t online_ttl_base_expire_time_us) {
         FilterRegionInfo* old = get_filter_region_info(region_id);
         // 已存在不更新
         if (old != nullptr && old->end_key == end_key) {
             return;
         }
-        auto call = [region_id, end_key, use_ttl, online_ttl_base_expire_time_us](KeyMap& key_map) {
-            FilterRegionInfo* new_info = new FilterRegionInfo(use_ttl, end_key, online_ttl_base_expire_time_us);
+        auto call = [region_id, end_key, use_normal_ttl, online_ttl_base_expire_time_us](KeyMap& key_map) {
+            FilterRegionInfo* new_info = new FilterRegionInfo(use_normal_ttl, end_key, online_ttl_base_expire_time_us);
             key_map[region_id] = new_info;
         };
         _range_key_map.modify(call);

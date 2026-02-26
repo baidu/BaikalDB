@@ -21,6 +21,7 @@
 #include "row2column.h"
 #include "rocks_wrapper.h"
 #include "rocksdb_filesystem.h"
+#include "vectorize_helpper.h"
 
 namespace baikaldb {
 DEFINE_int32(parquet_userid_statis_batch_count, 5, "parquet_userid_statis_batch_count(5)");  
@@ -29,13 +30,14 @@ DEFINE_int32(parquet_rowgroup_max_length, 1000000, "parquet_rowgroup_max_length(
 DEFINE_int32(parquet_file_max_length, 20000000, "parquet_file_max_length(2000w)");  
 DEFINE_int32(raftlog_read_batch_size, 10000, "raftlog_read_batch_size");
 DEFINE_int32(column_snapshot_timeout_s, 180, "column_snapshot_timeout_s");
-DEFINE_bool(column_minor_compaction_use_acero, false, "column_minor_compaction_use_acero");
-DEFINE_bool(column_major_compaction_use_acero, false, "column_major_compaction_use_acero");
+DEFINE_bool(column_minor_compaction_use_acero, false, "Use Acero for column minor compaction, default: false");
+DEFINE_bool(column_major_compaction_use_acero, false, "Use Acero for column major compaction, default: false");
 DEFINE_int64(column_major_compaction_use_acero_max_rows, 2000000, "column_major_compaction_use_acero_max_rows, default(200w)");
 DEFINE_int64(column_automatic_judgment_max_in_count, 100, "column_automatic_judgment_max_in_count, default(100)");
-DEFINE_bool(parquet_read_use_userid_statis, true, "parquet_read_use_userid_statis");
+DEFINE_bool(parquet_read_use_userid_statis, true, "Use userid statistics in parquet reading, default: true");
 DEFINE_int64(column_row2column_flush_delay_h, 6, "column_row2column_flush_delay_h, default(6)");
-DEFINE_bool(column_cold_parquet_clear, false, "column_cold_parquet_clear");
+DEFINE_bool(column_cold_parquet_clear, false, "Enable cold parquet clearing, default: false");
+DEFINE_bool(enable_column_engine, false, "Enable column engine, default: false");
 #define IF_DONE_SET_RESPONSE(done, errcode, err_message) \
     do {\
         if (done != nullptr && ((ColumnOPClosure*)done)->response != nullptr) {\
@@ -59,85 +61,6 @@ struct SnapshotManager {
     const rocksdb::Snapshot* hot_snapshot = nullptr;
     const rocksdb::Snapshot* cold_snapshot = nullptr;
 };
-
-std::shared_ptr<ColumnSchemaInfo> make_column_schema(int64_t tableid) {
-    auto table = SchemaFactory::get_instance()->get_table_info_ptr(tableid);
-    auto index = SchemaFactory::get_instance()->get_index_info_ptr(tableid);
-    if (table == nullptr || index == nullptr) {
-        DB_FATAL("table or index is null, tableid:%ld", tableid);
-        return nullptr;
-    }
-    auto schema_ptr = std::make_shared<ColumnSchemaInfo>();
-    schema_ptr->index_info = index;
-    schema_ptr->table_info = table;
-    schema_ptr->key_fields = index->fields;
-    
-    std::set<int> key_field_ids;
-    for (const auto& field : index->fields) {
-        key_field_ids.insert(field.id);
-    }
-
-    std::set<int> field_ids_need_sum;
-    for (const auto& field : table->fields_need_sum) {
-        field_ids_need_sum.insert(field.id);
-    }
-
-    int value_idx = schema_ptr->key_fields.size();
-    schema_ptr->value_fields.reserve(table->fields.size() - index->fields.size());
-    for (const auto& field : table->fields) {
-        if (key_field_ids.count(field.id) > 0 || field.deleted) {
-            continue;
-        }
-
-        schema_ptr->value_fields.emplace_back(field);
-        if (field_ids_need_sum.count(field.id) > 0) {
-            schema_ptr->need_sum_idx.insert(value_idx);
-        }
-        value_idx++;
-    }
-
-    schema_ptr->uniq_size = schema_ptr->key_fields.size();
-    schema_ptr->keytype_idx = schema_ptr->key_fields.size() + schema_ptr->value_fields.size();
-    schema_ptr->raft_index_idx = schema_ptr->keytype_idx + 1;
-    schema_ptr->batch_pos_idx = schema_ptr->raft_index_idx + 1;
-
-    std::vector<std::shared_ptr<arrow::Field>> arrow_fields;
-    arrow_fields.reserve(schema_ptr->batch_pos_idx + 1);
-    for (const auto& field : schema_ptr->key_fields) {
-        auto arrow_type = primitive_to_arrow_type(field.type);
-        if (arrow_type < 0) {
-            DB_COLUMN_FATAL("field: %s primitive type:%d to arrow type failed", field.lower_short_name.c_str(), field.type);
-            return nullptr;
-        }
-        auto arrow_field = ColumnRecord::make_schema(field.lower_short_name, arrow::Type::type(arrow_type));
-        if (arrow_field == nullptr) {
-            DB_COLUMN_FATAL("field: %s make arrow schema failed", field.lower_short_name.c_str());
-            return nullptr;
-        }
-        arrow_fields.emplace_back(arrow_field);
-    }
-
-    for (const auto& field : schema_ptr->value_fields) {
-        auto arrow_type = primitive_to_arrow_type(field.type);
-        if (arrow_type < 0) {
-            DB_COLUMN_FATAL("field: %s primitive type:%d to arrow type failed", field.lower_short_name.c_str(), field.type);
-            return nullptr;
-        }
-        auto arrow_field = ColumnRecord::make_schema(field.lower_short_name, arrow::Type::type(arrow_type));
-        if (arrow_field == nullptr) {
-            DB_COLUMN_FATAL("field: %s make arrow schema failed", field.lower_short_name.c_str());
-            return nullptr;
-        }
-        arrow_fields.emplace_back(arrow_field);
-    }
-
-    arrow_fields.emplace_back(ColumnRecord::make_schema(KEY_TYPE_NAME, arrow::Type::type::INT32));
-    schema_ptr->schema = std::make_shared<arrow::Schema>(arrow_fields);
-    arrow_fields.emplace_back(ColumnRecord::make_schema(RAFT_INDEX_NAME, arrow::Type::type::INT64));
-    arrow_fields.emplace_back(ColumnRecord::make_schema(BATCH_POS_NAME, arrow::Type::type::INT32));
-    schema_ptr->schema_with_order_info = std::make_shared<arrow::Schema>(arrow_fields);
-    return schema_ptr;
-}
 
 std::string files_name(const std::vector<std::shared_ptr<ColumnFileInfo>>& files) {
     std::ostringstream os;
@@ -350,14 +273,15 @@ int Region::column_snapshot_save(const std::string& snapshot_path, std::vector<s
     return 0;
 }
 
-int Region::get_column_files(const std::vector<pb::PossibleIndex::Range>& key_ranges, std::vector<std::shared_ptr<ParquetFile>>& files) {
+int Region::get_column_files(const pb::PossibleIndex& pos_index, std::vector<std::shared_ptr<ParquetFile>>& files) {
     std::shared_ptr<ColumnFileSet> column_file_set = _column_mgr.get_column_fileset();
     DB_DEBUG("region_id: %ld, get column files, key_ranges size: %ld", _region_id, key_ranges.size());
     for (const auto& [_, info] : column_file_set->column_files) {
-        if (!key_ranges.empty()) {
+        if (pos_index.ranges_size() > 0) {
             bool is_overlap = false;
-            for (const auto& range : key_ranges) {
-                if (ParquetFile::check_interval_overlapped(range, info->start_key, info->end_key)) {
+            for (const auto& range : pos_index.ranges()) {
+                if (ParquetFile::check_interval_overlapped(range, pos_index.is_eq(), pos_index.left_open(), pos_index.right_open(),
+                        info->start_key, info->end_key)) {
                     is_overlap = true;
                     break;
                 }
@@ -535,7 +459,8 @@ bool Region::can_do_column_compact() {
 // 定时执行, 快速将raft log 刷成parquet文件
 int Region::column_minor_compact() {
     TimeCost cost;
-    std::shared_ptr<ColumnSchemaInfo> schema_info = make_column_schema(get_table_id());
+    std::unordered_map<int32_t, FieldInfo*> field_id2info_map;
+    std::shared_ptr<ColumnSchemaInfo> schema_info = ColumnRecord::make_column_schema(get_table_id(), nullptr, nullptr, field_id2info_map);
     if (schema_info == nullptr) {
         DB_FATAL("region_id: %ld, make column schema failed", _region_id);
         return -1;
@@ -638,6 +563,10 @@ int Region::column_minor_compact() {
         column_delete_files(new_files);
         return -1;
     }
+
+    // compaction成功，删除本次涉及的column_txn_log_index_key
+    raftlog_reader->delete_column_txn_log_index();
+
     auto new_files_name = files_name(new_files);
     DB_NOTICE("region_id: %ld, minor compact success, read lines[%ld, %ld, %ld], write lines: %ld, use_acero_flag: %d, cost: %ld, new_files: %s", 
         _region_id, raftlog_reader->row_count(), raftlog_reader->put_count(), raftlog_reader->delete_count(), writer->row_count(), 
@@ -646,6 +575,12 @@ int Region::column_minor_compact() {
 }
 
 void Region::column_flush() {
+    if (!FLAGS_enable_column_engine) {
+        if (_column_mgr.column_status() != pb::CS_INVALID) {
+            _column_mgr.remove_column_data(pb::CS_INVALID, 0);
+        }
+        return;
+    }
     auto table = _factory->get_table_info_ptr(get_table_id());
     if (table == nullptr) {
         return;
@@ -710,7 +645,8 @@ void Region::column_flush() {
 
 void Region::column_major_compact(bool is_base) {
     TimeCost cost;
-    std::shared_ptr<ColumnSchemaInfo> schema_info = make_column_schema(get_table_id());
+    std::unordered_map<int32_t, FieldInfo*> field_id2info_map;
+    std::shared_ptr<ColumnSchemaInfo> schema_info = ColumnRecord::make_column_schema(get_table_id(), nullptr, nullptr, field_id2info_map);
     if (schema_info == nullptr) {
         DB_FATAL("region_id: %ld, get schema info failed", _region_id);
         return;
@@ -718,7 +654,12 @@ void Region::column_major_compact(bool is_base) {
     std::vector<std::shared_ptr<ColumnFileInfo>> old_files;
     int ret = 0;
     if (is_base) {
-        ret = _column_mgr.pick_base_compact_file(old_files);
+        bool only_read_base = false;
+        auto table = _factory->get_table_info_ptr(get_table_id());
+        if (table != nullptr && table->schema_conf.column_only_read_base()) {
+            only_read_base = true;
+        }
+        ret = _column_mgr.pick_base_compact_file(old_files, only_read_base);
     } else {
         ret = _column_mgr.pick_major_compact_file(old_files);
     }
@@ -739,10 +680,19 @@ void Region::column_major_compact(bool is_base) {
         min_version = is_base ? 0 : std::min(file->start_version, min_version);
         max_version = std::max(file->end_version, max_version);
         ParquetFileReaderOptions options;
-        options.raftindex = file->end_version;
-        options.schema_info = schema_info;
-        options.file_info = file;
-        auto parquet_reader = std::make_shared<ParquetFileReader>(options);
+        for (const auto& f : schema_info->key_fields) {
+            options.lower_short_name_fields[f.lower_short_name] = f;
+        }
+        for (const auto& f : schema_info->value_fields) {
+            options.lower_short_name_fields[f.lower_short_name] = f;
+        }
+        options.schema = schema_info->schema_with_order_info;
+        auto parquet_file = ParquetFileManager::get_instance()->get_parquet_file(file);
+        if (parquet_file == nullptr) {
+            DB_WARNING("open file:%s failed", file->full_path().c_str());
+            return;
+        }
+        auto parquet_reader = std::make_shared<ParquetFileReader>(options, parquet_file);
         parquet_readers.emplace_back(parquet_reader);
     }
 
@@ -815,7 +765,8 @@ void Region::column_base_row2column() {
         }
     }
     TimeCost cost;
-    std::shared_ptr<ColumnSchemaInfo> schema_info = make_column_schema(get_table_id());
+    std::unordered_map<int32_t, FieldInfo*> field_id2info_map;
+    std::shared_ptr<ColumnSchemaInfo> schema_info = ColumnRecord::make_column_schema(get_table_id(), nullptr, nullptr, field_id2info_map);
     if (schema_info == nullptr) {
         DB_FATAL("make column schema failed, region_id: %ld", _region_id);
         return;

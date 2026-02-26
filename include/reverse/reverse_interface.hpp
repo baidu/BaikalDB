@@ -19,16 +19,22 @@
 
 namespace baikaldb {
 
-template<typename Schema>
-int CommRindexNodeParser<Schema>::init(const std::string& term) {
-    auto* exist_parser = this->_schema->get_term(term);
-    if (exist_parser != NULL) {
-        *this = *exist_parser;
-        return 0;
-    }
-    this->_schema->get_reverse_list(term, _new_list_ptr, _old_list_ptr);
-    _new_list = (ReverseList*)_new_list_ptr.get();
-    _old_list = (ReverseList*)_old_list_ptr.get();
+template <typename Schema>
+int CommRindexNodeParser<Schema>::_create_reverse_key_prefix(std::string& key) {
+    uint64_t region_encode = KeyEncoder::to_endian_u64(KeyEncoder::encode_i64(this->_schema->get_region_id()));
+    key.append((char*)&region_encode, sizeof(uint64_t));
+    uint64_t table_encode = KeyEncoder::to_endian_u64(KeyEncoder::encode_i64(this->_schema->get_index_id()));
+    key.append((char*)&table_encode, sizeof(uint64_t));
+    return 0;
+}
+
+template <typename Schema>
+int CommRindexNodeParser<Schema>::_init(const std::string& term,
+        ReverseListSptr new_list_ptr, ReverseListSptr old_list_ptr) {
+    _new_list_ptr = new_list_ptr;
+    _old_list_ptr = old_list_ptr;
+    _new_list = static_cast<ReverseList*>(new_list_ptr.get());
+    _old_list = static_cast<ReverseList*>(old_list_ptr.get());
     _curr_node = nullptr;
     if (_new_list != nullptr && _new_list->reverse_nodes_size() > 0) {
         _list_size_new = _new_list->reverse_nodes_size();
@@ -48,7 +54,7 @@ int CommRindexNodeParser<Schema>::init(const std::string& term) {
             _cmp_res = _curr_id_new->compare(*_curr_id_old);
             if (_cmp_res > 0) {
                 _curr_node = _old_list->mutable_reverse_nodes(0);
-            } 
+            }
         } else {
             _curr_node = _old_list->mutable_reverse_nodes(0);
         }
@@ -59,6 +65,28 @@ int CommRindexNodeParser<Schema>::init(const std::string& term) {
         advance(_key_range.first);
     }
     this->_schema->set_term(term, this);
+    return 0;
+}
+
+template<typename Schema>
+int CommRindexNodeParser<Schema>::init(const std::string& term, ReverseDelayInitContext<Schema>* delay_init_context) {
+    if (delay_init_context != nullptr) {
+        // 延迟初始化，调用multiget减小RocksDB读取压力
+        delay_init_context->children.emplace_back(this);
+        delay_init_context->terms.emplace_back(term);
+        std::string key;
+        _create_reverse_key_prefix(key);
+        delay_init_context->reverse_rocksdb_keys.emplace_back(std::move(key));
+    } else {
+        auto* exist_parser = this->_schema->get_term(term);
+        if (exist_parser != NULL) {
+            *this = *exist_parser;
+            return 0;
+        }
+        ReverseListSptr new_list_ptr, old_list_ptr;
+        this->_schema->get_reverse_list(term, new_list_ptr, old_list_ptr);
+        _init(term, new_list_ptr, old_list_ptr);
+    }
     return 0;
 } 
 
@@ -205,7 +233,7 @@ const ReverseNode*
 }
 
 template<typename List>
-int NewSchema<List>::create_executor(const std::string& search_data,
+int NewSchema<List>::create_executor(myrocksdb::Transaction* txn, const std::string& search_data,
     pb::MatchMode mode, pb::SegmentType segment_type, const pb::Charset& charset) {
     _weight_field = get_field_info_by_name(_table_info->fields, "__weight");
     _query_words_field = get_field_info_by_name(_table_info->fields, "__querywords");
@@ -225,7 +253,7 @@ int NewSchema<List>::create_executor(const std::string& search_data,
         // 报告需求，like语法用|表示'或'
         Tokenizer::get_instance()->split_str(search_data, or_search, '|', charset);
     }
-    LogicalQuery logical_query(this);
+    LogicalQuery logical_query(this, txn, _is_fast);
     ExecutorNode* parent = nullptr;
     ExecutorNode* root = &logical_query._root;
     if (or_search.size() == 0) {
@@ -263,7 +291,7 @@ int NewSchema<List>::create_executor(const std::string& search_data,
             case pb::S_ES_STANDARD:
                 ret = Tokenizer::get_instance()->es_standard(or_item, term_map, charset);
                 break;
-#ifdef BAIDU_INTERNAL
+#if defined(BAIDU_INTERNAL) && !defined(__aarch64__)
             case pb::S_WORDRANK: 
                 ret = Tokenizer::get_instance()->wordrank(or_item, term_map, charset);
                 break;

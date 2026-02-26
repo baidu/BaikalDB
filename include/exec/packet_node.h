@@ -101,7 +101,8 @@ private:
     int pack_binary_row(MemRow* row, RuntimeState* state, std::vector<std::shared_ptr<arrow::ChunkedArray>>* columns = nullptr, int row_idx = 0);
     int pack_eof();
     int fatch_expr_subquery_results(RuntimeState* state);
-
+    static std::map<int64_t, pb::RegionInfo> sample_analyze_regions(
+        const std::map<int64_t, pb::RegionInfo>& all_regions, int64_t sample_cnt);
 private:
     bool _binary_protocol = false;
     pb::OpType _op_type;

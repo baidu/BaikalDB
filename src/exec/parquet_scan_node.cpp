@@ -1,6 +1,7 @@
 #include "parquet_scan_node.h"
 #include "store.h"
 #include "vectorize_helpper.h"
+#include "sort_merge.h"
 
 namespace baikaldb {
 int ParquetScanNode::init(const pb::PlanNode& node) {
@@ -23,6 +24,11 @@ int ParquetScanNode::init(const pb::PlanNode& node) {
     _table_info = _factory->get_table_info_ptr(_table_id);
     if (_table_info == nullptr) {
         DB_WARNING("table_info is nullptr");
+        return -1;
+    }
+    _pri_info = _factory->get_index_info_ptr(_table_id);
+    if (_pri_info == nullptr) {
+        DB_WARNING("primary index info is nullptr");
         return -1;
     }
     return 0;
@@ -55,7 +61,7 @@ int ParquetScanNode::open(RuntimeState* state) {
         }
         _field_id2info_map[field_info->id] = field_info;
     }
-    if (get_qualified_record_batch_readers(_parquet_file2reader_map, _parquet_file_not_exist_column_map) != 0) {
+    if (get_qualified_record_batch_readers(_parquet_file_readers) != 0) {
         DB_WARNING("get qualified record batch readers fail");
         return -1;
     }
@@ -74,6 +80,7 @@ void ParquetScanNode::close(RuntimeState* state) {
 }
 
 int ParquetScanNode::build_arrow_declaration(RuntimeState* state) {
+    START_LOCAL_TRACE_WITH_PARTITION_PROPERTY(get_trace(), state->get_trace_cost(), &_partition_property, OPEN_TRACE, nullptr);
     int ret = 0;
     // add SourceNode
     std::shared_ptr<ParquetVectorizedReader> vectorized_reader = std::make_shared<ParquetVectorizedReader>();
@@ -89,6 +96,7 @@ int ParquetScanNode::build_arrow_declaration(RuntimeState* state) {
     arrow::acero::Declaration dec{"record_batch_source",
             arrow::acero::RecordBatchSourceNodeOptions{vectorized_reader->schema(), std::move(iter_maker)}};
     state->append_acero_declaration(dec);
+    LOCAL_TRACE_ARROW_PLAN_WITH_SCHEMA(dec, vectorized_reader->schema(), nullptr);
     return 0;
 }
 
@@ -98,119 +106,121 @@ int ParquetScanNode::process_index(RuntimeState* state) {
         DB_FATAL_STATE(state, "no index");
         return -1;
     }
-    pb::PossibleIndex pos_index;
-    pos_index.ParseFromString(scan_pb.indexes(0));
-    if (pos_index.index_id() != _table_id) {
+    _possible_index.ParseFromString(scan_pb.indexes(0));
+    if (_possible_index.index_id() != _table_id) {
         DB_WARNING_STATE(state, "ParquetScanNode only support primary key index");
         return -1;
     }
-    if (pos_index.ranges_size() == 0) {
+    if (_possible_index.ranges_size() == 0) {
         DB_WARNING_STATE(state, "PossibleIndex has no range");
         return 0;
     }
-    DB_WARNING("PossibleIndex: %s", pos_index.ShortDebugString().c_str());
-    _key_ranges = std::vector<pb::PossibleIndex::Range>(pos_index.ranges().begin(), pos_index.ranges().end());
+    DB_WARNING("PossibleIndex: %s", _possible_index.ShortDebugString().c_str());
     return 0;
 }
 
-int ParquetScanNode::get_qualified_record_batch_readers(
-        std::unordered_map<std::string, ReaderInfo>& parquet_file2reader_map,
-        std::unordered_map<std::string, std::vector<FieldInfo*>>& parquet_file_not_exist_column_map) {
+void ParquetScanNode::get_qualified_parquet_file_readers(std::vector<std::shared_ptr<ParquetFileReader>>& parquet_file_readers, 
+    const std::vector<std::shared_ptr<ParquetFile>>& parquet_files, std::shared_ptr<arrow::Schema> schema) {
+    for (const auto& parquet_file : parquet_files) {
+        ParquetFileReaderOptions options;
+        options.pos_index = &_possible_index;
+        for (const auto& [_, field_info] : _field_id2info_map) {
+            options.lower_short_name_fields[field_info->lower_short_name] = *field_info;
+        }
+        options.schema = schema;
+        auto parquet_reader = std::make_shared<ParquetFileReader>(options, parquet_file);
+        parquet_file_readers.emplace_back(parquet_reader);
+    }
+}
+
+int ParquetScanNode::get_qualified_record_batch_readers(std::vector<std::shared_ptr<::arrow::RecordBatchReader>>& record_batch_readers) {
     // 获取该region最新版本的所有parquet_file集合 
     SmartRegion region = Store::get_instance()->get_region(_region_id);
     if (region == nullptr) {
         DB_WARNING("region is nullptr");
         return -1;
     }
-    
-    if (region->get_column_files(_key_ranges, _parquet_files) != 0) {
+    std::vector<std::shared_ptr<ParquetFile>> parquet_files_tmp;
+    if (region->get_column_files(_possible_index, parquet_files_tmp) != 0) {
         DB_WARNING("Fail to get_column_files");
         return -1;
     }
 
-    for (const auto& parquet_file : _parquet_files) {
-        const std::string file_path = parquet_file->get_file_path();
-        // 获取column_indices，以及在parquet文件里不存在的列
-        // 在parquet文件中不存在的列需要补充默认值或NULL
-        const std::unordered_map<std::string, int>& column_name2index_map = parquet_file->get_column_name2index_map();
-        std::vector<int> exist_column_indices;
-        std::vector<FieldInfo*> not_exist_columns;
-        for (const auto& [_, field_info] : _field_id2info_map) {
-            const std::string& field_name = field_info->lower_short_name;
-            if (column_name2index_map.find(field_name) != column_name2index_map.end()) {
-                exist_column_indices.emplace_back(column_name2index_map.at(field_name));
-                // DB_WARNING("field_name: %s, index: %d", field_name.c_str(), column_name2index_map.at(field_name));
-            } else {
-                DB_WARNING("field_name: %s, not exist", field_name.c_str());
-                not_exist_columns.emplace_back(field_info);
-            }
+    std::vector<std::shared_ptr<ParquetFile>> parquet_files;
+    parquet_files.reserve(parquet_files_tmp.size());
+    int cumulatives_file_count = 0;
+    bool column_only_read_base = _table_info->schema_conf.column_only_read_base();
+    // 只获取base层的parquet_file，可以不用merge_on_read
+    for (auto f : parquet_files_tmp) {
+        // base层文件start_version为0
+        if (f->get_file_info()->start_version == 0) {
+            parquet_files.emplace_back(f);
+        } else if (!column_only_read_base) {
+            cumulatives_file_count++;
+            parquet_files.emplace_back(f);
         }
-        if (!not_exist_columns.empty()) {
-            parquet_file_not_exist_column_map[file_path].swap(not_exist_columns);
+    }
+
+    bool has_put_or_delete = false;
+    for (const auto& f : parquet_files) {
+        auto info = f->get_file_info();
+        if (info->start_version != 0 && (info->put_count > 0 || info->delete_count > 0)) {
+            has_put_or_delete = true;
+            break;
         }
-        std::unique_ptr<::arrow::RecordBatchReader> reader;
-        std::vector<int> row_group_indices;
-        bool fill_cache = false;
-        if (_key_ranges.empty()) {
-            // 获取所有rowgroup的数据
-            std::shared_ptr<::parquet::FileMetaData> file_metadata = parquet_file->get_file_metadata();
-            if (file_metadata == nullptr) {
-                DB_WARNING("file_metadata is nullptr");
-                return -1;
-            }
-            if (file_metadata->num_row_groups() == 0) {
-                DB_WARNING("parquet file has no row group");
+    }
+
+    std::unordered_map<int32_t, FieldInfo*> field_id2info_map = _field_id2info_map;
+    if (cumulatives_file_count > 0 && has_put_or_delete) {
+        // merge on read时，需要补充主键
+        for (const auto& f : _pri_info->fields) {
+            FieldInfo* field_info = _table_info->get_field_ptr(f.id);
+            if (field_info == nullptr) {
+                DB_WARNING("field not found region_id: %ld, field_id: %d", _region_id, f.id);
                 continue;
             }
-            
-            row_group_indices.reserve(file_metadata->num_row_groups());
-            for (int i = 0; i < file_metadata->num_row_groups(); ++i) {
-                row_group_indices.emplace_back(i);
-            }
-            auto status = parquet_file->GetRecordBatchReader(row_group_indices, exist_column_indices, &reader);
-            if (!status.ok()) {
-                DB_WARNING("Fail to get_record_batch_reader");
-                return -1;
-            }
-        } else {
-            // 获取符合条件的row_group_indices和row_ranges
-            std::vector<std::vector<std::pair<int64_t, int64_t>>> row_ranges;
-            if (parquet_file->get_qualified_rowgroup_and_rowranges(_key_ranges, row_group_indices, row_ranges) != 0) {
-                DB_WARNING("Fail to get_qualified_rowgroup_and_rowranges");
-                return -1;
-            }
-            if (row_group_indices.empty()) {
-                DB_WARNING("parquet file has no qualified data");
-                continue;
-            }
-            // 获取record_batch_reader
-            auto status = parquet_file->GetRecordBatchReader(row_group_indices, exist_column_indices, row_ranges, &reader);
-            if (!status.ok()) {
-                DB_WARNING("Fail to get_record_batch_reader");
-                return -1;
-            }
-            fill_cache = true;
+            field_id2info_map[f.id] = field_info;
         }
-        std::vector<ReadRange> read_ranges;
-        read_ranges.reserve(row_group_indices.size() * exist_column_indices.size());
-        parquet_file->parser_position(row_group_indices, exist_column_indices, read_ranges);
-        auto file_info = parquet_file->get_file_info();
-        ReaderInfo reader_info;
-        reader_info.read_contents = std::make_shared<ReadContents>();
-        reader_info.read_contents->fill_cache = fill_cache;
-        reader_info.read_contents->file_short_name = parquet_file->get_file_short_name();
-        reader_info.read_contents->ranges.swap(read_ranges);
-        reader_info.read_contents->region_id = file_info->region_id;
-        reader_info.read_contents->start_version = file_info->start_version;
-        reader_info.read_contents->end_version = file_info->end_version;
-        reader_info.read_contents->file_idx = ColumnFileInfo::get_file_idx(parquet_file->get_file_short_name());
-        if (reader_info.read_contents->file_idx < 0) {
-            DB_COLUMN_FATAL("Fail to get file idx : %s", parquet_file->get_file_short_name().c_str());
+        std::shared_ptr<ColumnSchemaInfo> schema_info = ColumnRecord::make_column_schema(_table_info->id, _table_info, _pri_info, field_id2info_map);
+        if (schema_info == nullptr) {
+            DB_FATAL("get schema info failed");
             return -1;
         }
-        reader_info.reader = std::move(reader);
-        parquet_file2reader_map[file_path] = reader_info;
+        std::vector<std::shared_ptr<ParquetFileReader>> parquet_file_readers;
+        parquet_file_readers.reserve(parquet_files.size());
+        get_qualified_parquet_file_readers(parquet_file_readers, parquet_files, schema_info->schema_with_order_info);
+        std::vector<std::shared_ptr<SingleRowReader>> single_row_readers;
+        single_row_readers.reserve(parquet_file_readers.size());
+        SortMergeOptions merge_options;
+        merge_options.batch_size = 1024;
+        merge_options.is_base_compact = true;
+        merge_options.schema_info = schema_info;
+        for (auto& r : parquet_file_readers) {
+            single_row_readers.emplace_back(std::make_shared<OrderSingleRowReader>(r, schema_info.get()));
+        }
+        record_batch_readers.emplace_back(std::make_shared<SortMerge>(merge_options, single_row_readers));
+    } else {
+        std::vector<std::shared_ptr<arrow::Field>> arrow_fields;
+        arrow_fields.reserve(_field_id2info_map.size());
+        for (const auto& [_, field_info] : _field_id2info_map) {
+            std::shared_ptr<arrow::Field> arrow_field = VectorizeHelpper::make_field(field_info->lower_short_name, 
+                                                            arrow::Type::type(primitive_to_arrow_type(field_info->type)));
+            if (arrow_field == nullptr) {
+                DB_WARNING("Fail to make arrow field");
+                return -1;
+            }
+            arrow_fields.emplace_back(arrow_field);
+        }
+        std::shared_ptr<arrow::Schema> arrow_schema = arrow::schema(arrow_fields);
+
+        std::vector<std::shared_ptr<ParquetFileReader>> parquet_file_readers;
+        parquet_file_readers.reserve(parquet_files.size());
+        get_qualified_parquet_file_readers(parquet_file_readers, parquet_files, arrow_schema);
+        for (auto& r : parquet_file_readers) {
+            record_batch_readers.emplace_back(r);
+        }
     }
+
     return 0;
 }
 
@@ -221,14 +231,13 @@ int ParquetVectorizedReader::init(RuntimeState* state, ParquetScanNode* parquet_
         return -1;
     }
     if (parquet_scan_node == nullptr) {
-        DB_WARNING("_parquet_scan_node is nullptr");
+        DB_WARNING("parquet_scan_node is nullptr");
         return -1;
     }
     _state = state;
     _parquet_scan_node = parquet_scan_node;
     _field_id2info_map = _parquet_scan_node->get_field_id2info_map();
-    _parquet_file2reader_map = _parquet_scan_node->get_parquet_file2reader_map();
-    _parquet_file_not_exist_column_map = _parquet_scan_node->get_parquet_file_not_exist_column_map();
+    _parquet_file_readers = _parquet_scan_node->get_parquet_file_readers();
 
     // 构造schema
     pb::TupleDescriptor* tuple_desc = _parquet_scan_node->get_tuple();
@@ -241,7 +250,7 @@ int ParquetVectorizedReader::init(RuntimeState* state, ParquetScanNode* parquet_
     arrow_fields.reserve(tuple_desc->slots().size());
     for (const auto& slot : tuple_desc->slots()) {
         const std::string& field_name = std::to_string(slot.tuple_id()) + "_" + std::to_string(slot.slot_id());
-        std::shared_ptr<arrow::Field> arrow_field = ColumnRecord::make_schema(field_name, 
+        std::shared_ptr<arrow::Field> arrow_field = VectorizeHelpper::make_field(field_name, 
                                                         arrow::Type::type(primitive_to_arrow_type(slot.slot_type())));
         if (arrow_field == nullptr) {
             DB_WARNING("Fail to make arrow field");
@@ -261,11 +270,12 @@ int ParquetVectorizedReader::init(RuntimeState* state, ParquetScanNode* parquet_
             return -1;
         }
         _column_name_map[field_name] = field_info->lower_short_name;
+        _column_type_map[field_name] = field_info->type;
     }
     _arrow_schema = arrow::schema(arrow_fields);
 
     // 设置parquet文件读迭代器
-    _reader_iter = _parquet_file2reader_map->begin();
+    _reader_iter = _parquet_file_readers->begin();
     return 0;
 }
 
@@ -273,9 +283,6 @@ int ParquetVectorizedReader::init(RuntimeState* state, ParquetScanNode* parquet_
 // 每次最多读取FLAGS_chunk_size行
 arrow::Status ParquetVectorizedReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* out) {    
     out->reset();
-    ON_SCOPE_EXIT([]() {
-        ParquetCache::get_instance()->set_bthread_local(nullptr);
-    });
     const int64_t limit = _parquet_scan_node->get_limit();
     if (limit > 0 && _processed_row_cnt >= limit) {
         return arrow::Status::OK();
@@ -284,46 +291,20 @@ arrow::Status ParquetVectorizedReader::ReadNext(std::shared_ptr<arrow::RecordBat
     TimeCost cost;
     if (_record_batch == nullptr) {
         std::shared_ptr<arrow::RecordBatch> record_batch = nullptr;
-        while (_reader_iter != _parquet_file2reader_map->end()) {
-            ParquetCache::get_instance()->set_bthread_local(_reader_iter->second.read_contents.get());
-            auto status = _reader_iter->second.reader->ReadNext(&record_batch);
+        while (_reader_iter != _parquet_file_readers->end()) {
+            auto status = (*_reader_iter)->ReadNext(&record_batch);
             if (!status.ok()) {
                 DB_WARNING("Fail to read next record batch, %s", status.message().c_str());
                 return status;
             }
             if (record_batch == nullptr) {
-                DB_WARNING("file: %s, ReadNext cost: %ld", _reader_iter->first.c_str(), cost.get_time());
+                DB_WARNING("file:, ReadNext cost: %ld", /*_reader_iter->first.c_str(),*/ cost.get_time());
                 ++_reader_iter;
                 continue;
             } 
-            DB_DEBUG("file: %s, ReadNext cost: %ld, num rows: %ld, num columns: %d", _reader_iter->first.c_str(), cost.get_time(), 
+            DB_DEBUG("file ReadNext cost: %ld, num rows: %ld, num columns: %d", /*_reader_iter->first.c_str(), */cost.get_time(), 
                 record_batch->num_rows(), record_batch->num_columns());
-            // 添加查询需要，但是在parquet文件中不存在的列
-            const std::string& file_name = _reader_iter->first;
-            if (_parquet_file_not_exist_column_map->find(file_name) != _parquet_file_not_exist_column_map->end()) {
-                const auto& not_exist_columns = _parquet_file_not_exist_column_map->at(file_name);
-                for (const auto& field_info : not_exist_columns) {
-                    TimeCost add_column_cost;
-                    std::shared_ptr<arrow::Field> arrow_field = ColumnRecord::make_schema(field_info->lower_short_name, 
-                                                                arrow::Type::type(primitive_to_arrow_type(field_info->type)));
-                    if (arrow_field == nullptr) {
-                        DB_WARNING("Fail to get arrow type, field_id: %d, field_type: %d", field_info->id, field_info->type);
-                        return arrow::Status::IOError("Fail to get arrow type");
-                    }
-                    std::shared_ptr<arrow::Array> arrow_array = ColumnRecord::make_array_from_exprvalue(
-                                        field_info->type, field_info->default_expr_value, record_batch->num_rows());
-                    if (arrow_array == nullptr) {
-                        return arrow::Status::IOError("Fail to make array from expr value");
-                    }
-                    auto new_record_batch_ret = 
-                        record_batch->AddColumn(record_batch->num_columns(), arrow_field, arrow_array);
-                    if (!new_record_batch_ret.ok()) {
-                        return arrow::Status::IOError("Fail to add column");
-                    } else {
-                        record_batch = *new_record_batch_ret;
-                    }
-                }
-            }
+       
             break;
         }
         // eof
@@ -333,7 +314,7 @@ arrow::Status ParquetVectorizedReader::ReadNext(std::shared_ptr<arrow::RecordBat
         }
         // 转换schema，列名转化为tupleid_slotid形式，类型也可能发生转化
         int ret = VectorizeHelpper::change_arrow_record_batch_schema(
-                    _column_name_map, _arrow_schema, record_batch, &_record_batch);
+                    _column_name_map, _column_type_map, _arrow_schema, record_batch, &_record_batch);
         if (ret != 0) {
             return arrow::Status::IOError("Fail to change arrow record batch schema");
         }

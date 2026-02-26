@@ -282,7 +282,7 @@ int ReverseIndex<Schema>::create_executor(
     schema_info->schema->set_index_info(index_info);
     schema_info->schema->set_table_info(table_info);
     schema_info->schema->set_index_search(this);
-    int ret = schema_info->schema->create_executor(search_data, mode, _segment_type, _charset);
+    int ret = schema_info->schema->create_executor(txn, search_data, mode, _segment_type, _charset);
     schema_info->schema->statistic().bool_engine_time += timer.get_time();
     if (ret < 0) {
         DB_WARNING("create_executor fail, region:%ld, index:%ld", _region_id, _index_id);
@@ -588,7 +588,7 @@ int ReverseIndex<Schema>::_get_level_reverse_list(
         }
     }
     std::string value;
-    auto get_res = txn->Get(roptions, data_cf, key, &value);      
+    auto get_res = txn->Get(roptions, data_cf, key, &value);
     time.reset();
     if (get_res.ok()) {
         //deserialize

@@ -20,7 +20,7 @@
 namespace baikaldb {
 
 DEFINE_bool(enable_dblink, false, "enable dblink");
-DEFINE_bool(can_do_ddlwork, true, "can_do_ddlwork");
+DEFINE_bool(can_do_ddlwork, true, "Enable DDL work capability, default: true");
 DECLARE_int32(baikal_heartbeat_interval_us);
 DEFINE_string(baikal_resource_tag, "", "resource tag");
 DECLARE_int32(baikal_port);
@@ -366,15 +366,22 @@ int BaseBaikalHeartBeat::heartbeat(bool is_sync) {
     BaikalHeartBeat::construct_heart_beat_request(request);
     request.set_can_do_ddlwork(false);
     request.set_need_heartbeat_table(true);
-    for (const auto& full_table_table : _table_names) {
+    for (const auto& full_table : _table_names) {
         auto* heartbeat_table = request.add_heartbeat_tables();
         if (heartbeat_table == nullptr) {
             DB_WARNING("baikal_heartbeat_table is nullptr");
             return -1;
         }
-        heartbeat_table->set_namespace_name(full_table_table.namespace_name);
-        heartbeat_table->set_database(full_table_table.database);
-        heartbeat_table->set_table_name(full_table_table.table_name);
+        heartbeat_table->set_namespace_name(full_table.namespace_name);
+        heartbeat_table->set_database(full_table.database);
+        heartbeat_table->set_table_name(full_table.table_name);
+        for (const auto& partition_id : full_table.partition_ids) {
+            if (partition_id < 0) {
+                // 兼容-1000场景
+                continue;
+            }
+            heartbeat_table->add_partition_ids(partition_id);
+        }
     }
 
     int64_t construct_req_cost = cost.get_time();
@@ -656,7 +663,7 @@ int BinlogNetworkServer::update_table_infos() {
             if (id < 0) {
                 DB_FATAL("table[%s] cant find field[%s]", table->name.c_str(), field_name.c_str());
                 find_all_fields = false;
-                break;
+                return -1;
             }
             table_ids.fields.insert(id);
         }
@@ -666,7 +673,7 @@ int BinlogNetworkServer::update_table_infos() {
             if (id < 0) {
                 DB_FATAL("table[%s] cant find field[%s]", table->name.c_str(), field_name.c_str());
                 find_all_fields = false;
-                break;
+                return -1;
             }
             table_ids.monitor_fields.insert(id);
         }  

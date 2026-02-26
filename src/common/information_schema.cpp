@@ -24,6 +24,7 @@
 #include "external_filesystem.h"
 
 namespace baikaldb {
+DECLARE_bool(sign_with_resouce_tag);
 int InformationSchema::init() {
     init_partition_split_info();
     init_region_status();
@@ -323,7 +324,7 @@ void InformationSchema::init_region_status() {
                 record->set_string(record->get_field_by_name("peers"), boost::join(region.peers(), ","));
                 time_t t = region.timestamp();
                 struct tm t_result;
-                localtime_r(&t, &t_result);
+                localtime_fixed_r(&t, &t_result);
                 char s[100];
                 strftime(s, sizeof(s), "%F %T", &t_result);
                 record->set_string(record->get_field_by_name("create_time"), s);
@@ -1165,7 +1166,7 @@ void InformationSchema::init_afs_partitions() {
             }
 
             std::map<int64_t, std::map<std::string, std::set<std::string>>> table_id_name_partitions;
-#ifdef BAIDU_INTERNAL
+#if defined(BAIDU_INTERNAL)
             int ret = ExtFileSystemGC::get_all_partitions_from_store(table_id_name_partitions);
             if (ret < 0) {
                 DB_WARNING("get all partitions from store failed");
@@ -1786,6 +1787,8 @@ void InformationSchema::init_sign_list() {
         {"database_name",pb::STRING},
         {"table_name",pb::STRING},
         {"sign",pb::STRING},
+        {"sign_without_resource_tag",pb::STRING},
+        {"sql",pb::STRING}
     };
 
     int64_t blacklist_table_id = construct_table("SIGN_BLACKLIST", fields);
@@ -1799,7 +1802,9 @@ void InformationSchema::init_sign_list() {
         std::vector <SmartRecord> records;
         records.reserve(10);
         auto blacklist_table = SchemaFactory::get_instance()->get_table_info_ptr(blacklist_table_id);
-        auto func = [&records, &blacklist_table](const SmartTable& table) -> bool {
+        std::unordered_map<uint64_t, std::string> special_signs;
+        SchemaFactory::get_instance()->get_special_signs(special_signs);
+        auto func = [&records, &blacklist_table, &special_signs](const SmartTable& table) -> bool {
             for (auto sign : table->sign_blacklist) {
                 auto record = SchemaFactory::get_instance()->new_record(*blacklist_table);
                 record->set_string(record->get_field_by_name("namespace"), table->namespace_);
@@ -1812,6 +1817,15 @@ void InformationSchema::init_sign_list() {
                 record->set_string(record->get_field_by_name("database_name"), db_name);
                 record->set_string(record->get_field_by_name("table_name"),table->short_name);
                 record->set_string(record->get_field_by_name("sign"), std::to_string(sign));
+                if (special_signs.count(sign) > 0 && special_signs[sign] != "") {
+                    uint64_t out[2];
+                    butil::MurmurHash3_x64_128(special_signs[sign].c_str(), special_signs[sign].size(), 0x1234, out);
+                    record->set_string(record->get_field_by_name("sign_without_resource_tag"), std::to_string(out[0]));
+                    record->set_string(record->get_field_by_name("sql"), special_signs[sign]);
+                } else {
+                    record->set_string(record->get_field_by_name("sign_without_resource_tag"), "NOT FOUND");
+                    record->set_string(record->get_field_by_name("sql"), "NOT FOUND");
+                }
                 records.emplace_back(record);
             }
             return false;
@@ -1826,7 +1840,9 @@ void InformationSchema::init_sign_list() {
         std::vector <SmartRecord> records;
         records.reserve(10);
         auto forcelearner_table = SchemaFactory::get_instance()->get_table_info_ptr(forcelearner_table_id);
-        auto func = [&records, &forcelearner_table](const SmartTable& table) -> bool {
+        std::unordered_map<uint64_t, std::string> special_signs;
+        SchemaFactory::get_instance()->get_special_signs(special_signs);
+        auto func = [&records, &forcelearner_table, &special_signs](const SmartTable& table) -> bool {
             for (auto sign : table->sign_forcelearner) {
                 auto record = SchemaFactory::get_instance()->new_record(*forcelearner_table);
                 record->set_string(record->get_field_by_name("namespace"), table->namespace_);
@@ -1839,6 +1855,15 @@ void InformationSchema::init_sign_list() {
                 record->set_string(record->get_field_by_name("database_name"), db_name);
                 record->set_string(record->get_field_by_name("table_name"),table->short_name);
                 record->set_string(record->get_field_by_name("sign"), std::to_string(sign));
+                if (special_signs.count(sign) > 0 && special_signs[sign] != "") {
+                    uint64_t out[2];
+                    butil::MurmurHash3_x64_128(special_signs[sign].c_str(), special_signs[sign].size(), 0x1234, out);
+                    record->set_string(record->get_field_by_name("sign_without_resource_tag"), std::to_string(out[0]));
+                    record->set_string(record->get_field_by_name("sql"), special_signs[sign]);
+                } else {
+                    record->set_string(record->get_field_by_name("sign_without_resource_tag"), "NOT FOUND");
+                    record->set_string(record->get_field_by_name("sql"), "NOT FOUND");
+                }
                 records.emplace_back(record);
             }
             return false;
@@ -1853,7 +1878,9 @@ void InformationSchema::init_sign_list() {
         std::vector <SmartRecord> records;
         records.reserve(10);
         auto rolling_table = SchemaFactory::get_instance()->get_table_info_ptr(rolling_table_id);
-        auto func = [&records, &rolling_table](const SmartTable& table) -> bool {
+        std::unordered_map<uint64_t, std::string> special_signs;
+        SchemaFactory::get_instance()->get_special_signs(special_signs);
+        auto func = [&records, &rolling_table, &special_signs](const SmartTable& table) -> bool {
             for (auto sign : table->sign_rolling) {
                 auto record = SchemaFactory::get_instance()->new_record(*rolling_table);
                 record->set_string(record->get_field_by_name("namespace"), table->namespace_);
@@ -1866,33 +1893,15 @@ void InformationSchema::init_sign_list() {
                 record->set_string(record->get_field_by_name("database_name"), db_name);
                 record->set_string(record->get_field_by_name("table_name"),table->short_name);
                 record->set_string(record->get_field_by_name("sign"), std::to_string(sign));
-                records.emplace_back(record);
-            }
-            return false;
-        };
-        std::vector<std::string> database_table;
-        SchemaFactory::get_instance()->get_table_by_filter(database_table, func);
-        return records;
-    };
-
-    _calls[forceindex_table_id] = [forceindex_table_id](RuntimeState* state,std::vector<ExprNode*>& conditions) ->
-        std::vector <SmartRecord> {
-        std::vector <SmartRecord> records;
-        records.reserve(10);
-        auto forceindex_table = SchemaFactory::get_instance()->get_table_info_ptr(forceindex_table_id);
-        auto func = [&records, &forceindex_table](const SmartTable& table) -> bool {
-            for (auto sign_index : table->sign_forceindex) {
-                auto record = SchemaFactory::get_instance()->new_record(*forceindex_table);
-                record->set_string(record->get_field_by_name("namespace"), table->namespace_);
-                std::string db_name;
-                std::vector<std::string> vec;
-                boost::split(vec, table->name, boost::is_any_of("."));
-                if (!vec.empty()) {
-                    db_name = vec[0];
+                if (special_signs.count(sign) > 0 && special_signs[sign] != "") {
+                    uint64_t out[2];
+                    butil::MurmurHash3_x64_128(special_signs[sign].c_str(), special_signs[sign].size(), 0x1234, out);
+                    record->set_string(record->get_field_by_name("sign_without_resource_tag"), std::to_string(out[0]));
+                    record->set_string(record->get_field_by_name("sql"), special_signs[sign]);
+                } else {
+                    record->set_string(record->get_field_by_name("sign_without_resource_tag"), "NOT FOUND");
+                    record->set_string(record->get_field_by_name("sql"), "NOT FOUND");
                 }
-                record->set_string(record->get_field_by_name("database_name"), db_name);
-                record->set_string(record->get_field_by_name("table_name"),table->short_name);
-                record->set_string(record->get_field_by_name("sign"), sign_index);
                 records.emplace_back(record);
             }
             return false;
@@ -1907,7 +1916,9 @@ void InformationSchema::init_sign_list() {
         std::vector <SmartRecord> records;
         records.reserve(10);
         auto forceindex_table = SchemaFactory::get_instance()->get_table_info_ptr(forceindex_table_id);
-        auto func = [&records, &forceindex_table](const SmartTable& table) -> bool {
+        std::unordered_map<uint64_t, std::string> special_signs;
+        SchemaFactory::get_instance()->get_special_signs(special_signs);
+        auto func = [&records, &forceindex_table, &special_signs](const SmartTable& table) -> bool {
             for (auto sign_index : table->sign_forceindex) {
                 auto record = SchemaFactory::get_instance()->new_record(*forceindex_table);
                 record->set_string(record->get_field_by_name("namespace"), table->namespace_);
@@ -1920,6 +1931,21 @@ void InformationSchema::init_sign_list() {
                 record->set_string(record->get_field_by_name("database_name"), db_name);
                 record->set_string(record->get_field_by_name("table_name"),table->short_name);
                 record->set_string(record->get_field_by_name("sign"), sign_index);
+                vec.clear();
+                boost::split(vec, sign_index, boost::is_any_of(":"));
+                uint64_t sign = 0;
+                if (vec.size() == 2) {
+                    sign = strtoull(vec[0].c_str(), NULL, 10);
+                }
+                if (special_signs.count(sign) > 0 && special_signs[sign] != "") {
+                    uint64_t out[2];
+                    butil::MurmurHash3_x64_128(special_signs[sign].c_str(), special_signs[sign].size(), 0x1234, out);
+                    record->set_string(record->get_field_by_name("sign_without_resource_tag"), std::to_string(out[0]));
+                    record->set_string(record->get_field_by_name("sql"), special_signs[sign]);
+                } else {
+                    record->set_string(record->get_field_by_name("sign_without_resource_tag"), "NOT FOUND");
+                    record->set_string(record->get_field_by_name("sql"), "NOT FOUND");
+                }
                 records.emplace_back(record);
             }
             return false;
@@ -1935,7 +1961,9 @@ void InformationSchema::init_sign_list() {
         std::vector <SmartRecord> records;
         records.reserve(10);
         auto exec_type_table = SchemaFactory::get_instance()->get_table_info_ptr(exec_type_table_id);
-        auto func = [&records, &exec_type_table](const SmartTable& table) -> bool {
+        std::unordered_map<uint64_t, std::string> special_signs;
+        SchemaFactory::get_instance()->get_special_signs(special_signs);
+        auto func = [&records, &exec_type_table, &special_signs](const SmartTable& table) -> bool {
             for (auto sign_index : table->sign_exec_type) {
                 auto record = SchemaFactory::get_instance()->new_record(*exec_type_table);
                 record->set_string(record->get_field_by_name("namespace"), table->namespace_);
@@ -1949,11 +1977,22 @@ void InformationSchema::init_sign_list() {
                 record->set_string(record->get_field_by_name("table_name"),table->short_name);
                 vec.clear();
                 boost::split(vec, sign_index, boost::is_any_of(":"));
+                uint64_t exec_type = 0;
+                uint64_t sign = 0;
                 if (vec.size() == 2) {
-                    uint64_t exec_type = strtoll(vec[1].c_str(), NULL, 10);
-                    sign_index = vec[0] + ": " + explain_type_to_str(exec_type);
+                    exec_type = strtoull(vec[1].c_str(), NULL, 10);
+                    sign = strtoull(vec[0].c_str(), NULL, 10);
                 }
-                record->set_string(record->get_field_by_name("sign"), sign_index);
+                record->set_string(record->get_field_by_name("sign"), std::to_string(sign) + ": " + explain_type_to_str(exec_type));
+                if (special_signs.count(sign) > 0 && special_signs[sign] != "") {
+                    uint64_t out[2];
+                    butil::MurmurHash3_x64_128(special_signs[sign].c_str(), special_signs[sign].size(), 0x1234, out);
+                    record->set_string(record->get_field_by_name("sign_without_resource_tag"), std::to_string(out[0]));
+                    record->set_string(record->get_field_by_name("sql"), special_signs[sign]);
+                } else {
+                    record->set_string(record->get_field_by_name("sign_without_resource_tag"), "NOT FOUND");
+                    record->set_string(record->get_field_by_name("sql"), "NOT FOUND");
+                }
                 records.emplace_back(record);
             }
             return false;

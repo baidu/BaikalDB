@@ -29,6 +29,7 @@
 #include "rocksdb_scan_node.h"
 #include "arrow/util/byte_size.h"
 #include "filter_node.h"
+#include "vectorize_helpper.h"
 
 namespace baikaldb {
 
@@ -36,9 +37,7 @@ DEFINE_int64(retry_interval_us, 500 * 1000, "retry interval ");
 DEFINE_int32(single_store_concurrency, 20, "max request for one store");
 DEFINE_int64(max_select_rows, 10000000, "query will be fail when select too much rows");
 DEFINE_int64(max_affected_rows, 10000000, "query will be fail when affect too much rows");
-DEFINE_int64(print_time_us, 10000, "print log when time_cost > print_time_us(us)");
 DEFINE_int64(baikaldb_alive_time_s, 10 * 60, "obervation time length in baikaldb, default:10 min");
-BRPC_VALIDATE_GFLAG(print_time_us, brpc::NonNegativeInteger);
 DEFINE_int32(fetcher_request_timeout, 100000,
                     "store as server request timeout, default:100000ms");
 DEFINE_int32(fetcher_connect_timeout, 1000,
@@ -57,6 +56,7 @@ BRPC_VALIDATE_GFLAG(sql_exec_timeout, brpc::PassValidate);
 DEFINE_bool(enable_batch_rpc, false, "enable batch rpc");
 DEFINE_int32(enable_batch_rpc_region_num, 5, "enable batch rpc region num");
 DEFINE_bool(open_prefer_arrow_data, false, "open prefer arrow data in vectore execution");
+DECLARE_int64(print_time_us);
 bvar::Adder<int64_t> OnRPCDone::async_rpc_region_count {"async_rpc_region_count"};
 bvar::LatencyRecorder OnRPCDone::total_send_request {"total_send_request"};
 bvar::LatencyRecorder OnRPCDone::add_backup_send_request {"add_backup_send_request"};
@@ -124,6 +124,7 @@ ErrorType OnRPCDone::fill_single_request(pb::StoreReq& single_req, pb::RegionInf
     if (_trace_node != nullptr) {
         single_req.set_is_trace(true);
     }
+    _request.mutable_extra_req()->set_no_raft_log(_fetcher_store->broadcast_all_peer_without_raft);
     if (_state->explain_type == ANALYZE_STATISTICS) {
         pb::AnalyzeInfo* info = single_req.mutable_analyze_info();
         bool need_hist = false;
@@ -387,6 +388,9 @@ void OnRPCDone::select_addr(pb::RegionInfo& info,
                             std::string& addr,
                             bool& resource_insulate_read,
                             bool& select_without_leader) {
+    if (_fetcher_store->broadcast_all_peer_without_raft) {
+        return;
+    }
     addr = info.leader();
     resource_insulate_read = false; // 是否读learner，或者指定读从集群，进行资源隔离
     if (_state->need_learner_backup() && info.learners_size() == 0) {
@@ -775,6 +779,19 @@ ErrorType OnRPCDone::handle_version_old(const pb::RegionInfo& info, pb::StoreRes
     return E_FATAL;
 }
 
+bool OnRPCDone::need_copy(MemRow* row) {
+    if (_fetcher_store->conditions == nullptr) {
+        return true;
+    }
+    for (auto& condition : *(_fetcher_store->conditions)) {
+        ExprValue value = condition->get_value(row);
+        if (value.is_null() || value.get_numberic<bool>() == false) {
+            return false;
+        }
+    }
+    return true;
+}
+
 ErrorType OnRPCDone::handle_single_response(const std::string& remote_side,
                                             int64_t region_id,
                                             const std::string& addr,
@@ -1003,6 +1020,7 @@ ErrorType OnRPCDone::handle_single_response(const std::string& remote_side,
         return E_BIG_SQL;
     }
     uint64_t returned_row_size = 0;
+    uint64_t row_size_after_filter = 0;
     // EXEC_ROW: region只会返回memrow
     // EXEC_ARROW_ACERO: region可能返回memrow, 可能返回arrow
     if (single_response.execute_type() == pb::EXEC_ROW) {
@@ -1029,6 +1047,10 @@ ErrorType OnRPCDone::handle_single_response(const std::string& remote_side,
                 int32_t tuple_id = single_response.tuple_ids(i);
                 row->from_string(tuple_id, pb_row.tuple_values(i));
             }
+            returned_row_size++;
+            if (!need_copy(row.get())) {
+                continue;
+            }
             row->set_partition_id(info.partition_id());
             int64_t row_size = row->used_size();
             used_size += row_size;
@@ -1049,7 +1071,7 @@ ErrorType OnRPCDone::handle_single_response(const std::string& remote_side,
                 DB_DEBUG("region_id: %ld, ttl_timestamp: %ld", region_id, time_us);
             }
         }
-        returned_row_size = batch->size();
+        row_size_after_filter = batch->size();
         _fetcher_store->db_handle_bytes += memrow_total_used_size;
         _fetcher_store->db_handle_rows += returned_row_size;
         if (global_ddl_with_ttl) {
@@ -1089,6 +1111,7 @@ ErrorType OnRPCDone::handle_single_response(const std::string& remote_side,
                 _fetcher_store->start_key_sort.emplace(info.start_key(), region_id);
                 _fetcher_store->region_batch[region_id].set_row_data(batch);
             }
+            _fetcher_store->region_batch[region_id].set_partition_id(info.partition_id());
         } else {
             BAIDU_SCOPED_LOCK(_fetcher_store->region_lock);
             // merge可能会重复请求相同的region_id
@@ -1099,6 +1122,7 @@ ErrorType OnRPCDone::handle_single_response(const std::string& remote_side,
                 _fetcher_store->start_key_sort.emplace(info.start_key(), region_id);
                 _fetcher_store->region_batch[region_id].set_arrow_data(out);
             }
+            _fetcher_store->region_batch[region_id].set_partition_id(info.partition_id());
         }
     } else {
         // 处理列存arrow recordbatch
@@ -1106,6 +1130,8 @@ ErrorType OnRPCDone::handle_single_response(const std::string& remote_side,
         const auto& vector_rows = single_response.mutable_extra_res()->vectorized_rows();
         const auto& vector_schema = single_response.mutable_extra_res()->vectorized_schema();
         std::shared_ptr<arrow::RecordBatch> batch;
+        bool need_keep_response = true;
+        int64_t recordbatch_size = vector_rows.size();
         if (vector_rows.size() > 0) {
             // 解析列存格式
             std::shared_ptr<arrow::Buffer> schema_buffer = std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(vector_schema.data()),
@@ -1135,10 +1161,27 @@ ErrorType OnRPCDone::handle_single_response(const std::string& remote_side,
                 _state->error_msg.str("parse arrow data fail");
                 return E_FATAL;
             }
+            // filter后按需将response的recordbatch释放掉, 避免内存double
+            if (_fetcher_store->vectorize_conditions != nullptr) {
+                std::shared_ptr<arrow::RecordBatch> filtered_batch;
+                if (0 != VectorizeHelpper::vectorize_filter(batch, _fetcher_store->vectorize_conditions, &filtered_batch, &need_keep_response)) {
+                    DB_WARNING("vectorize filter error");
+                    _state->error_code = ER_EXEC_PLAN_FAILED;
+                    _state->error_msg.str("vectorize filter fail");
+                    return E_FATAL;
+                }
+                if (filtered_batch == nullptr) {
+                    DB_FATAL("filtered_batch is nullptr");
+                    return E_FATAL;
+                }
+                batch = filtered_batch;
+                recordbatch_size = arrow::util::TotalBufferSize(*filtered_batch);
+            }
+            row_size_after_filter = batch->num_rows();
             // [ARROW TODO] 如何限制内存? 
             // 向量化是将store返回的数据都存在内存, 等请求结束这部分内存才释放
             if (vector_rows.size() > 1024 * 1024LL) {
-                if (0 != _state->memory_limit_exceeded(returned_row_size, vector_rows.size())) {
+                if (0 != _state->memory_limit_exceeded(row_size_after_filter, recordbatch_size)) {
                     BAIDU_SCOPED_LOCK(_fetcher_store->region_lock);
                     _state->error_code = ER_TOO_BIG_SELECT;
                     _state->error_msg.str("select reach memory limit");
@@ -1161,9 +1204,13 @@ ErrorType OnRPCDone::handle_single_response(const std::string& remote_side,
                 _fetcher_store->start_key_sort.emplace(info.start_key(), region_id);
                 _fetcher_store->region_batch[region_id].set_arrow_data(batch);
             }
-            // buffer和解析出来的recordbatch是直接使用pb里的vectorized_rows内存, 是zero copy的
-            // 所以列存要求response生命周期比recordBatch生命周期长
-            set_region_vectorized_response(region_id, single_response_ptr);
+            if (need_keep_response) {
+                // buffer和解析出来的recordbatch是直接使用pb里的vectorized_rows内存, 是zero copy的
+                // 所以列存要求response生命周期比recordBatch生命周期长
+                // batch模式, 但凡一个region结果保留, 整个batchresponse都保留下来了
+                set_region_vectorized_response(region_id, single_response_ptr);
+            }
+            _fetcher_store->region_batch[region_id].set_partition_id(info.partition_id());
         }
     } 
 
@@ -1184,7 +1231,11 @@ ErrorType OnRPCDone::handle_single_response(const std::string& remote_side,
         }
     }
     if (cost.get_time() > FLAGS_print_time_us) {
-        DB_DONE(WARNING, "parse time:%ld rows:%lu", cost.get_time(), returned_row_size);
+        if (_fetcher_store->vectorize_conditions == nullptr) {
+            DB_DONE(WARNING, "parse time:%ld rows:%lu", cost.get_time(), returned_row_size);
+        } else {
+            DB_DONE(WARNING, "parse time:%ld rows:%lu,rows_after_filter: %lu", cost.get_time(), returned_row_size, row_size_after_filter);
+        }
     }
     return E_OK;
 }
@@ -1295,7 +1346,11 @@ void OnSingleRPCDone::set_region_vectorized_response(int64_t region_id, std::sha
 }
 
 void OnSingleRPCDone::retry_region_task(const std::string& remote_side) {
-   _fetcher_store->peer_status.set_cannot_access(_info.region_id(), remote_side);
+    if (_fetcher_store->broadcast_all_peer_without_raft) {
+        _rpc_ctrl->task_finish(this);
+        return;
+    }
+    _fetcher_store->peer_status.set_cannot_access(_info.region_id(), remote_side);
     FetcherStore::other_normal_peer_to_leader(_info, _addr);
     bthread_usleep(_retry_times * FLAGS_retry_interval_us);
     _rpc_ctrl->task_retry(this);
@@ -1303,6 +1358,10 @@ void OnSingleRPCDone::retry_region_task(const std::string& remote_side) {
 
 void OnSingleRPCDone::retry_or_finish_task(const std::string& remote_side) {
     auto err = handle_response(remote_side);
+    if (_fetcher_store->broadcast_all_peer_without_raft) {
+        _rpc_ctrl->task_finish(this);
+        return;
+    }
     if (err == E_RETRY) {
         _rpc_ctrl->task_retry(this);
     } else {
@@ -1441,12 +1500,23 @@ std::vector<OnBatchRPCDone*> OnBatchRPCDone::select_addr() {
         std::string addr;
         bool resource_insulate_read = false;
         bool select_without_leader = false;
-        OnRPCDone::select_addr(info, addr, resource_insulate_read, select_without_leader);
-        RegionInfoData region_info_data;
-        region_info_data.region_info = info_ptr;
-        region_info_data.select_without_leader = select_without_leader;
-        region_info_data.resource_insulate_read = resource_insulate_read;
-        addr_batch_info_map[addr].push_back(region_info_data);
+        if (!_fetcher_store->broadcast_all_peer_without_raft) {
+            OnRPCDone::select_addr(info, addr, resource_insulate_read, select_without_leader);
+            RegionInfoData region_info_data;
+            region_info_data.region_info = info_ptr;
+            region_info_data.select_without_leader = select_without_leader;
+            region_info_data.resource_insulate_read = resource_insulate_read;
+            addr_batch_info_map[addr].emplace_back(region_info_data);
+        } else {
+            for (auto& peer : info.peers()) {
+                OnRPCDone::select_addr(info, addr, resource_insulate_read, select_without_leader);
+                RegionInfoData region_info_data;
+                region_info_data.region_info = info_ptr;
+                region_info_data.select_without_leader = select_without_leader;
+                region_info_data.resource_insulate_read = resource_insulate_read;
+                addr_batch_info_map[addr].emplace_back(region_info_data);
+            }
+        }
     }
     std::vector<OnBatchRPCDone*> batch_rpc_done_list;
     for (auto& iter : addr_batch_info_map) {
@@ -1486,6 +1556,10 @@ void OnBatchRPCDone::set_region_vectorized_response(int64_t region_id, std::shar
 }
 
 void OnBatchRPCDone::retry_region_task(const std::string& remote_side) {
+    if (_fetcher_store->broadcast_all_peer_without_raft) {
+        _rpc_ctrl->task_finish(this);
+        return;
+    }
     for (auto& info_ptr : _infos) {
         _fetcher_store->peer_status.set_cannot_access(info_ptr->region_id(), remote_side);
         FetcherStore::other_normal_peer_to_leader(*info_ptr, _addr);
@@ -1502,6 +1576,10 @@ void OnBatchRPCDone::retry_region_task(const std::string& remote_side) {
 void OnBatchRPCDone::retry_or_finish_task(const std::string& remote_side) {
     std::vector<OnSingleRPCDone*> need_retry_tasks;
     auto err = handle_response(remote_side, need_retry_tasks);
+    if (_fetcher_store->broadcast_all_peer_without_raft) {
+        _rpc_ctrl->task_finish(this);
+        return;
+    }
     if (need_retry_tasks.size() > 0) {
         for (auto& task : need_retry_tasks) {
             _rpc_ctrl->add_new_task(task);
@@ -1686,11 +1764,22 @@ void FetcherStore::send_request(RuntimeState* state,
         }
     } else {
         for (auto info : infos) {
-            auto task = new OnSingleRPCDone(this, state, store_request, info, 
+            if (!broadcast_all_peer_without_raft) {
+                auto task = new OnSingleRPCDone(this, state, store_request, info, 
                     info->region_id(), info->region_id(), start_seq_id, current_seq_id, 
                     op_type, need_check_memory);
-            rpc_ctrl.add_new_task(task);
-            traces.insert(task->get_trace());
+                rpc_ctrl.add_new_task(task);
+                traces.insert(task->get_trace());
+            } else {
+                for (auto peer : info->peers()) {
+                    auto task = new OnSingleRPCDone(this, state, store_request, info, 
+                        info->region_id(), info->region_id(), start_seq_id, current_seq_id, 
+                        op_type, need_check_memory);
+                    task->_addr = peer;
+                    rpc_ctrl.add_new_task(task);
+                    traces.insert(task->get_trace());
+                }
+            }
         }
     }
 
@@ -1732,9 +1821,13 @@ int FetcherStore::run_not_set_state(RuntimeState* state,
     received_arrow_data = false;
     batch_region_vectorized_response.clear();
     shared_plan.reset();
+    broadcast_all_peer_without_raft = false;
     if (region_infos.size() == 0) {
         DB_WARNING("region_infos size == 0, op_type:%s", pb::OpType_Name(op_type).c_str());
         return 0;
+    }
+    if (state->ctx() != nullptr && state->ctx()->kill_without_raft) {
+        broadcast_all_peer_without_raft = true;
     }
     auto scan_node = store_request->get_node(pb::SCAN_NODE);
     ExecNode* filter_node = (scan_node == nullptr ? nullptr : scan_node->get_parent());

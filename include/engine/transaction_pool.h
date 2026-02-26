@@ -36,7 +36,7 @@ public:
 
     TransactionPool() : _num_prepared_txn(0), _txn_count(0) {}
 
-    int init(int64_t region_id, bool use_ttl, int64_t online_ttl_base_expire_time_us);
+    int init(int64_t region_id, bool use_normal_ttl, int64_t online_ttl_base_expire_time_us);
 
     // -1 means insert error (already exists)
     int begin_txn(uint64_t txn_id, SmartTransaction& txn, int64_t primary_region_id,
@@ -96,16 +96,16 @@ public:
         --_has_write_txn_count;
     }
 
-    bool use_ttl() const {
-        return _use_ttl;
+    bool use_normal_ttl() const {
+        return _use_normal_ttl;
     }
 
     int64_t online_ttl_base_expire_time_us() const {
         return _online_ttl_base_expire_time_us;
     }
 
-    void update_ttl_info(bool use_ttl, int64_t online_ttl_base_expire_time_us) {
-        _use_ttl = use_ttl;
+    void update_ttl_info(bool use_normal_ttl, int64_t online_ttl_base_expire_time_us) {
+        _use_normal_ttl = use_normal_ttl;
         _online_ttl_base_expire_time_us = online_ttl_base_expire_time_us;
     }
 
@@ -150,7 +150,7 @@ private:
 private:
     int64_t _region_id = 0;
     int64_t _latest_has_write_txn_ts = 0;
-    bool _use_ttl = false;
+    bool _use_normal_ttl = false; // 是否是普通ttl
     int64_t _online_ttl_base_expire_time_us = 0;
 
     // txn_id => txn handler mapping

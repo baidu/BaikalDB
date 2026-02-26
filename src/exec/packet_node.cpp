@@ -194,9 +194,27 @@ int PacketNode::handle_trace(RuntimeState* state) {
     }
     pack_head();
     pack_fields();
+    std::vector<std::vector<std::string>> rows;
     std::vector<std::string> row;
-    row.push_back(_trace->DebugString().c_str());
-    pack_vector_row(row);
+    rows.reserve(1);
+    if (!state->use_mpp) {
+        row.emplace_back(_trace->DebugString().c_str());
+        rows.emplace_back(row);
+    } else {
+        auto ctx = state->ctx();
+        if (ctx != nullptr) {
+            for (auto& [id, fragment] : ctx->fragments) {
+                if (fragment != nullptr) {
+                    row.clear();
+                    row.emplace_back(fragment->trace_node.DebugString().c_str());
+                    rows.emplace_back(row);
+                }
+            }
+        }
+    }
+    for (auto& row : rows) {
+        pack_vector_row(row);
+    }
     pack_eof();
     return 0;
 }
@@ -659,7 +677,7 @@ int PacketNode::start_vectorized_execution(RuntimeState* state) {
             return 0;
         }
     } else {
-        DB_FATAL("arrow execute fail: arrow acero run fail, status: %s", final_table.status().ToString().c_str());
+        DB_FATAL_STATE(state, "arrow execute fail: arrow acero run fail, status: %s", final_table.status().ToString().c_str());
         return -1;
     }
     return vectorized_pack_rows(state, table, false);
@@ -733,6 +751,29 @@ int PacketNode::open(RuntimeState* state) {
 
     if (state->explain_type == ANALYZE_STATISTICS) {
         state->force_single_rpc = true;
+
+        std::vector<ExecNode*> scan_nodes;
+        get_node(pb::SCAN_NODE, scan_nodes);
+        if (scan_nodes.size() != 1) {
+            DB_WARNING("analyze packet node should have one and only one scan node, but now %ld scan node(s) are found.",
+                scan_nodes.size());
+            return -1;
+        }
+        auto* scan_node = static_cast<RocksdbScanNode*>(scan_nodes[0]);
+        int64_t table_id = scan_node->table_id();
+
+        if (state->statistics_types->count(pb::ST_CLEAR) != 0) {
+            if (SchemaFactory::get_instance()->is_switch_open(table_id, TABLE_SWITCH_COST)) {
+                DB_WARNING("table %ld has cost switch is on, forbid clear operation", table_id);
+                return -1;
+            }
+            // 清除统计信息固定只发一个region，且store侧会立刻返回，不做任何事
+            state->max_sample_regions = 1;
+        }
+        if (state->max_sample_regions > 0) {
+            ScanIndexInfo* main_scan_index = scan_node->main_scan_index();
+            main_scan_index->region_infos = sample_analyze_regions(main_scan_index->region_infos, state->max_sample_regions);
+        }
     }
     _send_buf = state->send_buf();
 
@@ -930,10 +971,6 @@ int PacketNode::open_histogram(RuntimeState* state) {
             rows.push_back(row);  
         }
     }
-    if (rows.size() <= 0) {
-        return -1;
-    }
-
     _fields.clear();
     for (auto& name : names) {
         ResultField field;
@@ -1022,6 +1059,38 @@ int PacketNode::open_cmsketch(RuntimeState* state) {
     }
     pack_eof();
     return 0;
+}
+
+std::map<int64_t, pb::RegionInfo> PacketNode::sample_analyze_regions(
+        const std::map<int64_t, pb::RegionInfo>& all_regions,
+        int64_t sample_cnt) {
+
+    size_t all_cnt = all_regions.size();
+    if (sample_cnt >= all_cnt || sample_cnt <= 0) {
+        return all_regions;
+    }
+
+    std::vector<const pb::RegionInfo*> all_regions_vec;
+    all_regions_vec.reserve(all_regions.size());
+    for (auto& region : all_regions) {
+        all_regions_vec.emplace_back(&region.second);
+    }
+
+    std::vector<const pb::RegionInfo*> sample_regions_vec;
+    sample_regions_vec.reserve(sample_cnt);
+    double step = static_cast<double>(all_cnt) / sample_cnt;
+    for (size_t i = 0; i < sample_cnt; i++) {
+        size_t idx = static_cast<size_t>(i * step);
+        if (idx >= all_cnt) {
+            idx = all_cnt - 1;
+        }
+        sample_regions_vec.emplace_back(all_regions_vec[idx]);
+    }
+    std::map<int64_t, pb::RegionInfo> sample_regions;
+    for (auto it: sample_regions_vec) {
+        sample_regions[it->region_id()] = *it;
+    }
+    return sample_regions;
 }
 
 int PacketNode::open_analyze(RuntimeState* state) {

@@ -16,6 +16,7 @@
 #include "file_system.h"
 #include "column_record.h"
 #include "rocksdb_filesystem.h"
+#include "arrow_io_excutor.h"
 namespace baikaldb {
 DECLARE_int64(parquet_cache_size_mb);
 
@@ -238,7 +239,7 @@ private:
 
 class ParquetArrowReadableFile : public ::arrow::io::RandomAccessFile {
 public:    
-    ParquetArrowReadableFile(const std::shared_ptr<ParquetArrowReader>& reader, int64_t size, ::arrow::MemoryPool* pool = ::arrow::default_memory_pool()) :
+    ParquetArrowReadableFile(const std::shared_ptr<ParquetArrowReader>& reader, int64_t size, ::arrow::MemoryPool* pool = GetMemoryPoolForRead()) :
             _file_reader(reader), _file_size(size), _pool(pool) { }
 
     ~ParquetArrowReadableFile() override {

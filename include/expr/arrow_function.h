@@ -97,6 +97,8 @@ int arrow_substr(std::vector<ExprNode*>& children, pb::Function* fn, const pb::P
 int arrow_upper(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out);
 int arrow_lower(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out);
 int arrow_repeat(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out);
+int arrow_substring_index(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out);
+int arrow_replace(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out);
 // 类型转换
 int arrow_cast_to_string(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out);
 int arrow_cast_to_date(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out);
@@ -132,7 +134,7 @@ int arrow_unix_timestamp(std::vector<ExprNode*>& children, pb::Function* fn, con
 int arrow_week(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out);
 int arrow_yearweek(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out);
 int arrow_timestampdiff(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out);
-
+int arrow_datediff(std::vector<ExprNode*>& children, pb::Function* fn, const pb::PrimitiveType& return_type, arrow::compute::Expression& out);
 /*
  * 注册使用的FunctionOptions
  */
@@ -147,13 +149,34 @@ struct ExprValueCastState : public arrow::compute::KernelState {
     explicit ExprValueCastState(pb::PrimitiveType type) : type(type) {}
 };
 
-class CommonTimeFunctionOptions : public arrow::compute::FunctionOptions {
+class CommonFunctionOptions : public arrow::compute::FunctionOptions {
 public:
-    CommonTimeFunctionOptions(const std::string& str_value, int64_t int_value = 0);
+    CommonFunctionOptions(const std::string& str_value, int64_t int_value = 0);
     std::string str_value;
     int64_t int_value = 0;
 };
+struct CommonState : public arrow::compute::KernelState {
+    std::string str_value;
+    int64_t int_value = 0;
+    CommonState(const std::string& conf, int64_t value) : str_value(conf), int_value(value) {}
+};
 
+class GroupConcatOptions : public arrow::compute::FunctionOptions {
+ public:
+    explicit GroupConcatOptions(const std::string& sep = "", const std::vector<bool>& asc = {});
+    static constexpr char const kTypeName[] = "GroupConcatOptions";
+    static GroupConcatOptions Defaults() { return GroupConcatOptions{}; }
+
+    std::string separator_;
+    // TODO
+    // for group concat orderby, can use make_struct args like {string, orderby feild1, orderby feild2, ...}
+    // or sort indicates first, and then use make_struct args like {string, orderby indicate id}
+    std::vector<bool> asc_; 
+};
+
+arrow::Result<std::unique_ptr<arrow::compute::KernelState>> InitCommonState(arrow::compute::KernelContext*,
+                                            const  arrow::compute::KernelInitArgs& args);
+                                            
 class ArrowFunctionManager : public ObjectManager<
                         ArrowExprBuildFun, 
                         ArrowFunctionManager> {

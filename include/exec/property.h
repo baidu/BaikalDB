@@ -23,6 +23,7 @@ struct Property {
     int64_t expected_cnt = -1;
     // 向量索引使用
     int32_t efsearch = -1;
+    int32_t nprobe = -1;
     Property() {
     }
     Property(const std::vector<ExprNode*>& slot_order_exprs_, 

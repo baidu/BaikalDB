@@ -166,7 +166,6 @@ int DDLWorkPlanner::create_txn_dml_node(std::unique_ptr<SingleTxnManagerNode>& t
         secondary_node_ptr->init(plan_node);
         index_ddl_manager_node->add_child(secondary_node_ptr);
     }
-    
     if (create_single_txn(std::move(index_ddl_manager_node), txn_node) != 0) {
         DB_WARNING("create signele txn error.");            
         return -1;

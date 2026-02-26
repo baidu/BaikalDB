@@ -204,6 +204,8 @@ public:
     void update_byte_size(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_split_lines(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_charset(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+    int pre_process_for_add_partition(const pb::MetaManagerRequest* request, pb::MetaManagerResponse* response, 
+            uint64_t log_id, google::protobuf::Closure* done);
     void add_partition(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void drop_partition(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void modify_partition(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
@@ -213,15 +215,18 @@ public:
     void update_statistics(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_dists(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_ttl_duration(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
+    void update_ttl_info(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_resource_tag(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_table_comment(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void update_dynamic_partition_attr(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void drop_partition_ts(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void specify_split_keys(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
-
+    int pre_process_for_add_index(const pb::MetaManagerRequest* request, pb::MetaManagerResponse* response,
+            uint64_t log_id, google::protobuf::Closure* done);
     void add_field(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void add_index(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
-    int do_add_index(const pb::SchemaInfo& mem_schema_pb, const int64_t apply_index, braft::Closure* done,  
+    int do_add_index(const pb::MetaManagerRequest& request, const pb::SchemaInfo& mem_schema_pb, 
+        const int64_t apply_index, braft::Closure* done,  
         const int64_t table_id, pb::IndexInfo& index_info);
     void drop_index(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
     void drop_field(const pb::MetaManagerRequest& request, const int64_t apply_index, braft::Closure* done);
@@ -306,11 +311,23 @@ public:
 
     void on_leader_start();
     void on_leader_stop();
-
+    int get_ttl_field_name(int64_t table_id, std::string& ttl_field_name);
     bool is_create_table_support_engine(pb::Engine engine) {
         return (engine == pb::ROCKSDB || engine == pb::ROCKSDB_CSTORE || engine == pb::BINLOG);
     }
-   
+    static bool is_ttl_support_index_type(const pb::IndexInfo& index_info) {
+        if (index_info.index_type() == pb::I_PRIMARY || index_info.index_type() == pb::I_KEY) {
+            return true;
+        }
+        if (index_info.index_type() == pb::I_FULLTEXT || index_info.index_type() == pb::I_VECTOR) {
+            return true;
+        }
+        if (index_info.index_type() == pb::I_UNIQ) {
+            return true;
+        }
+        return false;
+    }
+
 public:
     void set_max_table_id(int64_t max_table_id) {
         BAIDU_SCOPED_LOCK(_table_mutex);
@@ -1688,10 +1705,12 @@ private:
         _table_timer.init(3600 * 1000); // 1h
         _dblink_mysql_table_timer.init(FLAGS_baikal_heartbeat_interval_us / 1000);
     }
-    int write_schema_for_not_level(TableMem& table_mem,
+    int write_schema_for_not_level(const pb::MetaManagerRequest& request,
+                                    TableMem& table_mem,
                                     braft::Closure* done,
                                     int64_t max_table_id_tmp,
-                                     bool has_auto_increment);
+                                     bool has_auto_increment,
+                                     const int64_t apply_index);
 
     int send_auto_increment_request(const pb::MetaManagerRequest& request);
     int update_schema_for_rocksdb(int64_t table_id, 
@@ -1719,9 +1738,10 @@ private:
     
     int check_index(const pb::IndexInfo& index_info_to_check,
                    const pb::SchemaInfo& schema_info, int64_t& index_id);
-
+    static int check_gflag(const IdcInfo& idc, const std::string& gflag_name, const std::string& expected_value);
     int alloc_field_id(pb::SchemaInfo& table_info, bool& has_auto_increment, TableMem& table_mem);
-    int alloc_index_id(pb::SchemaInfo& table_info, TableMem& table_mem, int64_t& max_table_id_tmp);
+    int alloc_index_id(pb::SchemaInfo& table_info, TableMem& table_mem, int64_t& max_table_id_tmp,
+            std::string resource_tag);
     void construct_common_region(pb::RegionInfo* region_info, int32_t replica_num) {
         region_info->set_version(1);
         region_info->set_conf_version(1);
@@ -1760,7 +1780,8 @@ private:
             (index_info.index_type() == pb::I_UNIQ || index_info.index_type() == pb::I_KEY);
     }
 
-    int init_global_index_region(const pb::SchemaInfo& schema_info, int64_t table_id, braft::Closure* done, pb::IndexInfo& index_info);
+    int init_global_index_region(const pb::MetaManagerRequest& request, const pb::SchemaInfo& schema_info, 
+        int64_t table_id, braft::Closure* done, pb::IndexInfo& index_info, const int64_t apply_index);
 
     bool partition_check_region_when_update(int64_t table_id, 
         std::string min_start_key, 
@@ -1820,6 +1841,10 @@ private:
 
     bool check_vector_index(const pb::SchemaInfo& mem_schema_pb, const pb::IndexInfo& index_info);
 
+    static bool if_pk_contains_ttl_field(const pb::SchemaInfo& table_info);
+
+    static int check_ttl_info(const pb::SchemaInfo& table_schema, std::string& err_msg);
+
 private:
     bthread_mutex_t                                     _table_mutex;
     bthread_mutex_t                                     _load_virtual_to_memory_mutex;
@@ -1835,6 +1860,9 @@ private:
     DBLinkMysqlTableTimer _dblink_mysql_table_timer;
 
     DoubleBufferedTableSchedulingInfo             _table_scheduling_infos;
+
+    static const std::set<pb::SegmentType> _need_check_wordrank_types;
+    static const std::set<pb::SegmentType> _need_check_wordweight_types;
 }; //class
 
 }//namespace

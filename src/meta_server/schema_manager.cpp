@@ -206,10 +206,15 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
                 auto mutable_request = const_cast<pb::MetaManagerRequest*>(request);
                 mutable_request->mutable_ddlwork_info()->set_begin_timestamp(butil::gettimeofday_s());
             }
+            if (request->op_type() == pb::OP_ADD_INDEX) {
+                auto ret = TableManager::get_instance()->pre_process_for_add_index(request, response, log_id, done);
+                if (ret < 0) {
+                    return;
+                }
+            }
         }
         if (request->op_type() == pb::OP_UPDATE_TTL_DURATION 
                 && !request->table_info().has_ttl_duration()) {
-            // 只能修改有ttl的表
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
                     "ttl_duration must > 0", request->op_type(), log_id);
             return;
@@ -220,6 +225,12 @@ void SchemaManager::process_schema_info(google::protobuf::RpcController* control
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
                     "no partition_info", request->op_type(), log_id);
             return;
+        }
+        if (request->op_type() == pb::OP_ADD_PARTITION) {
+            auto ret = TableManager::get_instance()->pre_process_for_add_partition(request, response, log_id, done);
+            if (ret < 0) {
+                return;
+            }
         }
         if (request->op_type() == pb::OP_UPDATE_CHARSET 
                 && !request->table_info().has_charset()) {
@@ -912,6 +923,92 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
         return -1;
     }
 
+    // 对主表和全局索引在状态机外选实例
+    std::unordered_set<std::string> need_pick_instance_index;
+    for (const auto& index : table_info.indexs()) {
+        if (index.index_type() == pb::I_PRIMARY || index.is_global()) {
+            need_pick_instance_index.insert(index.index_name());
+        }
+    }
+    if (!table_info.has_partition_num()) {
+        table_info.set_partition_num(1);
+    }
+    // 先处理split key
+    std::unordered_set<std::string> processed_index_name;
+    for (auto idx = 0; 
+        idx < table_info.partition_num() && TableManager::get_instance()->is_create_table_support_engine(table_info.engine()); 
+        ++idx) {
+        int64_t partition_id = idx;
+        std::string partition_resource_tag = resource_tag;
+        std::string partition_main_logical_room = main_logical_room;
+        if (table_info.has_partition_info() && table_info.partition_info().type() == pb::PT_RANGE) {
+            if (table_info.partition_info().range_partition_infos(idx).has_resource_tag()) {
+                partition_resource_tag = table_info.partition_info().range_partition_infos(idx).resource_tag();
+                partition_main_logical_room = "";
+            }
+            if (table_info.partition_info().range_partition_infos(idx).has_partition_id()) {
+                partition_id = table_info.partition_info().range_partition_infos(idx).partition_id();
+            }
+        }
+        auto partition_index_instances = mutable_request->add_partition_index_instance();
+        partition_index_instances->set_partition_id(partition_id);
+        for (auto i = 0; i < table_info.split_keys_size(); ++i) {
+            auto split_key = table_info.mutable_split_keys(i);
+            std::string index_name = split_key->index_name();
+            auto index_instances = partition_index_instances->add_index_instances();
+            index_instances->set_index_name(index_name);
+            for (auto j = 0; j <= split_key->split_keys_size(); ++j) {
+                std::string instance;
+                int ret = ClusterManager::get_instance()->select_instance_rolling(
+                                    {partition_resource_tag, partition_main_logical_room, ""}, {}, instance);
+                if (ret < 0) {
+                    DB_WARNING("select instance fail");
+                    ERROR_SET_RESPONSE(response, pb::INTERNAL_ERROR, "select instance fail", request->op_type(), log_id);
+                    return -1;
+                }
+                index_instances->add_instances(instance);
+            }
+            processed_index_name.insert(index_name);
+        }
+    }
+    for (const auto& index_name : processed_index_name) {
+        need_pick_instance_index.erase(index_name);
+    }
+    //没有指定split_key的索引
+    for (auto i = 0;
+         i < table_info.partition_num() && TableManager::get_instance()->is_create_table_support_engine(table_info.engine()); 
+         ++i) {
+        int64_t partition_id = i;
+        std::string partition_resource_tag = resource_tag;
+        std::string partition_main_logical_room = main_logical_room;
+        if (table_info.has_partition_info() && table_info.partition_info().type() == pb::PT_RANGE) {
+            if (table_info.partition_info().range_partition_infos(i).has_resource_tag()) {
+                partition_resource_tag = table_info.partition_info().range_partition_infos(i).resource_tag();
+                partition_main_logical_room = "";
+            }
+            if (table_info.partition_info().range_partition_infos(i).has_partition_id()) {
+                partition_id = table_info.partition_info().range_partition_infos(i).partition_id();
+            }
+        }
+        auto partition_index_instances = mutable_request->mutable_partition_index_instance(i);
+        for (auto& index : need_pick_instance_index) {
+            std::string instance;
+            if (namespace_name == "INTERNAL" && table_info.database() == "baikaldb" && table_info.table_name() == "__baikaldb_instance") {
+                // for baikaldb instance id, do nothing
+            } else {
+                int ret = ClusterManager::get_instance()->select_instance_rolling(
+                        {partition_resource_tag, partition_main_logical_room, ""}, {}, instance);
+                if (ret < 0) {
+                    DB_WARNING("select instance fail");
+                    ERROR_SET_RESPONSE(response, pb::INTERNAL_ERROR, "select instance fail", request->op_type(), log_id);
+                    return -1;
+                }
+            }
+            auto index_instances = partition_index_instances->add_index_instances();
+            index_instances->set_index_name(index);
+            index_instances->add_instances(instance);
+        }
+    }
     return 0;
 }
 

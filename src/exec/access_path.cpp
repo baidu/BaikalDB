@@ -22,6 +22,7 @@
 namespace baikaldb {
 using namespace range;
 DEFINE_uint64(max_in_records_num, 10000, "max_in_records_num");
+DEFINE_uint64(cut_huge_in_filter_size, 500000, "cut_huge_in_filter_size, maybe 50w is suitable");
 DEFINE_int64(index_use_for_learner_delay_s, 3600, "1h");
 DEFINE_bool(date_range_to_in, false, "date range to in");
 
@@ -71,10 +72,14 @@ void AccessPath::calc_row_expr_range(std::vector<int32_t>& range_fields, ExprNod
         return;
     }
     size_t row_idx = 0;
-    for (; row_idx < range_fields.size() && 
-            field_idx < index_info_ptr->fields.size(); row_idx++, field_idx++) {
-        if (index_info_ptr->fields[field_idx].id == range_fields[row_idx]) {
-            key.append_value(values[row_idx].cast_to(index_info_ptr->fields[field_idx].type));
+    auto avaliable_key_fields = index_info_ptr->fields;
+    if (index_info_ptr->type == pb::I_KEY) {
+        avaliable_key_fields.insert(avaliable_key_fields.end(), index_info_ptr->pk_fields.begin(), index_info_ptr->pk_fields.end());
+    }
+    for (; row_idx < range_fields.size() &&
+            field_idx < avaliable_key_fields.size(); row_idx++, field_idx++) {
+        if (avaliable_key_fields[field_idx].id == range_fields[row_idx]) {
+            key.append_value(values[row_idx].cast_to(avaliable_key_fields[field_idx].type));
             hit_index_field_ids.insert(range_fields[row_idx]);
         } else {
             break;
@@ -91,7 +96,7 @@ bool AccessPath::check_sort_use_index(Property& sort_property) {
     std::vector<ExprNode*>& order_exprs = sort_property.slot_order_exprs;
     SlotRef* slot_ref = static_cast<SlotRef*>(order_exprs[0]);
     size_t idx = 0;
-    std::vector<FieldInfo>fields(index_info_ptr->fields.begin(), index_info_ptr->fields.end());
+    std::vector<FieldInfo> fields(index_info_ptr->fields.begin(), index_info_ptr->fields.end());
     fields.insert(fields.end(),index_info_ptr->pk_fields.begin(), index_info_ptr->pk_fields.end());
     for (; idx < fields.size(); ++idx) {
         if (tuple_id == slot_ref->tuple_id() && fields[idx].id == slot_ref->field_id()) {
@@ -131,7 +136,16 @@ void AccessPath::calc_normal(Property& sort_property) {
     // hit_fields_cnt: in_row_expr谓词匹配的字段个数,用于判断是否可以剪切
     std::map< ExprNode*, std::pair<uint32_t, uint32_t>> in_row_expr_map; // <in_row_expr,<offset, hit_fields_cnt>
     size_t in_records_size = 1;
-    for (auto& field : index_info_ptr->fields) {
+    // 主键a b, 索引c a 且包含变长字段， 则avaliable_key_fields为c a a b；遇到第二个a会直接结束匹配
+    // 如果发生主键压缩，主键a b, 索引c b, 则avaliable_key_fields 为 c b a；会一直匹配到底
+    std::vector<FieldInfo> avaliable_key_fields = index_info_ptr->fields;
+    if (index_info_ptr->type == pb::I_KEY) {
+        avaliable_key_fields.insert(avaliable_key_fields.end(), index_info_ptr->pk_fields.begin(), index_info_ptr->pk_fields.end());
+    }
+    for (auto& field : avaliable_key_fields) {
+        if (0 != hit_index_field_ids.count(field.id)) {
+            break;
+        }
         bool field_break = false;
         auto iter = field_range_map->find(field.id);
         if (iter == field_range_map->end()) {
@@ -160,8 +174,8 @@ void AccessPath::calc_normal(Property& sort_property) {
                     need_cut_index_range_condition.insert(range.left_expr);
                 } else if (range.left.size() > 1) {
                     size_t row_idx = 0;
-                    while (row_idx < range.left_row_field_ids.size() && field_idx < index_info_ptr->fields.size()) {
-                        if (index_info_ptr->fields[field_idx].id == range.left_row_field_ids[row_idx]) {
+                    while (row_idx < range.left_row_field_ids.size() && field_idx < avaliable_key_fields.size()) {
+                        if (avaliable_key_fields[field_idx].id == range.left_row_field_ids[row_idx]) {
                             hit_index_field_ids.insert(range.left_row_field_ids[row_idx]);
                         } else {
                             break;
@@ -183,8 +197,8 @@ void AccessPath::calc_normal(Property& sort_property) {
                     need_cut_index_range_condition.insert(range.right_expr);
                 } else if (range.right.size() > 1) {
                     size_t row_idx = 0;
-                    while (row_idx < range.right_row_field_ids.size() && field_idx < index_info_ptr->fields.size()) {
-                        if (index_info_ptr->fields[field_idx].id == range.right_row_field_ids[row_idx]) {
+                    while (row_idx < range.right_row_field_ids.size() && field_idx < avaliable_key_fields.size()) {
+                        if (avaliable_key_fields[field_idx].id == range.right_row_field_ids[row_idx]) {
                             hit_index_field_ids.insert(range.right_row_field_ids[row_idx]);
                         } else {
                             break;
@@ -247,6 +261,12 @@ void AccessPath::calc_normal(Property& sort_property) {
                     in_row_expr_map[*range.conditions.begin()].second++;
                 } else {
                     // 第一个in不限制FLAGS_max_in_records_num
+                    if (FLAGS_cut_huge_in_filter_size > 0 
+                            && (index_type == pb::I_KEY && !index_info_ptr->is_global)
+                            && range.eq_in_values.size() > FLAGS_cut_huge_in_filter_size) {
+                        field_break = true;
+                        break;
+                    }
                     if (in_records_size > 1 && in_records_size * range.eq_in_values.size() > FLAGS_max_in_records_num) {
                         field_break = true;
                         break;
@@ -344,7 +364,14 @@ void AccessPath::calc_index_range(
     // hit_fields_cnt: in_row_expr谓词匹配的字段个数,用于判断是否可以剪切
     std::map< ExprNode*, std::pair<uint32_t, uint32_t>> in_row_expr_map; // <in_row_expr,<offset, hit_fields_cnt>
     int field_cnt = 0;
-    for (auto& field : index_info_ptr->fields) {
+    // 索引或者主键包含变长字段时可能包含重复字段，如
+    // 主键a b, 索引c a 且包含变长字段， 则avaliable_key_fields为c a a b
+    // 如果发生主键压缩，主键a b, 索引c b, 则avaliable_key_fields 为 c b a
+    std::vector<FieldInfo>  avaliable_key_fields = index_info_ptr->fields;
+    if (index_info_ptr->type == pb::I_KEY) {
+        avaliable_key_fields.insert(avaliable_key_fields.end(), index_info_ptr->pk_fields.begin(), index_info_ptr->pk_fields.end());
+    }
+    for (auto& field : avaliable_key_fields) {
         auto iter = field_range_map->find(field.id);
         field_cnt++;
         if (field_cnt > hit_index_field_ids.size()) {
@@ -520,7 +547,7 @@ void AccessPath::calc_index_range(
             }
             filter.insert(rg.left_key.data());
             auto range = pos_index.add_ranges();
-            if (_left_field_cnt == index_info_ptr->fields.size()
+            if (_left_field_cnt == avaliable_key_fields.size()
                 && (index_type == pb::I_PRIMARY || index_type == pb::I_UNIQ)
                 && !_like_prefix) {
                 rg.left_key.set_full(true);
@@ -533,7 +560,7 @@ void AccessPath::calc_index_range(
             range->set_left_key(rg.left_key.data());
             range->set_left_full(rg.left_key.get_full());
             if (!_is_eq_or_in) {
-                if (_right_field_cnt == index_info_ptr->fields.size()
+                if (_right_field_cnt == avaliable_key_fields.size()
                     && (index_type == pb::I_PRIMARY || index_type == pb::I_UNIQ)
                     && !_like_prefix) {
                     rg.right_key.set_full(true);
@@ -545,12 +572,12 @@ void AccessPath::calc_index_range(
     } else {
         is_possible = true;
         auto range = pos_index.add_ranges();
-        if (_left_field_cnt == index_info_ptr->fields.size()
+        if (_left_field_cnt == avaliable_key_fields.size()
             && (index_type == pb::I_PRIMARY || index_type == pb::I_UNIQ)
             && !_like_prefix) {
             left_key.set_full(true);
         }
-        if (_right_field_cnt == index_info_ptr->fields.size()
+        if (_right_field_cnt == avaliable_key_fields.size()
             && (index_type == pb::I_PRIMARY || index_type == pb::I_UNIQ)
             && !_like_prefix) {
             right_key.set_full(true);
@@ -664,6 +691,7 @@ void AccessPath::calc_fulltext(Property& sort_property) {
             }
             range->set_topk(sort_property.expected_cnt);
             range->set_efsearch(sort_property.efsearch);
+            range->set_nprobe(sort_property.nprobe);
             if (first_field_expr_values != nullptr && !first_field_expr_values->empty()) {
                 ExprValue& expr_value = *(first_field_expr_values->begin());
                 uint64_t separate_value = expr_value.cast_to(pb::UINT64).get_numberic<uint64_t>();

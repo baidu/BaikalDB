@@ -3,8 +3,11 @@
 namespace baikaldb {
 
 DEFINE_int32(file_buffer_size, 1, "read file buf size (MBytes)");
+DEFINE_int32(file_block_size, 100, "split file to block to handle(MBytes)");
 
-#ifdef BAIDU_INTERNAL
+const char* AFS_CLIENT_CONF_PATH = "./conf/client.conf";
+
+#if defined(BAIDU_INTERNAL)
 // AfsFileWriter
 int64_t AfsFileWriter::append(const char* buf, uint32_t count) {
     if (_writer == nullptr) {
@@ -59,7 +62,7 @@ int64_t PosixFileReader::read(size_t pos, char* buf, size_t buf_size) {
     return size;
 }
 
-#ifdef BAIDU_INTERNAL
+#if defined(BAIDU_INTERNAL)
 // AfsFileReader
 int64_t AfsFileReader::seek(int64_t position) {
     if (_reader == nullptr) {
@@ -158,6 +161,26 @@ int PosixFileSystem::read_dir(const std::string& path, std::vector<std::string>&
     return 1;
 }
 
+int PosixFileSystem::read_dir(const std::string& path, std::vector<DirEntry>& direntrys) {
+    dir_iter iter(path);
+    dir_iter end;
+    for (; iter != end; ++iter) {
+        std::string child_path = iter->path().c_str();
+        FileInfo file_info;
+        if (get_file_info(child_path, file_info, nullptr) != 0) {
+            return -1;
+        }
+        std::vector<std::string> split_vec;
+        boost::split(split_vec, child_path, boost::is_any_of("/"));
+        std::string out_path = split_vec.back();
+        DirEntry dir_entry;
+        dir_entry.mode = file_info.mode;
+        dir_entry.path = out_path;
+        direntrys.emplace_back(std::move(dir_entry));
+    }
+    return 1;
+}
+
 int PosixFileSystem::get_file_info(const std::string& path, FileInfo& file_info, std::string* err_msg) {
     if (boost::filesystem::is_directory(path)) {
         file_info.mode = FileMode::I_DIR;
@@ -173,7 +196,8 @@ int PosixFileSystem::get_file_info(const std::string& path, FileInfo& file_info,
     return 0;
 }
 
-#ifdef BAIDU_INTERNAL
+
+#if defined(BAIDU_INTERNAL)
 // AfsFileSystem
 int AfsFileSystem::init() {
     // 创建一个AfsFileSystem实例
@@ -310,6 +334,35 @@ int AfsFileSystem::read_dir(const std::string& path, std::vector<std::string>& d
     }
     return 1;
 }
+
+int AfsFileSystem::read_dir(const std::string& path, std::vector<DirEntry>& direntrys) {
+    std::vector<afs::DirEntry> afs_entrys;
+    int afs_res = _afs->Readdir(path.c_str(), &afs_entrys);
+    if (afs_res < 0){
+        DB_WARNING("fail to readdir %s, errno:%d, errmsg:%s\n", path.c_str(), afs_res, afs::Rc2Str(afs_res));
+        return -1;
+    }
+    for (size_t i = 0; i < afs_entrys.size(); i++) {
+        FileMode mode;
+        afs::FileType file_type = afs::GetFileTypeFromInode(afs_entrys[i].inode);
+        if (file_type == afs::FT_DIRECTORY) {
+            mode = FileMode::I_DIR;
+        } else if (file_type == afs::FT_SYMLINK) {
+            mode = FileMode::I_LINK;
+        } else if (file_type == afs::FT_REGULAR) {
+            mode = FileMode::I_FILE;
+        } else {
+            DB_WARNING("Invalid file_type: %d", file_type);
+            return -1;
+        }
+        DirEntry dir_entry;
+        dir_entry.mode = mode;
+        dir_entry.path = afs_entrys[i].name;
+        direntrys.emplace_back(dir_entry);
+    }
+    return 1;
+}
+
 
 int AfsFileSystem::get_file_info(const std::string& path, FileInfo& file_info, std::string* err_msg) {
     int afs_res = _afs->Exist(path.c_str());
@@ -569,13 +622,54 @@ int ReadDirImpl::next_entry(std::string& entry){
     return 0;
 }
 
+int ReadDirImpl::get_all_files(FileSystem* fs, const std::string& path, std::vector<std::string>& files) {
+    if (fs == nullptr) {
+        DB_WARNING("fs is nullptr");
+        return -1;
+    }
+    std::vector<DirEntry> direntrys;
+    int ret = fs->read_dir(path, direntrys);
+    if (ret < 0) {
+        DB_WARNING("Fail to read_dir, path: %s", path.c_str());
+        return -1;
+    }
+    for (const auto& direntry : direntrys) {
+        if (direntry.mode == FileMode::I_FILE) {
+            files.emplace_back(direntry.path);
+        }
+    }
+    return 0;
+}
+
+int ReadDirImpl::get_all_dirs(FileSystem* fs, const std::string& path, std::vector<std::string>& dirs) {
+    if (fs == nullptr) {
+        DB_WARNING("fs is nullptr");
+        return -1;
+    }
+    std::vector<DirEntry> direntrys;
+    int ret = fs->read_dir(path, direntrys);
+    if (ret < 0) {
+        DB_WARNING("Fail to read_dir, path: %s", path.c_str());
+        return -1;
+    }
+    for (const auto& direntry : direntrys) {
+        if (direntry.mode == FileMode::I_DIR) {
+            dirs.emplace_back(direntry.path);
+        }
+    }
+    return 0;
+}
+
 std::shared_ptr<FileSystem> create_filesystem(const std::string& cluster_name, 
                                               const std::string& user_name, 
                                               const std::string& password, 
                                               const std::string& conf_file) {
     std::shared_ptr<FileSystem> fs;
     if (cluster_name.find("afs") != std::string::npos) {
-#ifdef BAIDU_INTERNAL
+#if !defined(BAIDU_INTERNAL)
+        DB_FATAL("doesn't support AfsFileSystem!");
+        return nullptr;
+#else
         fs.reset(new (std::nothrow) AfsFileSystem(cluster_name, user_name, password, conf_file));
 #endif
     } else {

@@ -165,6 +165,7 @@ struct DistInfo {
 struct TTLInfo {
     TTLInfo() { }
     int64_t ttl_duration_s           = 0; // >0表示配置有ttl，单位s
+    std::shared_ptr<FieldInfo> ttl_field = nullptr; // ttl指定的列，为nullptr表示按照修改时间ttl
     int64_t online_ttl_expire_time_us = 0; // online ttl 过期时间
 };
 
@@ -214,6 +215,7 @@ struct TableInfo {
     bool                    has_fulltext = false;
     bool                    has_rollup_index = false;
     bool                    has_vector_index = false;
+    std::set<int64_t>       rollup_indexs;
     // 该表是否已和 binlog 表关联
     bool is_linked = false;
     bool is_binlog = false;
@@ -261,6 +263,19 @@ struct TableInfo {
         return nullptr;
     }
 
+    std::shared_ptr<FieldInfo> get_ttl_field() {
+        return ttl_info.ttl_field;
+    }
+    
+    FieldInfo* get_field_ptr(const std::string& short_name) {
+        for (auto& info : fields) {
+            if (info.short_name == short_name) {
+                return &info;
+            }
+        }
+        return nullptr;
+    }
+
     int32_t get_field_id_by_short_name(const std::string& short_name) {
         for (auto& info : fields) {
             if (info.short_name == short_name) {
@@ -269,7 +284,6 @@ struct TableInfo {
         }
         return -1;
     }
-
 };
 
 struct IndexInfo {
@@ -290,6 +304,7 @@ struct IndexInfo {
 
     // all pk fields not in index fields
     // empty if this is a pk index
+    // 索引或主键包含变长字段时为完整pk
     std::vector<FieldInfo>  pk_fields;
 
     // 索引定长(length>0)且overlap时, 主键字段在索引中的位置
@@ -309,15 +324,20 @@ struct IndexInfo {
     int64_t                 restore_time = -1;
     int64_t                 disable_time = -1;
     int32_t                 max_field_id = 0;
+    
+    // rollup 
+    pb::RollupType          rollup_type = pb::SUM;
+    int32_t                 publish_timestamp;
+
     //vector index
     int32_t                 dimension = 0;
-    int32_t                 nprobe = 5;
-    pb::RollupType          rollup_type = pb::SUM;
-    int32_t                 efsearch = 16;
-    int32_t                 efconstruction = 40;
     std::string             vector_description;
     pb::MetricType          metric_type = pb::METRIC_L2;
-    int32_t                 publish_timestamp;
+    // -- HNSW
+    int32_t                 efsearch = 16;
+    int32_t                 efconstruction = 40;
+    // -- IVF
+    int32_t                 nprobe = 5;
 };
 
 struct DatabaseInfo {
@@ -1254,6 +1274,8 @@ public:
             std::map<int64_t, pb::RegionInfo>* region_infos);
     int get_partition_regions(int64_t table_id, const std::vector<int64_t>& partition_ids,  
                                     std::map<int64_t, pb::RegionInfo>& region_infos);
+    int get_all_partition_ids(
+        int64_t table_id, std::vector<int64_t>& partition_ids);
     int check_region_ranges_consecutive(int64_t table_id);
     int get_region_by_key(int64_t main_table_id, 
             IndexInfo& index,
@@ -1757,9 +1779,17 @@ public:
     void update_valiable_addresses(const std::vector<pb::BaikalStatus>& baikal_status_vec);
     void set_db_unavailable(const std::string& db_address);
     void update_meta_map(const std::string& meta_name);
-
+    bool table_suitable_for_broadcast_join(const int64_t table_id);
     std::string get_address() const {
         return _my_address;
+    }
+    void get_special_signs(std::unordered_map<uint64_t, std::string>& special_signs) {
+        BAIDU_SCOPED_LOCK(_special_signs_mutex);
+        special_signs = _special_signs;
+    }
+    void set_special_signs(std::unordered_map<uint64_t, std::string>& special_signs) {
+        BAIDU_SCOPED_LOCK(_special_signs_mutex);
+        _special_signs = special_signs;
     }
 private:
     SchemaFactory() {
@@ -1827,6 +1857,9 @@ private:
     DoublBufferedDBAddresses _doubly_valiable_addresses;
     // ip:port
     std::string _my_address;
+
+    bthread::Mutex  _special_signs_mutex;
+    std::unordered_map<uint64_t, std::string> _special_signs;
 };
 }
 

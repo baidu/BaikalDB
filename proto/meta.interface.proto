@@ -173,6 +173,22 @@ message PartitionInfo {
 enum DBLinkType {
     LT_BAIKALDB = 1;
     LT_MYSQL = 2;
+    LT_FILE = 3;
+};
+
+enum FileFormat {
+    CSV = 1;
+    PARQUET = 2;
+};
+
+message FileInfo {
+    optional bytes cluster          = 1;
+    optional bytes path             = 2;
+    optional bytes username         = 3;
+    optional bytes password         = 4;
+    repeated bytes partition_fields = 5;
+    optional FileFormat format      = 6;
+    optional bytes delimiter        = 7;
 };
 
 message DBLinkInfo {
@@ -183,6 +199,7 @@ message DBLinkInfo {
     optional string table_name     = 5;
     optional int64  meta_id        = 6;
     optional MysqlInfo mysql_info  = 7;
+    optional FileInfo file_info    = 8;
 };
 
 // 增加新字段时，考虑是否对该字段增删meta标识，对应dblink表场景!!!
@@ -239,6 +256,7 @@ message SchemaInfo {
     optional DBLinkInfo dblink_info         = 50; // DBLink表信息，namespace_name心跳时不需要删除或增加meta标识
     optional bool  or_replace               = 51;
     optional string  view_select_stmt       = 52;
+    optional FieldInfo ttl_field            = 53;
 };
 
 message PartitionRegion {
@@ -576,6 +594,16 @@ message VirtualIndexInfluence{
     optional string  influenced_sql                  = 3;
 };
 
+message IndexInstance {
+    optional string index_name  = 1;
+    repeated string instances   = 2;
+}
+
+message PartitionIndexInstance {
+    optional int64 partition_id = 1;
+    repeated IndexInstance index_instances = 2;
+}
+
 message MetaManagerRequest {
     required OpType              op_type                = 1; //一级操作符
     optional SchemaInfo          table_info             = 2; //建/删表
@@ -606,6 +634,7 @@ message MetaManagerRequest {
     optional int64               learner_replica_num    = 27;
     optional bool                is_dynamic_change      = 28; // 标识是否为动态分区变更
     optional bool                is_force_setting       = 29; // 标识是否为强制设置，用于删除默认配置
+    repeated PartitionIndexInstance  partition_index_instance   = 30; // 建表 加索引 加分区状态及外选实例
 };
 
 message CreateTableResponse {

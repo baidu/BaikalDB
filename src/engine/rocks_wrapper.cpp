@@ -33,7 +33,7 @@ DEFINE_int32(rocks_transaction_lock_timeout_ms, 20000, "rocksdb transaction_lock
 DEFINE_int32(rocks_default_lock_timeout_ms, 30000, "rocksdb default_lock_timeout(ms)");
 
 DEFINE_bool(rocks_use_partitioned_index_filters, false, "rocksdb use Partitioned Index Filters");
-DEFINE_bool(rocks_skip_stats_update_on_db_open, false, "rocks_skip_stats_update_on_db_open");
+DEFINE_bool(rocks_skip_stats_update_on_db_open, false, "Skip stats update on DB open, default: false");
 DEFINE_int32(rocks_block_size, 64 * 1024, "rocksdb block_cache size, default: 64KB");
 DEFINE_int64(rocks_block_cache_size_mb, 8 * 1024, "rocksdb block_cache_size_mb, default: 8G");
 DEFINE_uint64(rocks_hard_pending_compaction_g, 256, "rocksdb hard_pending_compaction_bytes_limit , default: 256G");
@@ -46,7 +46,7 @@ DEFINE_int32(rocks_max_open_files, 1024, "rocksdb max_open_files, default: 1024"
 DEFINE_int32(cold_rocks_max_open_files, 4096, "cold rocksdb max_open_files, default: 1024");
 DEFINE_int32(rocks_max_subcompactions, 4, "rocks_max_subcompactions");
 DEFINE_int32(rocks_max_background_compactions, 20, "max_background_compactions");
-DEFINE_bool(rocks_optimize_filters_for_hits, false, "rocks_optimize_filters_for_hits");
+DEFINE_bool(rocks_optimize_filters_for_hits, false, "Optimize filters for hits, default: false");
 DEFINE_int32(slowdown_write_sst_cnt, 10, "level0_slowdown_writes_trigger");
 DEFINE_int32(stop_write_sst_cnt, 40, "level0_stop_writes_trigger");
 DEFINE_bool(rocks_use_ribbon_filter, false, "use Ribbon filter:https://github.com/facebook/rocksdb/wiki/RocksDB-Bloom-Filter");
@@ -71,7 +71,7 @@ DEFINE_bool(enable_bottommost_compression, false, "enable zstd for bottommost_co
 DEFINE_int32(target_file_size_base, 128 * 1024 * 1024, "target_file_size_base");
 DEFINE_int32(addpeer_rate_limit_level, 1, "addpeer_rate_limit_level; "
         "0:no limit, 1:limit when stalling, 2:limit when compaction pending. default(1)");
-DEFINE_bool(delete_files_in_range, true, "delete_files_in_range");
+DEFINE_bool(delete_files_in_range, true, "Delete files in range, default: true");
 DEFINE_bool(real_delete_old_binlog_cf, true, "default true");
 DEFINE_bool(rocksdb_fifo_allow_compaction, false, "default false");
 DEFINE_bool(use_direct_io_for_flush_and_compaction, false, "default false");
@@ -82,8 +82,7 @@ DEFINE_bool(olap_table_only, false, "default false");
 DEFINE_int32(cold_sst_block_size, 64 * 1024, "default 64K");
 DEFINE_bool(cold_sst_use_zstd, false, "default LZ4");
 DEFINE_int32(max_dict_bytes, 16 * 1024, "default 16K");
-DEFINE_int32(zstd_max_train_bytes, 256 * 1024, "default 256K");
-DEFINE_bool(olap_import_mode, false, "is olap import, default: false");
+DEFINE_int32(zstd_max_train_bytes, 1024 * 1024, "default 1MB");
 DEFINE_bool(rocks_enable_blob_files, false, "rocksdb enable_blob_files, default: false");
 DEFINE_uint64(rocks_min_blob_size, 4096, "rocksdb min_blob_size, default: 4096");
 DEFINE_bool(enable_remote_compaction, false, "enable remote compaction");
@@ -144,12 +143,6 @@ int32_t RocksWrapper::init(const std::string& path) {
     db_options.max_background_flushes = 2;
     db_options.env->SetBackgroundThreads(2, rocksdb::Env::HIGH);
     db_options.listeners.emplace_back(my_listener);
-    if (FLAGS_olap_import_mode) {
-        db_options.max_background_flushes = 4;
-        db_options.env->SetBackgroundThreads(4, rocksdb::Env::HIGH);
-        db_options.allow_concurrent_memtable_write = false;
-        db_options.memtable_factory.reset(new rocksdb::VectorRepFactory(1024*1024));
-    }
     if (FLAGS_enable_remote_compaction) {
         db_options.compaction_service.reset(new MyCompactionService(path, FLAGS_compaction_server_bns));
     }
@@ -259,8 +252,9 @@ int32_t RocksWrapper::init(const std::string& path) {
     if (FLAGS_enable_bottommost_compression) {
         _data_cf_option.bottommost_compression_opts.enabled = true;
         _data_cf_option.bottommost_compression = rocksdb::kZSTD;
-        _data_cf_option.bottommost_compression_opts.max_dict_bytes = 1 << 14; // 16KB
-        _data_cf_option.bottommost_compression_opts.zstd_max_train_bytes = 1 << 18; // 256KB
+        _data_cf_option.bottommost_compression_opts.max_dict_bytes = FLAGS_max_dict_bytes;
+        _data_cf_option.bottommost_compression_opts.zstd_max_train_bytes = FLAGS_zstd_max_train_bytes;
+        _data_cf_option.bottommost_compression_opts.max_dict_buffer_bytes = 1 << 22; // 4MB 防止SstFileWriter内存太大
     }
 
     // 等待心跳成功后再开启rocksdb compaction
@@ -278,60 +272,6 @@ int32_t RocksWrapper::init(const std::string& path) {
     _meta_info_option.compaction_pri = rocksdb::kOldestSmallestSeqFirst;
     _meta_info_option.level_compaction_dynamic_level_bytes = FLAGS_rocks_data_dynamic_level_bytes;
     _meta_info_option.max_write_buffer_number_to_maintain = _meta_info_option.max_write_buffer_number;
-    if (FLAGS_olap_import_mode) {
-        _log_cf_option.max_write_buffer_number_to_maintain = 0;
-        _log_cf_option.min_write_buffer_number_to_merge = 1;
-        _binlog_cf_option.max_write_buffer_number_to_maintain = 0;
-        _binlog_cf_option.min_write_buffer_number_to_merge = 1;
-        _data_cf_option.max_write_buffer_number_to_maintain = 0;
-        _data_cf_option.min_write_buffer_number_to_merge = 1;
-        _meta_info_option.max_write_buffer_number_to_maintain = 0;
-        _meta_info_option.min_write_buffer_number_to_merge = 1;
-        _data_cf_option.compression_per_level = {rocksdb::CompressionType::kLZ4Compression,
-                                                 rocksdb::CompressionType::kLZ4Compression,
-                                                 rocksdb::CompressionType::kLZ4Compression,
-                                                 rocksdb::CompressionType::kLZ4Compression,
-                                                 rocksdb::CompressionType::kLZ4Compression,
-                                                 rocksdb::CompressionType::kLZ4Compression,
-                                                 rocksdb::CompressionType::kLZ4Compression};
-
-        // 参考rocksdb  PrepareForBulkLoad
-        // never slowdown ingest.
-        _data_cf_option.level0_file_num_compaction_trigger = (1<<30);
-        _data_cf_option.level0_slowdown_writes_trigger = (1<<30);
-        _data_cf_option.level0_stop_writes_trigger = (1<<30);
-        _data_cf_option.soft_pending_compaction_bytes_limit = 0;
-        _data_cf_option.hard_pending_compaction_bytes_limit = 0;
-
-        // no auto compactions please. The application should issue a
-        // manual compaction after all data is loaded into L0.
-        _data_cf_option.disable_auto_compactions = true;
-        // A manual compaction run should pick all files in L0 in
-        // a single compaction run.
-        _data_cf_option.max_compaction_bytes = (static_cast<uint64_t>(1) << 60);
-
-        // It is better to have only 2 levels, otherwise a manual
-        // compaction would compact at every possible level, thereby
-        // increasing the total time needed for compactions.
-        //   num_levels = 2;
-
-        // Need to allow more write buffers to allow more parallism
-        // of flushes.
-        _data_cf_option.max_write_buffer_number = 6;
-        _data_cf_option.min_write_buffer_number_to_merge = 1;
-
-        // When compaction is disabled, more parallel flush threads can
-        // help with write throughput.
-        // _data_cf_option.max_background_flushes = 4;
-
-        // Prevent a memtable flush to automatically promote files
-        // to L1. This is helpful so that all files that are
-        // input to the manual compaction are all at L0.
-        // _data_cf_option.max_background_compactions = 2;
-
-        // The compaction would create large files in L1.
-        _data_cf_option.target_file_size_base = 256 * 1024 * 1024;
-    }
 
     _db_path = path;
     // List Column Family
@@ -507,7 +447,7 @@ int32_t RocksWrapper::init_cold_rocksdb(const std::string& path) {
         _cold_option.compression = rocksdb::kZSTD;
         _cold_option.compression_opts.max_dict_bytes = FLAGS_max_dict_bytes;
         _cold_option.compression_opts.zstd_max_train_bytes = FLAGS_zstd_max_train_bytes;
-        _cold_option.compression_opts.max_dict_buffer_bytes = 128 * 1024 * 1024ULL;
+        _cold_option.compression_opts.max_dict_buffer_bytes = 1 << 22; // 4MB 防止SstFileWriter内存太大
     } else {
         _cold_option.compression = rocksdb::kLZ4Compression;
     }
@@ -629,9 +569,6 @@ void RocksWrapper::set_table_options(rocksdb::BlockBasedTableOptions& table_opti
     }
     if (rocksdb_gflags.olap_table_only()) {
         // olap集群关闭bloomfilter
-        table_options.filter_policy = nullptr;
-    }
-    if (rocksdb_gflags.olap_import_mode()) {
         table_options.filter_policy = nullptr;
     }
     return;

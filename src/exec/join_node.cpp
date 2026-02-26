@@ -29,7 +29,7 @@
 
 namespace baikaldb {
 DECLARE_int32(arrow_multi_threads);
-
+DECLARE_bool(join_key_cast_like_mysql);
 int JoinNode::init(const pb::PlanNode& node) {
     int ret = 0;
     ret = Joiner::init(node);
@@ -268,6 +268,97 @@ bool JoinNode::can_use_arrow_vector(RuntimeState* state) {
     return true;
 }
 
+void JoinNode::get_hash_partitions(NodePartitionProperty& outer_property, 
+                             NodePartitionProperty& inner_property, 
+                             const std::unordered_set<std::string>& cast_string_hash_columns) {
+        outer_property.type = _partition_property.type;
+        inner_property.type = _partition_property.type;
+        if (_partition_property.hash_partition_propertys.size() == 2) {
+            outer_property.hash_partition_propertys.emplace_back(_partition_property.hash_partition_propertys[0]);
+            inner_property.hash_partition_propertys.emplace_back(_partition_property.hash_partition_propertys[1]);
+            outer_property.type = _partition_property.hash_partition_propertys[0]->type;
+            inner_property.type = _partition_property.hash_partition_propertys[1]->type;
+        }
+        outer_property.need_cast_string_columns = _partition_property.need_cast_string_columns;
+        inner_property.need_cast_string_columns = _partition_property.need_cast_string_columns;
+        for (auto& name : cast_string_hash_columns) {
+            outer_property.need_cast_string_columns.insert(name);
+            inner_property.need_cast_string_columns.insert(name);
+            if (_on_condition_column_map.count(name) > 0) {
+                outer_property.need_cast_string_columns.insert(_on_condition_column_map[name]);
+                inner_property.need_cast_string_columns.insert(_on_condition_column_map[name]);
+            }
+        }
+    }
+
+void JoinNode::make_broadcast_join_property(std::shared_ptr<HashPartitionColumns>* small_table_property, 
+            ExecNode* small_table_node,
+            std::shared_ptr<HashPartitionColumns>* other_property,
+            NodePartitionProperty* other_child_property) {
+    // small table使用broadcast
+    (*small_table_property)->type = pb::BroadcastPartitionType;
+    // 去掉子树的hash属性, 如agg
+    small_table_node->set_child_node_property_any_type();
+
+    // other table继承other_child_property的属性
+    if (other_child_property->type == pb::AnyType) {
+        (*other_property)->type = pb::RandomPartitionType;
+        _partition_property.type = pb::RandomPartitionType;
+    } else {
+        (*other_property)->type = other_child_property->type;
+        _partition_property.type = other_child_property->type;
+        for (auto& property : other_child_property->hash_partition_propertys) {
+            if (property->type == pb::HashPartitionType) {
+                *other_property = property;
+                break;
+            }
+        }
+    }
+    return;
+}
+
+bool JoinNode::suitable_for_broadcast_join(QueryContext* ctx) {
+    auto factory = SchemaFactory::get_instance();
+    if (factory == nullptr) {
+        return false;
+    }
+    std::vector<ExecNode*> outer_scan_nodes;
+    std::vector<ExecNode*> inner_scan_nodes;
+    _outer_node->get_node_pass_subquery(pb::SCAN_NODE, outer_scan_nodes);
+    _inner_node->get_node_pass_subquery(pb::SCAN_NODE, inner_scan_nodes);
+    NodePartitionProperty* outer_partition_property = _outer_node->partition_property();
+    NodePartitionProperty* inner_partition_property = _inner_node->partition_property();
+    bool outer_is_small = false;
+    bool inner_is_small = false;
+    if (outer_scan_nodes.size() == 1 
+            && _join_type == pb::INNER_JOIN
+            && (!_use_index_join || ctx->runtime_state->sign_exec_type == SignExecType::SIGN_EXEC_ARROW_FORCE_NO_INDEX_JOIN)) {
+        // index join 驱动表不支持broadcast join, 因为非驱动表不走exchange) 
+        ScanNode* outer_scan_node = static_cast<ScanNode*>(outer_scan_nodes[0]);
+        outer_is_small = outer_scan_node->is_rocksdb_scan_node()
+                            && factory->table_suitable_for_broadcast_join(outer_scan_node->table_id());
+    } 
+    if (inner_scan_nodes.size() == 1) {
+        ScanNode* inner_scan_node = static_cast<ScanNode*>(inner_scan_nodes[0]);
+        inner_is_small = inner_scan_node->is_rocksdb_scan_node()
+                            && factory->table_suitable_for_broadcast_join(inner_scan_node->table_id());
+    }
+    if (outer_is_small || inner_is_small) {
+        std::shared_ptr<HashPartitionColumns> outer = std::make_shared<HashPartitionColumns>();
+        std::shared_ptr<HashPartitionColumns> inner = std::make_shared<HashPartitionColumns>();
+        
+        if (outer_is_small) {
+            make_broadcast_join_property(&outer, _outer_node, &inner, inner_partition_property);
+        } else {
+            make_broadcast_join_property(&inner, _inner_node, &outer, outer_partition_property);
+        }
+        _partition_property.hash_partition_propertys.emplace_back(outer); // outer对应的hash属性
+        _partition_property.hash_partition_propertys.emplace_back(inner); // inner对应的hash属性
+        return true;
+    }
+    return false;
+}
+
 int JoinNode::set_partition_property_and_schema(QueryContext* ctx) {
     for (auto& c : _children) {
         if (0 != c->set_partition_property_and_schema(ctx)) {
@@ -275,12 +366,22 @@ int JoinNode::set_partition_property_and_schema(QueryContext* ctx) {
         }
         _data_schema.insert(c->data_schema().begin(), c->data_schema().end());
     }
+    // 有可能separate会加入selectmanagernode, 这里重新设置
+    _outer_node = _children[0];
+    _inner_node = _children[1];
+    if (_join_type == pb::RIGHT_JOIN) {
+        _outer_node = _children[1];
+        _inner_node = _children[0];
+    }
     if (_outer_node->partition_property()->has_no_input_data
                         && _join_type != pb::FULL_JOIN) {
         _partition_property.has_no_input_data = true;
     }
     if (_outer_equal_slot.size() == 0) {
         _partition_property.set_single_partition();
+        return 0;
+    }
+    if (suitable_for_broadcast_join(ctx)) {
         return 0;
     }
     // 当前join向量化, key只能是slotref, 但是类型不一致会都做一次类型转换
@@ -308,25 +409,24 @@ int JoinNode::set_partition_property_and_schema(QueryContext* ctx) {
     NodePartitionProperty* inner_partition_property = _inner_node->partition_property();
     bool is_same_or_shrinked = shrink_partition_property(outer, outer_partition_property);
     if (is_same_or_shrinked) {
-        if (outer->hash_columns.size() != inner->hash_columns.size()) {
-            // outer hash partition收缩了, 需要联动更改inner的hash partition
-            std::unordered_map<std::string, ExprNode*> new_hash_columns;
-            std::vector<std::string> new_ordered_col_names;
-            for (const auto& outer_col : outer->ordered_hash_columns) {
-                std::string inner_col_name = _on_condition_column_map[outer_col];
-                if (inner_col_name.empty()) {
-                    DB_FATAL("column map has no match col: %s", outer_col.c_str());
-                }
-                new_hash_columns[inner_col_name] = inner->hash_columns[inner_col_name];
-                new_ordered_col_names.emplace_back(inner_col_name);
+        // outer hash partition调整了, 需要联动更改inner的hash partition
+        std::unordered_map<std::string, ExprNode*> new_hash_columns;
+        std::vector<std::string> new_ordered_col_names;
+        new_ordered_col_names.reserve(outer->ordered_hash_columns.size());
+        for (const auto& outer_col : outer->ordered_hash_columns) {
+            std::string inner_col_name = _on_condition_column_map[outer_col];
+            if (inner_col_name.empty()) {
+                DB_FATAL("column map has no match col: %s", outer_col.c_str());
             }
-            inner->hash_columns = new_hash_columns;
-            inner->ordered_hash_columns = new_ordered_col_names;
+            new_hash_columns[inner_col_name] = inner->hash_columns[inner_col_name];
+            new_ordered_col_names.emplace_back(inner_col_name);
         }
+        inner->hash_columns = new_hash_columns;
+        inner->ordered_hash_columns = new_ordered_col_names;
     } else {
-        shrink_partition_property(inner, inner_partition_property);
-        if (outer->hash_columns.size() != inner->hash_columns.size()) {
-            // inner hash partition收缩了, 需要联动更改outer的hash partition
+        is_same_or_shrinked = shrink_partition_property(inner, inner_partition_property);
+        if (is_same_or_shrinked) {
+            // inner hash partition调整了, 需要联动更改outer的hash partition
             std::unordered_map<std::string, ExprNode*> new_hash_columns;
             std::vector<std::string> new_ordered_col_names;
             for (const auto& inner_col : inner->ordered_hash_columns) {
@@ -364,10 +464,9 @@ int JoinNode::build_table_arrow_declaration(RuntimeState* state,
                                             ExecNode* node, 
                                             std::unordered_set<int32_t>& tuple_ids, 
                                             std::vector<MemRow*>& mem_rows,
-                                            const std::unordered_map<int32_t, std::set<int32_t>>& cast_string_slot_ids,
+                                            std::unordered_map<std::string, arrow::compute::Expression>& projection_temp_col,
                                             bool need_add_index_colletor_node,
-                                            bool remove_useless_sort,
-                                            bool need_add_join_key) {
+                                            bool remove_useless_sort) {
     START_LOCAL_TRACE(get_trace(), state->get_trace_cost(), OPEN_TRACE, nullptr);
     if (node->node_exec_type() == pb::EXEC_ROW) {
         // 返回行, 行转source node
@@ -401,7 +500,7 @@ int JoinNode::build_table_arrow_declaration(RuntimeState* state,
             state->acero_declarations.pop_back();
         }
     }
-    if (cast_string_slot_ids.size() > 0 || need_add_join_key) {
+    if (projection_temp_col.size() > 0) {
         std::vector<arrow::compute::Expression> exprs;
         std::vector<std::string> names;
         for (auto tuple_id : tuple_ids) {
@@ -414,18 +513,11 @@ int JoinNode::build_table_arrow_declaration(RuntimeState* state,
                 std::string name = std::to_string(tuple_id) + "_" + std::to_string(slot.slot_id());
                 exprs.emplace_back(arrow::compute::field_ref(name));
                 names.emplace_back(name);
-                auto iter = cast_string_slot_ids.find(tuple_id);
-                if (iter != cast_string_slot_ids.end() && iter->second.find(slot.slot_id()) != iter->second.end()) {
-                    // 额外加cast string列
-                    exprs.emplace_back(arrow::compute::call("cast", {arrow::compute::field_ref(name)}, 
-                                                            arrow::compute::CastOptions::Unsafe(arrow::large_binary())));
-                    names.emplace_back(name + "_cast");
-                }
             }
         }
-        if (need_add_join_key) {
-            exprs.emplace_back(arrow::compute::literal(true));
-            names.emplace_back("__fake_join_key");
+        for (auto& col : projection_temp_col) {
+            exprs.emplace_back(col.second);
+            names.emplace_back(col.first);
         }
         arrow::acero::Declaration dec{"project", arrow::acero::ProjectNodeOptions{exprs, names}};
         LOCAL_TRACE_ARROW_PLAN(dec);
@@ -466,15 +558,273 @@ void JoinNode::get_need_add_index_collector_cond_nodes(ExecNode* node, std::set<
     return;
 }
 
+void JoinNode::handle_join_equal_key_cast_type(ExprNode* outer_expr,
+            ExprNode* inner_expr,
+            std::string outer_tmp_col_name,
+            std::string inner_tmp_col_name,
+            std::vector<arrow::FieldRef>& outer_keys,
+            std::vector<arrow::FieldRef>& inner_keys,
+            std::unordered_map<std::string, arrow::compute::Expression>& outer_projection_temp_col,
+            std::unordered_map<std::string, arrow::compute::Expression>& inner_projection_temp_col) {
+    auto outer_type = outer_expr->col_type();
+    auto inner_type = inner_expr->col_type();
+    auto cast_type = pb::STRING;
+    if (is_uint(outer_type) && is_uint(inner_type)) {
+        // all cast uint64_t
+        cast_type = pb::UINT64;
+    } else if (is_signed(outer_type) && is_signed(inner_type)) {
+        // all cast int64_t
+        cast_type = pb::INT64;
+    } else if (FLAGS_join_key_cast_like_mysql && is_string(outer_type) && !is_string(inner_type)) {
+        // 和mysql一样, 将string转换为数值型
+        // outer string cast numberic
+        cast_type = inner_type;
+        if (is_int(inner_type) || is_double(inner_type)) {
+            cast_type = pb::DOUBLE;
+        }
+    } else if (FLAGS_join_key_cast_like_mysql && is_string(inner_type) && !is_string(outer_type)) {
+        // inner string cast numberic
+        cast_type = outer_type;
+        if (is_int(outer_type) || is_double(outer_type)) {
+            cast_type = pb::DOUBLE;
+        }
+    }
+    outer_projection_temp_col[outer_tmp_col_name] = arrow_cast(outer_expr->arrow_expr(), outer_type, cast_type);
+    inner_projection_temp_col[inner_tmp_col_name] = arrow_cast(inner_expr->arrow_expr(), inner_type, cast_type);
+    outer_keys.emplace_back(arrow::FieldRef(outer_tmp_col_name));
+    inner_keys.emplace_back(arrow::FieldRef(inner_tmp_col_name));
+    return;
+}
+
+int JoinNode::handle_join_filter_key_expressions(RuntimeState* state,
+            int idx,
+            ExprNode* condition,
+            bool left_child_is_outer,
+            std::vector<arrow::FieldRef>& outer_keys,
+            std::vector<arrow::FieldRef>& inner_keys,
+            std::vector<arrow::compute::Expression>& sub_exprs,
+            std::unordered_map<std::string, arrow::compute::Expression>& outer_projection_temp_col,
+            std::unordered_map<std::string, arrow::compute::Expression>& inner_projection_temp_col) {
+    auto outer_child_expr = condition->children(0);
+    auto inner_child_expr = condition->children(1);
+    if (!left_child_is_outer) {
+        outer_child_expr = condition->children(1);
+        inner_child_expr = condition->children(0);
+    }
+    if (outer_child_expr->transfer_to_arrow_expression() < 0) {
+        DB_FATAL_STATE(state, "transfer join filter outer child to arrow expression failed");
+        return -1;
+    }
+    if (inner_child_expr->transfer_to_arrow_expression() < 0) {
+        DB_FATAL_STATE(state, "transfer join filter inner child to arrow expression failed");
+        return -1;
+    }
+    auto outer_child_tmp_col_name = "outer_tmp_" + std::to_string(idx);
+    auto inner_child_tmp_col_name = "inner_tmp_" + std::to_string(idx);
+    auto outer_type = outer_child_expr->col_type();
+    auto inner_type = inner_child_expr->col_type();
+    auto fn_op = static_cast<ScalarFnCall*>(condition)->fn().fn_op();
+    if (fn_op == parser::FT_EQ) {
+        // 放在key里
+        outer_keys.emplace_back(arrow::FieldRef(outer_child_tmp_col_name));
+        inner_keys.emplace_back(arrow::FieldRef(inner_child_tmp_col_name));
+        if (outer_type == inner_type) {
+            outer_projection_temp_col[outer_child_tmp_col_name] = outer_child_expr->arrow_expr();
+            inner_projection_temp_col[inner_child_tmp_col_name] = inner_child_expr->arrow_expr();
+        } else {
+            handle_join_equal_key_cast_type(outer_child_expr, 
+                inner_child_expr, 
+                outer_child_tmp_col_name, 
+                inner_child_tmp_col_name, 
+                outer_keys, 
+                inner_keys, 
+                outer_projection_temp_col, 
+                inner_projection_temp_col);
+        }
+    } else {
+        // 放在filter condition
+        outer_projection_temp_col[outer_child_tmp_col_name] = outer_child_expr->arrow_expr();
+        inner_projection_temp_col[inner_child_tmp_col_name] = inner_child_expr->arrow_expr();
+        std::string arrow_func_name;
+        switch (fn_op)
+        {
+            case parser::FT_GE:
+                arrow_func_name = "greater_equal";
+                break;
+            case parser::FT_GT:
+                arrow_func_name = "greater";
+                break;
+            case parser::FT_LE:
+                arrow_func_name = "less_equal";
+                break;
+            case parser::FT_LT:
+                arrow_func_name = "less";
+                break;
+            case parser::FT_NE: 
+                arrow_func_name = "not_equal";
+                break;
+            default:
+                DB_FATAL_STATE(state, "unsupported fn_op");
+                return -1;
+        }
+        if (left_child_is_outer) {
+            sub_exprs.emplace_back(arrow::compute::call(arrow_func_name, 
+                {arrow::compute::field_ref(outer_child_tmp_col_name), arrow::compute::field_ref(inner_child_tmp_col_name)}));
+        } else {
+            sub_exprs.emplace_back(arrow::compute::call(arrow_func_name, 
+                {arrow::compute::field_ref(inner_child_tmp_col_name), arrow::compute::field_ref(outer_child_tmp_col_name)}));
+        }
+    }
+    return 0;
+}
+
+int JoinNode::try_transfer_filter_to_column_first(RuntimeState* state,
+            int idx,
+            ExprNode* condition, 
+            std::vector<arrow::FieldRef>& outer_keys,
+            std::vector<arrow::FieldRef>& inner_keys,
+            std::vector<arrow::compute::Expression>& sub_exprs,
+            std::unordered_map<std::string, arrow::compute::Expression>& outer_projection_temp_col,
+            std::unordered_map<std::string, arrow::compute::Expression>& inner_projection_temp_col) {
+    if (condition->node_type() != pb::FUNCTION_CALL
+         || !static_cast<ScalarFnCall*>(condition)->is_compare_op()) {
+        return 1;
+    }
+    if (condition->children_size() != 2) {
+        return 1;
+    }
+    ExprNode* left_child = condition->children(0);
+    ExprNode* right_child = condition->children(1);
+    std::unordered_set<int> left_tuple_ids;
+    std::unordered_set<int> right_tuple_ids;
+    left_child->get_all_tuple_ids(left_tuple_ids);
+    right_child->get_all_tuple_ids(right_tuple_ids);
+
+    bool left_tuple_ids_has_inner = false;
+    bool left_tuple_ids_has_outer = false;
+    for (auto tuple_id : left_tuple_ids) {
+        if (_inner_tuple_ids.count(tuple_id) == 1) {
+            left_tuple_ids_has_inner = true;
+        }
+        if (_outer_tuple_ids.count(tuple_id) == 1) {
+            left_tuple_ids_has_outer = true;
+        }
+    }
+    if (left_tuple_ids_has_inner && left_tuple_ids_has_outer) {
+        return 1;
+    }
+
+    bool right_tuple_ids_has_inner = false;
+    bool right_tuple_ids_has_outer = false;
+    for (auto tuple_id : right_tuple_ids) {
+        if (_inner_tuple_ids.count(tuple_id) == 1) {
+            right_tuple_ids_has_inner = true;
+        }
+        if (_outer_tuple_ids.count(tuple_id) == 1) {
+            right_tuple_ids_has_outer = true;
+        }
+    }
+    if (right_tuple_ids_has_inner && right_tuple_ids_has_outer) {
+        return 1;
+    }
+    
+    // 双边filter, 如 funcA(table_a.id) > funcB(table_b.id)
+    if ((left_tuple_ids_has_inner && right_tuple_ids_has_outer)
+        || (left_tuple_ids_has_outer && right_tuple_ids_has_inner)) {
+        // left_child, right_child分别作为两表临时列
+        return handle_join_filter_key_expressions(state, idx, condition, left_tuple_ids_has_outer,
+                outer_keys, inner_keys, sub_exprs, 
+                outer_projection_temp_col, inner_projection_temp_col);
+    }
+    
+    // 单边filter, 如 funcA(table_a.id) > 10
+    if (condition->transfer_to_arrow_expression() < 0) {
+        DB_FATAL_STATE(state, "join filter condition expr transfer arrow fail");
+        return -1;
+    }
+    auto bool_expr = arrow_cast(condition->arrow_expr(), condition->col_type(), pb::BOOL);
+    if (left_tuple_ids_has_outer || right_tuple_ids_has_outer) {
+        // condition is true作为outer table临时列;  临时列直接作为join filter
+        std::string tmp_col_name = "outer_tmp_" + std::to_string(idx);
+        outer_projection_temp_col[tmp_col_name] = bool_expr;
+        sub_exprs.emplace_back(arrow::compute::field_ref(tmp_col_name));
+    } else if (left_tuple_ids_has_inner || right_tuple_ids_has_inner) {
+        // condition is true作为inner table临时列;  临时列直接作为join filter
+        std::string tmp_col_name = "inner_tmp_" + std::to_string(idx);
+        inner_projection_temp_col[tmp_col_name] = bool_expr;
+        sub_exprs.emplace_back(arrow::compute::field_ref(tmp_col_name));
+    }
+    return 0;
+}
+
 int JoinNode::build_arrow_declaration(RuntimeState* state) {
     START_LOCAL_TRACE_WITH_PARTITION_PROPERTY(get_trace(), state->get_trace_cost(), &_partition_property, OPEN_TRACE, nullptr);
-    std::unordered_map<int32_t, std::set<int32_t>> outer_cast_slot_ids;
-    std::unordered_map<int32_t, std::set<int32_t>> inner_cast_slot_ids;
+    std::vector<arrow::FieldRef> outer_keys;
+    std::vector<arrow::FieldRef> inner_keys;
+    std::vector<arrow::compute::Expression> sub_exprs;
+    std::unordered_map<std::string, arrow::compute::Expression> outer_projection_temp_col;
+    std::unordered_map<std::string, arrow::compute::Expression> inner_projection_temp_col;
+    outer_keys.reserve(_outer_equal_slot.size());
+    inner_keys.reserve(_inner_equal_slot.size());
+    sub_exprs.reserve(_conditions.size());    
+    // 处理slot_ref on condition first
     for (int i = 0; i < _outer_equal_slot.size(); ++i) {
-        if (_outer_equal_slot[i]->col_type() != _inner_equal_slot[i]->col_type()) {
-            outer_cast_slot_ids[_outer_equal_slot[i]->tuple_id()].insert(_outer_equal_slot[i]->slot_id());
-            inner_cast_slot_ids[_inner_equal_slot[i]->tuple_id()].insert(_inner_equal_slot[i]->slot_id());
+        auto& outer_expr = _outer_equal_slot[i];
+        auto& inner_expr = _inner_equal_slot[i];
+        if (outer_expr->transfer_to_arrow_expression() < 0) {
+            DB_FATAL_STATE(state, "_outer_equal_slot[%d] expr transfer arrow fail", i);
+            return -1;
         }
+        if (inner_expr->transfer_to_arrow_expression() < 0) {
+            DB_FATAL_STATE(state, "_inner_equal_slot[%d] expr transfer arrow fail", i);
+            return -1;
+        }
+        std::string outer_col_name = std::to_string(outer_expr->tuple_id()) + "_" + std::to_string(outer_expr->slot_id());
+        std::string inner_col_name = std::to_string(inner_expr->tuple_id()) + "_" + std::to_string(inner_expr->slot_id());
+        auto outer_type = outer_expr->col_type();
+        auto inner_type = inner_expr->col_type();
+        if (outer_type == inner_type) {
+            outer_keys.emplace_back(arrow::FieldRef(outer_col_name));
+            inner_keys.emplace_back(arrow::FieldRef(inner_col_name));
+        } else if (outer_type != inner_type) {
+            std::string outer_tmp_col_name = outer_col_name + "_cast";
+            std::string inner_tmp_col_name = inner_col_name + "_cast";
+            handle_join_equal_key_cast_type(outer_expr, 
+                inner_expr, 
+                outer_tmp_col_name, 
+                inner_tmp_col_name, 
+                outer_keys, 
+                inner_keys, 
+                outer_projection_temp_col, 
+                inner_projection_temp_col);
+        }
+    }
+    // 处理剩余的filter condition
+    for (auto idx = 0; idx < _conditions.size(); ++idx) {
+        int ret = try_transfer_filter_to_column_first(state, idx, _conditions[idx], 
+                            outer_keys, inner_keys, sub_exprs,
+                            outer_projection_temp_col, inner_projection_temp_col);
+        if (ret < 0) {
+            return -1;
+        }
+        if (ret == 0) {
+            continue;
+        }
+        ret = _conditions[idx]->transfer_to_arrow_expression();
+        if (ret < 0) {
+            DB_FATAL_STATE(state, "expr transfer arrow fail, ret:%d", ret);
+            return ret;
+        }
+        sub_exprs.emplace_back(_conditions[idx]->arrow_expr());
+    }
+
+    if (outer_keys.empty()) {
+        outer_keys.emplace_back(arrow::FieldRef("__fake_join_key"));
+        outer_projection_temp_col["__fake_join_key"] = arrow::compute::literal(1);
+    }
+    if (inner_keys.empty()) {
+        inner_keys.emplace_back(arrow::FieldRef("__fake_join_key"));
+        inner_projection_temp_col["__fake_join_key"] = arrow::compute::literal(1);
     }
     arrow::acero::Declaration outer_dec;
     arrow::acero::Declaration inner_dec;
@@ -483,10 +833,9 @@ int JoinNode::build_arrow_declaration(RuntimeState* state) {
                                            _outer_node, 
                                            _outer_tuple_ids, 
                                            _outer_tuple_data, 
-                                           outer_cast_slot_ids,
+                                           outer_projection_temp_col,
                                            _need_add_index_collector_node,
-                                           true,
-                                           _outer_equal_slot.empty())) {
+                                           true)) {
         DB_FATAL_STATE(state, "outer join node build arrow declaration failed");
         return -1;
     }
@@ -495,60 +844,13 @@ int JoinNode::build_arrow_declaration(RuntimeState* state) {
                                            _inner_node, 
                                            _inner_tuple_ids, 
                                            _inner_tuple_data, 
-                                           inner_cast_slot_ids,
+                                           inner_projection_temp_col,
                                            false,
-                                           false,
-                                           _inner_equal_slot.empty())) {
+                                           false)) {
         DB_FATAL_STATE(state, "inner join node build arrow declaration failed");
         return -1;
     }
     arrow::acero::JoinType join_type;
-    std::vector<arrow::FieldRef> outer_keys;
-    std::vector<arrow::FieldRef> inner_keys;
-    for (auto slot_ref : _outer_equal_slot) {
-        int ret = slot_ref->transfer_to_arrow_expression();
-        if (ret < 0) {
-            DB_FATAL_STATE(state, "expr transfer arrow fail, ret:%d", ret);
-            return ret;
-        }
-        std::string name = std::to_string(slot_ref->tuple_id()) + "_" + std::to_string(slot_ref->slot_id());
-        auto iter = outer_cast_slot_ids.find(slot_ref->tuple_id());
-        if (iter != outer_cast_slot_ids.end() && iter->second.find(slot_ref->slot_id()) != iter->second.end()) {
-            outer_keys.emplace_back(arrow::FieldRef(name + "_cast"));
-        } else {
-            outer_keys.emplace_back(arrow::FieldRef(name));
-        }
-    }
-    for (auto slot_ref : _inner_equal_slot) {
-        int ret = slot_ref->transfer_to_arrow_expression();
-        if (ret < 0) {
-            DB_FATAL_STATE(state, "expr transfer arrow fail, ret:%d", ret);
-            return ret;
-        }
-        std::string name = std::to_string(slot_ref->tuple_id()) + "_" + std::to_string(slot_ref->slot_id());
-        auto iter = inner_cast_slot_ids.find(slot_ref->tuple_id());
-        if (iter != inner_cast_slot_ids.end() && iter->second.find(slot_ref->slot_id()) != iter->second.end()) {
-            inner_keys.emplace_back(arrow::FieldRef(name + "_cast"));
-        } else {
-            inner_keys.emplace_back(arrow::FieldRef(name));
-        }
-    }
-    if (outer_keys.empty()) {
-        outer_keys.emplace_back(arrow::FieldRef("__fake_join_key"));
-    }
-    if (inner_keys.empty()) {
-        inner_keys.emplace_back(arrow::FieldRef("__fake_join_key"));
-    }
-    std::vector<arrow::compute::Expression> sub_exprs;
-    for (auto& condition : _conditions) {
-        int ret = condition->transfer_to_arrow_expression();
-        if (ret < 0) {
-            DB_FATAL_STATE(state, "expr transfer arrow fail, ret:%d", ret);
-            return ret;
-        }
-        sub_exprs.emplace_back(condition->arrow_expr());
-    }
-
     switch (_join_type) {
         case pb::LEFT_JOIN:
         case pb::RIGHT_JOIN:
@@ -623,7 +925,7 @@ int JoinNode::hash_join(RuntimeState* state) {
             std::vector<ExecNode*> scan_nodes;
             _outer_node->get_node(pb::SCAN_NODE, scan_nodes);
             bool index_has_null = false;
-            if (do_plan_router(state, scan_nodes, index_has_null, _is_explain) != 0) {
+            if (do_plan_router(state, scan_nodes, index_has_null, _is_explain, false) != 0) {
                 DB_WARNING("Fail to do_plan_router");
                 return -1;
             }
@@ -739,7 +1041,7 @@ int JoinNode::nested_loop_join(RuntimeState* state) {
             std::vector<ExecNode*> scan_nodes;
             _outer_node->get_node(pb::SCAN_NODE, scan_nodes);
             bool index_has_null = false;
-            if (do_plan_router(state, scan_nodes, index_has_null, _is_explain) != 0) {
+            if (do_plan_router(state, scan_nodes, index_has_null, _is_explain, false) != 0) {
                 DB_WARNING("Fail to do_plan_router");
                 return -1;
             }
@@ -811,7 +1113,7 @@ int JoinNode::nested_loop_join(RuntimeState* state) {
 
 int JoinNode::open(RuntimeState* state) {
     if (_children.size() < 2) {
-        DB_WARNING("join node children size is %d", _children.size());
+        DB_WARNING("join node children size is %lu", _children.size());
         return -1;
     }
     TimeCost join_time_cost;

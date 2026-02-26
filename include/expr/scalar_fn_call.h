@@ -44,6 +44,19 @@ public:
     // vectorized
     virtual int transfer_to_arrow_expression();
     virtual bool can_use_arrow_vector();
+    bool is_compare_op() {
+        switch (_fn.fn_op()) {
+            case parser::FT_EQ:
+            case parser::FT_NE:
+            case parser::FT_GE:
+            case parser::FT_GT:
+            case parser::FT_LE:
+            case parser::FT_LT:
+                return true;
+            default:
+                return false;
+        }
+    }
 private:
     ExprValue multi_eq_value(MemRow* row) {
         for (size_t i = 0; i < children(0)->children_size(); i++) {
@@ -124,7 +137,6 @@ private:
 
 protected:
     pb::Function _fn;
-    std::string _origin_fn_name;
     bool _is_row_expr = false;
     std::function<ExprValue(const std::vector<ExprValue>&)> _fn_call;
     // FT_COMMON构建arrow expression

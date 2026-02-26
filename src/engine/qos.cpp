@@ -23,11 +23,9 @@ DEFINE_int64(min_global_extended_percent,    40,     "min_global_extended_percen
 DEFINE_int64(token_bucket_adjust_interval_s, 60,     "token_bucket_adjust_interval_s, default: 60s");
 DEFINE_int64(token_bucket_burst_window_ms,   10,     "token_bucket_burst_window_ms, default: 10ms");
 DEFINE_int64(dml_use_token_bucket,           0,      "dml_use_token_bucket, default: 0");
-DEFINE_int64(sql_token_bucket_timeout_min,   5,      "sql_token_bucket_timeout_min, default: 5min");
 DEFINE_int64(qos_reject_interval_s,          30,     "qos_reject_interval_s, default: 30s");
 DEFINE_int64(qos_reject_ratio,               90,     "qos_reject_ratio, default: 90%");
 DEFINE_int64(qos_reject_timeout_s,           30*60,  "qos_reject_timeout_s, default: 30min");
-DEFINE_int64(qos_reject_max_scan_ratio,      50,     "qos_reject_max_scan_ratio, default: 50%");
 DEFINE_int64(qos_reject_growth_multiple,     100,    "qos_reject_growth_multiple, default: 100倍");
 DEFINE_int64(qos_need_reject,                0,      "qos_need_reject, default: 0");
 DEFINE_int64(sign_concurrency,               8,      "sign_concurrency, default: 8");

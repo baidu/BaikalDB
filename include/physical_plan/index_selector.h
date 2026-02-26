@@ -55,13 +55,14 @@ public:
                         std::map<int32_t, int>& field_range_type,
                         const std::string& sample_sql,
                         const IndexSelectorOptions& options);
-private:
-    void hit_row_field_range(ExprNode* expr, std::map<int32_t, range::FieldRange>& field_range_map, bool* index_predicate_is_null);
-    void hit_match_against_field_range(ExprNode* expr, 
-        std::map<int32_t, range::FieldRange>& field_range_map, FulltextInfoNode* fulltext_index_node, int64_t table_id);
-    void hit_field_range(ExprNode* expr, std::map<int32_t, range::FieldRange>& field_range_map, bool* index_predicate_is_null, 
+    static void hit_field_range(ExprNode* expr, std::map<int32_t, range::FieldRange>& field_range_map, bool* index_predicate_is_null, 
         int64_t table_id, FulltextInfoNode* fulltext_index_node);
-    void hit_field_or_like_range(ExprNode* expr, std::map<int32_t, range::FieldRange>& field_range_map, 
+
+private:
+    static void hit_row_field_range(ExprNode* expr, std::map<int32_t, range::FieldRange>& field_range_map, bool* index_predicate_is_null);
+    static void hit_match_against_field_range(ExprNode* expr, 
+        std::map<int32_t, range::FieldRange>& field_range_map, FulltextInfoNode* fulltext_index_node, int64_t table_id);
+    static void hit_field_or_like_range(ExprNode* expr, std::map<int32_t, range::FieldRange>& field_range_map, 
         int64_t table_id, FulltextInfoNode* fulltext_index_node);
     bool check_rollup_index_valid(SmartTable& table_info, 
                                 const IndexInfo& index_info, 
@@ -77,14 +78,15 @@ private:
                                             FilterNode* filter_node, 
                                             std::map<int32_t, range::FieldRange>& field_range_map);
 
-    bool is_field_has_reverse_index(int64_t table_id, int64_t field_id, int64_t* index_id_ptr) {
-        auto table_ptr = _factory->get_table_info_ptr(table_id);
+    static bool is_field_has_reverse_index(int64_t table_id, int64_t field_id, int64_t* index_id_ptr) {
+        auto factory = SchemaFactory::get_instance();
+        auto table_ptr = factory->get_table_info_ptr(table_id);
         if (table_ptr != nullptr) {
             // 优先选择arrow格式
             auto iter = table_ptr->arrow_reverse_fields.find(field_id);
             if (iter != table_ptr->arrow_reverse_fields.end()) {
                 *index_id_ptr = iter->second;
-                auto index_ptr = _factory->get_index_info_ptr(*index_id_ptr);
+                auto index_ptr = factory->get_index_info_ptr(*index_id_ptr);
                 if (index_ptr != nullptr
                         && index_ptr->state == pb::IS_PUBLIC
                         && index_ptr->index_hint_status == pb::IHS_NORMAL) {
@@ -94,7 +96,7 @@ private:
             iter = table_ptr->reverse_fields.find(field_id);
             if (iter != table_ptr->reverse_fields.end()) {
                 *index_id_ptr = iter->second;
-                auto index_ptr = _factory->get_index_info_ptr(*index_id_ptr);
+                auto index_ptr = factory->get_index_info_ptr(*index_id_ptr);
                 if (index_ptr != nullptr
                         && index_ptr->state == pb::IS_PUBLIC
                         && index_ptr->index_hint_status == pb::IHS_NORMAL) {
@@ -106,6 +108,11 @@ private:
     }
     int select_partition(SmartTable& table_info, ScanNode* scan_node,
         std::map<int32_t, range::FieldRange>& field_range_map);
+    // 获取需要查询的离线分区文件集合
+    int select_partition_files(SmartTable& table_info, 
+                               ScanNode* scan_node, 
+                               FilterNode* filter_node, 
+                               ExprNode* join_on_conditions);
 
     int64_t index_merge_selector(const std::vector<pb::TupleDescriptor>& tuple_descs,
                         ScanNode* scan_node,

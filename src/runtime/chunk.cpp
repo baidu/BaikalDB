@@ -22,7 +22,7 @@
 #include "mem_row_descriptor.h"
 #include <arrow/type.h>
 #include <arrow/api.h> 
-
+#include "arrow_io_excutor.h"
 namespace baikaldb {
 DEFINE_int32(chunk_max_size_mb, 100, "chunk max size mb");
 
@@ -42,45 +42,45 @@ int Chunk::init_tuple_info(const pb::TupleDescriptor* tuple) {
         {
         case FieldDescriptorProto::TYPE_BOOL: // pb::NULL_TYPE, pb::BOOL
             _fields.emplace_back(std::make_shared<arrow::Field>(name, arrow::boolean()));
-            _builders.emplace_back(std::make_shared<arrow::BooleanBuilder>());
+            _builders.emplace_back(std::make_shared<arrow::BooleanBuilder>(GetMemoryPoolForRead()));
             _size_per_row += sizeof(bool);
             break;
         case FieldDescriptorProto::TYPE_SINT32:   // pb::INT8, pb::INT16, pb::INT32
         case FieldDescriptorProto::TYPE_SFIXED32: // pb::TIME
             _fields.emplace_back(std::make_shared<arrow::Field>(name, arrow::int32()));
-            _builders.emplace_back(std::make_shared<arrow::Int32Builder>());
+            _builders.emplace_back(std::make_shared<arrow::Int32Builder>(GetMemoryPoolForRead()));
             _size_per_row += sizeof(int32_t);
             break;
         case FieldDescriptorProto::TYPE_SINT64: // pb::INT64
             _fields.emplace_back(std::make_shared<arrow::Field>(name, arrow::int64()));
-            _builders.emplace_back(std::make_shared<arrow::Int64Builder>());
+            _builders.emplace_back(std::make_shared<arrow::Int64Builder>(GetMemoryPoolForRead()));
             _size_per_row += sizeof(int64_t);
             break;
         case FieldDescriptorProto::TYPE_UINT32:  // pb::UINT8, pb::UINT16, pb::UINT32
         case FieldDescriptorProto::TYPE_FIXED32: // pb::TIMESTAMP, pb::DATE
             _fields.emplace_back(std::make_shared<arrow::Field>(name, arrow::uint32()));
-            _builders.emplace_back(std::make_shared<arrow::UInt32Builder>());
+            _builders.emplace_back(std::make_shared<arrow::UInt32Builder>(GetMemoryPoolForRead()));
             _size_per_row += sizeof(int32_t);
             break;
         case FieldDescriptorProto::TYPE_UINT64:  // pb::UINT64
         case FieldDescriptorProto::TYPE_FIXED64: // pb::DATETIME
             _fields.emplace_back(std::make_shared<arrow::Field>(name, arrow::uint64()));
-            _builders.emplace_back(std::make_shared<arrow::UInt64Builder>());
+            _builders.emplace_back(std::make_shared<arrow::UInt64Builder>(GetMemoryPoolForRead()));
             _size_per_row += sizeof(int64_t);
             break;
         case FieldDescriptorProto::TYPE_FLOAT: // pb::FLOAT
             _fields.emplace_back(std::make_shared<arrow::Field>(name, arrow::float32()));
-            _builders.emplace_back(std::make_shared<arrow::FloatBuilder>());
+            _builders.emplace_back(std::make_shared<arrow::FloatBuilder>(GetMemoryPoolForRead()));
             _size_per_row += sizeof(float);
             break;
         case FieldDescriptorProto::TYPE_DOUBLE: // pb::DOUBLE
             _fields.emplace_back(std::make_shared<arrow::Field>(name, arrow::float64()));
-            _builders.emplace_back(std::make_shared<arrow::DoubleBuilder>());
+            _builders.emplace_back(std::make_shared<arrow::DoubleBuilder>(GetMemoryPoolForRead()));
             _size_per_row += sizeof(double);
             break;
         case FieldDescriptorProto::TYPE_BYTES: // pb::STRING, pb::HLL, pb::BITMAP, pb::TDIGEST
             _fields.emplace_back(std::make_shared<arrow::Field>(name, arrow::large_binary()));
-            _builders.emplace_back(std::make_shared<arrow::LargeBinaryBuilder>());
+            _builders.emplace_back(std::make_shared<arrow::LargeBinaryBuilder>(GetMemoryPoolForRead()));
             break;
         default:
             DB_FATAL("unkown mysql type: %d", pb_type);

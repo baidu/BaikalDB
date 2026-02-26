@@ -263,6 +263,7 @@ inline bool is_string(pb::PrimitiveType type) {
         case pb::BITMAP:
         case pb::HLL:
         case pb::TDIGEST:
+        case pb::JSON:
             return true;
         default:
             return false;

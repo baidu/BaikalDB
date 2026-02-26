@@ -1534,7 +1534,7 @@ ExprValue date_format(const std::vector<ExprValue>& input) {
     ExprValue tmp = input[0];
     time_t t = tmp.cast_to(pb::TIMESTAMP)._u.uint32_val;
     struct tm t_result;
-    localtime_r(&t, &t_result);
+    localtime_fixed_r(&t, &t_result);
     char s[DATE_FORMAT_LENGTH];
     date_format_internal(s, sizeof(s), input[1].str_val.c_str(), &t_result);
     ExprValue format_result(pb::STRING);
@@ -2250,7 +2250,7 @@ ExprValue extract(const std::vector<ExprValue>& input) {
     ExprValue tmp(pb::UINT32);
     time_t t = arg2.cast_to(pb::TIMESTAMP)._u.uint32_val;
     struct tm tm;
-    localtime_r(&t, &tm);
+    localtime_fixed_r(&t, &tm);
     if (input[0].str_val == "year") {
         tmp._u.uint32_val = tm.tm_year + 1900;
     } else if (input[0].str_val == "month") {

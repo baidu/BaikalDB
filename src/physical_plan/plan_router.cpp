@@ -148,8 +148,15 @@ int PlanRouter::insert_node_analyze(T* node, QueryContext* ctx) {
     return 0;
 }
 
-int PlanRouter::scan_node_analyze(RocksdbScanNode* scan_node, QueryContext* ctx, bool has_join, 
+int PlanRouter::scan_node_analyze(ScanNode* scan_node, QueryContext* ctx, bool has_join, 
                                   const std::set<ExecNode*>& escape_get_region_infos) {
+    if (scan_node == nullptr) {
+        DB_WARNING("scan_node is null");
+        return -1;
+    }
+    if (!scan_node->is_rocksdb_scan_node()) {
+        return 0;
+    }
     SchemaFactory* schema_factory = SchemaFactory::get_instance();
     if (ctx->debug_region_id != -1) {
         pb::RegionInfo info;
@@ -190,11 +197,18 @@ int PlanRouter::scan_node_analyze(RocksdbScanNode* scan_node, QueryContext* ctx,
     return scan_plan_router(scan_node, get_slot_id, get_tuple_desc, has_join, escape_get_region_infos);
 }
 
-int PlanRouter::scan_plan_router(RocksdbScanNode* scan_node, 
+int PlanRouter::scan_plan_router(ScanNode* scan_node, 
     const std::function<int32_t(int32_t, int32_t)>& get_slot_id,
     const std::function<pb::TupleDescriptor*(int32_t)>& get_tuple_desc,
     bool has_join,
     const std::set<ExecNode*>& escape_get_region_infos) {
+    if (scan_node == nullptr) {
+        DB_WARNING("scan_node is null");
+        return -1;
+    }
+    if (!scan_node->is_rocksdb_scan_node()) {
+        return 0;
+    }
     //pb::ScanNode* pb_scan_node = scan_node->mutable_pb_node()->mutable_derive_node()->mutable_scan_node();
     int64_t main_table_id = scan_node->table_id();
     SchemaFactory* schema_factory = SchemaFactory::get_instance(); 

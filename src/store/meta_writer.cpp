@@ -70,6 +70,8 @@ const std::string MetaWriter::COLUMN_HOT_FILE_INDENTIFY(1, 0x13);
 const std::string MetaWriter::COLUMN_COLD_FILE_INDENTIFY(1, 0x14);
 // 用于加速 show binlog_info detail binlog_table 获取data_cf_oldest_datetime
 const std::string MetaWriter::BINLOG_DATA_CF_OLDEST_IDENTIFY(1, 0x15);
+// 列存需要记录事务的begin_index
+const std::string MetaWriter::COLUMN_TXN_LOG_INDEX_IDENTIFY(1, 0x16);
 
 int MetaWriter::init_meta_info(const pb::RegionInfo& region_info) {
     std::vector<std::string> keys;
@@ -257,15 +259,43 @@ int MetaWriter::clear_error_pre_commit(int64_t region_id, uint64_t txn_id) {
     return write_batch(&batch, region_id);
 }
 
-int MetaWriter::write_meta_begin_index(int64_t region_id, int64_t log_index, int64_t data_index, uint64_t txn_id) {
+int MetaWriter::delete_column_txn_log_index(int64_t region_id, std::vector<uint64_t> txn_ids) {
+    rocksdb::WriteBatch batch;
+    if (txn_ids.empty()) {
+        return 0;
+    }
+    for (auto txn_id : txn_ids) {
+        batch.Delete(_meta_cf, column_txn_log_index_key(region_id, txn_id));
+    }
+    return write_batch(&batch, region_id);
+}
+
+int MetaWriter::write_meta_begin_index(int64_t region_id, int64_t log_index, int64_t data_index, uint64_t txn_id, bool has_column_engine) {
     if (log_index == 0) {
         return 0;
     }
     rocksdb::WriteBatch batch;
     batch.Put(_meta_cf, applied_index_key(region_id), encode_applied_index(log_index, data_index));
     batch.Put(_meta_cf, transcation_log_index_key(region_id, txn_id), encode_transcation_log_index_value(log_index));
+    if (has_column_engine) {
+        batch.Put(_meta_cf, column_txn_log_index_key(region_id, txn_id), encode_rollup_region_init_index(log_index));
+    }
     return write_batch(&batch, region_id);
 }
+
+int64_t MetaWriter::read_meta_begin_index(int64_t region_id, uint64_t txn_id) {
+    std::string value;
+    rocksdb::ReadOptions options;
+    auto status = _rocksdb->get(options, _meta_cf, rocksdb::Slice(column_txn_log_index_key(region_id, txn_id)), &value);
+    if (!status.ok()) {
+        DB_WARNING("Error while read applied index, Error %s, region_id: %ld, txn_id: %lu",
+                    status.ToString().c_str(), region_id, txn_id);
+        return -1;
+    }
+    TableKey tk(value);
+    return tk.extract_i64(0);
+}
+
 int MetaWriter::write_meta_index_and_num_table_lines(int64_t region_id, int64_t log_index, int64_t data_index,
                         int64_t num_table_lines, SmartTransaction txn) {
     if (log_index == 0) {
@@ -383,6 +413,15 @@ int MetaWriter::clear_txn_log_index(int64_t region_id) {
     std::string start_key = transcation_log_index_key(region_id, 0);
     std::string end_key = transcation_log_index_key(region_id, UINT64_MAX);
     auto status = _rocksdb->remove_range(MetaWriter::write_options, _meta_cf,
+            start_key, end_key, false);
+    if (!status.ok()) {
+        DB_WARNING("remove_range error: code=%d, msg=%s, region_id: %ld",
+            status.code(), status.ToString().c_str(), region_id);
+        return -1;
+    }
+    start_key = column_txn_log_index_key(region_id, 0);
+    end_key = column_txn_log_index_key(region_id, UINT64_MAX);
+    status = _rocksdb->remove_range(MetaWriter::write_options, _meta_cf,
             start_key, end_key, false);
     if (!status.ok()) {
         DB_WARNING("remove_range error: code=%d, msg=%s, region_id: %ld",
@@ -703,6 +742,14 @@ std::string MetaWriter::log_index_key_prefix(int64_t region_id) const {
     key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);
     key.append_i64(region_id);
     key.append_char(MetaWriter::PREPARED_TXN_LOG_INDEX_IDENTIFY.c_str(), 1);
+    return key.data();
+}
+std::string MetaWriter::column_txn_log_index_key(int64_t region_id, uint64_t txn_id) const {
+    MutTableKey key;
+    key.append_char(MetaWriter::META_IDENTIFY.c_str(), 1);
+    key.append_i64(region_id);
+    key.append_char(MetaWriter::COLUMN_TXN_LOG_INDEX_IDENTIFY.c_str(), 1);
+    key.append_u64(txn_id);
     return key.data();
 }
 std::string MetaWriter::transcation_pb_key(int64_t region_id, uint64_t txn_id, int64_t log_index) const {

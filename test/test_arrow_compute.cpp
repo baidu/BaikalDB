@@ -19,6 +19,8 @@
 #include <cstdlib>
 #include <ctime>
 #include "common.h"
+#include "expr_value.h"
+#include "arrow_function.h"
 #include <arrow/ipc/writer.h>
 #include <arrow/ipc/reader.h>
 #include <arrow/api.h>
@@ -36,7 +38,7 @@
 #include "arrow/compute/registry.h"
 #include <arrow/acero/options.h>
 #include <arrow/acero/exec_plan.h>
-
+#include <arrow/visit_data_inline.h>
 
 
 int main(int argc, char* argv[])
@@ -362,9 +364,135 @@ void run_test_case_when() {
     }
 }
 
+template<typename T>
+struct test_string_cast_same_with_row {
+    using CType = typename arrow::TypeTraits<T>::CType;
+    using BuilderType = typename arrow::TypeTraits<T>::BuilderType;
+
+    static void test(std::string func_name, std::shared_ptr<arrow::Array>& input_array, std::vector<ExprValue>& row_values) {
+        std::cout << "func_name: " << func_name << std::endl;
+
+        std::vector<arrow::Datum> input_vector = {input_array};
+        auto res = arrow::compute::CallFunction(func_name, input_vector);
+        EXPECT_TRUE(res.ok());
+
+        auto output_data = *res;
+        const CType* data = output_data.mutable_array()->GetValues<CType>(1);
+        for (int64_t i = 0; i < output_data.length(); ++i) {
+            CType expect = row_values[i].get_numberic<CType>();
+            CType actual = *(data + i);
+            std::cout << "row: " << i << ", str: " << row_values[i].str_val << ", expect: " << expect << ", actual: " << actual << std::endl;
+            ASSERT_EQ(actual, expect);
+        }
+    }
+};
+
+struct test_string_cast_same_with_row_bool_type {
+    static void test(std::string func_name, std::shared_ptr<arrow::Array>& input_array, std::vector<ExprValue>& row_values) {
+        std::cout << "func_name: " << func_name << std::endl;
+
+        std::vector<arrow::Datum> input_vector = {input_array};
+        auto res = arrow::compute::CallFunction(func_name, input_vector);
+        EXPECT_TRUE(res.ok());
+
+        auto output_data = *res;
+        const uint8_t* bitmap_buffer = output_data.mutable_array()->buffers[1]->data();
+        for (int64_t i = 0; i < output_data.length(); ++i) {
+            bool expect = row_values[i].get_numberic<bool>();
+            bool actual = arrow::bit_util::GetBit(bitmap_buffer, i);
+            std::cout << "row: " << i << ", str: " << row_values[i].str_val << ", expect: " << expect << ", actual: " << actual << std::endl;
+            ASSERT_EQ(actual, expect);
+        }
+    }
+};
+
+void run_test_string_cast_numberic() {
+    auto input = std::make_shared<arrow::LargeBinaryBuilder>();
+    std::vector<ExprValue> row_values;
+    std::vector<std::string> test_strs = {
+        "",
+        "+",
+        "-",
+        "100",
+        "00101",
+        "+102",
+        "-103",
+        "104abc",
+        "-105abc",
+        "+106abc",
+        "  101003",
+        "  +101004",
+        "  -101004",
+        "+a1005",
+        "-a1006",
+        " +1007.999",
+        "-1008.111",
+        "255", // uint8_max
+        "256", // uint8_max + 1
+        "65535", // uint16_max
+        "65536", // uint16_max + 1
+        "4294967295", // uint32_max
+        "4294967296", // uint32_max + 1
+        "18446744073709551615", // uint64_max
+        "18446744073709551616", // uint64_max + 1
+        "127",  // int8_max
+        "+127",  // int8_max
+        "128",  // int8_max + 1
+        "+128",  // int8_max + 1
+        "-128", // int8_min
+        "-129", // int8_min - 1
+        "32767",  // int16_max
+        "+32767",  // int16_max
+        "32768",  // int16_max + 1
+        "+32768",  // int16_max + 1
+        "-32768", // int16_min
+        "-32769", // int16_min - 1
+        "2147483647",  // int32_max
+        "+2147483647",  // int32_max
+        "2147483648",  // int32_max + 1
+        "+2147483648",  // int32_max + 1
+        "-2147483648", // int32_min
+        "-2147483649", // int32_min - 1
+        "9223372036854775807",  // int64_max
+        "+9223372036854775807",  // int64_max
+        "9223372036854775808",  // int64_max + 1
+        "+9223372036854775808",  // int64_max + 1
+        "-9223372036854775808", // int64_min
+        "-9223372036854775809", // int64_min - 1
+        "null",
+        " +null"
+    };
+    for (auto& str : test_strs) {
+        input->Append(str);
+
+        ExprValue expr_val;
+        expr_val.type = pb::STRING;
+        expr_val.str_val = str;
+        row_values.emplace_back(expr_val);
+    }
+    std::shared_ptr<arrow::Array> input_array;
+    auto s = input->Finish(&input_array);
+
+    test_string_cast_same_with_row<arrow::UInt8Type>::test("string_cast_uint8", input_array, row_values);
+    test_string_cast_same_with_row<arrow::UInt16Type>::test("string_cast_uint16", input_array, row_values);
+    test_string_cast_same_with_row<arrow::UInt32Type>::test("string_cast_uint32", input_array, row_values);
+    test_string_cast_same_with_row<arrow::UInt64Type>::test("string_cast_uint64", input_array, row_values);
+    test_string_cast_same_with_row<arrow::Int8Type>::test("string_cast_int8", input_array, row_values);
+    test_string_cast_same_with_row<arrow::Int16Type>::test("string_cast_int16", input_array, row_values);
+    test_string_cast_same_with_row<arrow::Int32Type>::test("string_cast_int32", input_array, row_values);
+    test_string_cast_same_with_row<arrow::Int64Type>::test("string_cast_int64", input_array, row_values);
+    test_string_cast_same_with_row<arrow::FloatType>::test("string_cast_float", input_array, row_values);
+    test_string_cast_same_with_row<arrow::DoubleType>::test("string_cast_double", input_array, row_values);
+    test_string_cast_same_with_row_bool_type::test("string_cast_bool", input_array, row_values);   
+}
 
 TEST(test_arrow_vector_execute, case_all) {
     run_test_run_acero_sync();
     run_test_case_when();
+}   
+
+TEST(test_string_cast_numberic, case_all) {
+    EXPECT_TRUE(baikaldb::ArrowFunctionManager::instance()->RegisterAllArrowFunction() == 0);
+    run_test_string_cast_numberic();
 }   
 }  // namespace baikal

@@ -49,6 +49,9 @@ public:
     bool is_full() {
         return size() >= _capacity;
     }
+    bool empty() {
+        return size() == 0;
+    }
     bool chunk_exceed_max_size() {
         if (_use_memrow || _chunk == nullptr) {
             return false;
@@ -154,7 +157,9 @@ public:
             DB_FATAL("chunk init failed");
             return 0;
         }
-        *schema = _chunk->get_arrow_schema();
+        if (schema != nullptr) {
+            *schema = _chunk->get_arrow_schema();
+        }
         return 0;
     }
     int set_chunk_tmp_row_value(int tuple_id, int slot_id, const ExprValue& value) {

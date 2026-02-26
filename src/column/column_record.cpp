@@ -1,5 +1,6 @@
 #include "mut_table_key.h"
 #include "column_record.h"
+#include "vectorize_helpper.h"
 
 namespace baikaldb {
 void ColumnRecord::TEST_print_record_batch(const std::shared_ptr<arrow::RecordBatch>& record_batch) {
@@ -72,6 +73,96 @@ std::string ColumnRecord::encode_row_key(std::shared_ptr<arrow::RecordBatch> rec
         key.append_value(value);
     }
     return key.data();
+}
+
+std::shared_ptr<ColumnSchemaInfo> ColumnRecord::make_column_schema(int64_t tableid, SmartTable table_info, SmartIndex pri_info, 
+        const std::unordered_map<int32_t, FieldInfo*>& field_id2info_map) {
+    if (table_info == nullptr) {
+        table_info = SchemaFactory::get_instance()->get_table_info_ptr(tableid);
+    }
+    if (pri_info == nullptr) {
+        pri_info = SchemaFactory::get_instance()->get_index_info_ptr(tableid);
+    }
+    if (table_info == nullptr || pri_info == nullptr) {
+        DB_FATAL("table or index is null, tableid:%ld", tableid);
+        return nullptr;
+    }
+    auto schema_ptr = std::make_shared<ColumnSchemaInfo>();
+    schema_ptr->index_info = pri_info;
+    schema_ptr->table_info = table_info;
+    schema_ptr->key_fields = pri_info->fields;
+    
+    std::set<int> key_field_ids;
+    for (const auto& field : pri_info->fields) {
+        key_field_ids.insert(field.id);
+    }
+
+    std::set<int> field_ids_need_sum;
+    for (const auto& field : table_info->fields_need_sum) {
+        field_ids_need_sum.insert(field.id);
+    }
+
+    int value_idx = schema_ptr->key_fields.size();
+    schema_ptr->value_fields.reserve(table_info->fields.size() - pri_info->fields.size());
+    for (const auto& field : table_info->fields) {
+        if (key_field_ids.count(field.id) > 0 || field.deleted) {
+            continue;
+        }
+
+        if (!field_id2info_map.empty()) {
+            if (field_id2info_map.count(field.id) == 0) {
+                continue;
+            }
+        }
+
+        schema_ptr->value_fields.emplace_back(field);
+        if (field_ids_need_sum.count(field.id) > 0) {
+            schema_ptr->need_sum_idx.insert(value_idx);
+        }
+        value_idx++;
+    }
+
+    schema_ptr->uniq_size = schema_ptr->key_fields.size();
+    schema_ptr->keytype_idx = schema_ptr->key_fields.size() + schema_ptr->value_fields.size();
+    schema_ptr->raft_index_idx = schema_ptr->keytype_idx + 1;
+    schema_ptr->batch_pos_idx = schema_ptr->raft_index_idx + 1;
+
+    std::vector<std::shared_ptr<arrow::Field>> arrow_fields;
+    arrow_fields.reserve(schema_ptr->batch_pos_idx + 1);
+    for (const auto& field : schema_ptr->key_fields) {
+        auto arrow_type = primitive_to_arrow_type(field.type);
+        if (arrow_type < 0) {
+            DB_COLUMN_FATAL("field: %s primitive type:%d to arrow type failed", field.lower_short_name.c_str(), field.type);
+            return nullptr;
+        }
+        auto arrow_field = VectorizeHelpper::make_field(field.lower_short_name, arrow::Type::type(arrow_type));
+        if (arrow_field == nullptr) {
+            DB_COLUMN_FATAL("field: %s make arrow schema failed", field.lower_short_name.c_str());
+            return nullptr;
+        }
+        arrow_fields.emplace_back(arrow_field);
+    }
+
+    for (const auto& field : schema_ptr->value_fields) {
+        auto arrow_type = primitive_to_arrow_type(field.type);
+        if (arrow_type < 0) {
+            DB_COLUMN_FATAL("field: %s primitive type:%d to arrow type failed", field.lower_short_name.c_str(), field.type);
+            return nullptr;
+        }
+        auto arrow_field = VectorizeHelpper::make_field(field.lower_short_name, arrow::Type::type(arrow_type));
+        if (arrow_field == nullptr) {
+            DB_COLUMN_FATAL("field: %s make arrow schema failed", field.lower_short_name.c_str());
+            return nullptr;
+        }
+        arrow_fields.emplace_back(arrow_field);
+    }
+
+    arrow_fields.emplace_back(VectorizeHelpper::make_field(KEY_TYPE_NAME, arrow::Type::type::INT32));
+    schema_ptr->schema = std::make_shared<arrow::Schema>(arrow_fields);
+    arrow_fields.emplace_back(VectorizeHelpper::make_field(RAFT_INDEX_NAME, arrow::Type::type::INT64));
+    arrow_fields.emplace_back(VectorizeHelpper::make_field(BATCH_POS_NAME, arrow::Type::type::INT32));
+    schema_ptr->schema_with_order_info = std::make_shared<arrow::Schema>(arrow_fields);
+    return schema_ptr;
 }
 
 ExprValue ColumnRecord::get_vectorized_value(const std::shared_ptr<arrow::Array>& array, int row_idx) {
@@ -172,222 +263,6 @@ ExprValue ColumnRecord::get_vectorized_value(const std::shared_ptr<arrow::Array>
             break;
     }
     return ret;
-}
-
-std::shared_ptr<arrow::Field> ColumnRecord::make_schema(const std::string& name, arrow::Type::type type) {
-    switch (type) {
-    case arrow::Type::type::BOOL:
-        return std::make_shared<arrow::Field>(name, arrow::boolean());
-    case arrow::Type::type::INT8:
-        return std::make_shared<arrow::Field>(name, arrow::int8());
-    case arrow::Type::type::UINT8:
-        return std::make_shared<arrow::Field>(name, arrow::uint8());
-    case arrow::Type::type::INT16:
-        return std::make_shared<arrow::Field>(name, arrow::int16());
-    case arrow::Type::type::UINT16:
-        return std::make_shared<arrow::Field>(name, arrow::uint16());
-    case arrow::Type::type::INT32:
-        return std::make_shared<arrow::Field>(name, arrow::int32());
-    case arrow::Type::type::UINT32:
-        return std::make_shared<arrow::Field>(name, arrow::uint32());
-    case arrow::Type::type::INT64:
-        return std::make_shared<arrow::Field>(name, arrow::int64());
-    case arrow::Type::type::UINT64:
-        return std::make_shared<arrow::Field>(name, arrow::uint64());
-    case arrow::Type::type::FLOAT:
-        return std::make_shared<arrow::Field>(name, arrow::float32());
-    case arrow::Type::type::DOUBLE:
-        return std::make_shared<arrow::Field>(name, arrow::float64());
-    case arrow::Type::type::LARGE_BINARY:
-        return std::make_shared<arrow::Field>(name, arrow::large_binary());
-    default:
-        return nullptr;
-    }
-}
-
-std::shared_ptr<arrow::Array> ColumnRecord::make_array_from_exprvalue(
-        const pb::PrimitiveType type, const ExprValue& expr_value, const int length) {
-    bool is_null = expr_value.is_null();
-    switch (type) {
-    case pb::BOOL: {
-        arrow::BooleanScalar scalar;
-        if (!is_null) {
-            scalar = arrow::BooleanScalar(expr_value.get_numberic<bool>());
-        }
-        auto array_ret = arrow::MakeArrayFromScalar(scalar, length);
-        if (!array_ret.ok()) {
-            DB_WARNING("arrow make array from scalar fail, %s", array_ret.status().ToString().c_str());
-            return nullptr;
-        } else {
-            return *array_ret;
-        }
-        break;
-    }
-    case pb::INT8: {
-        arrow::Int8Scalar scalar;
-        if (!is_null) {
-            scalar = arrow::Int8Scalar(expr_value.get_numberic<int8_t>());
-        }
-        auto array_ret = arrow::MakeArrayFromScalar(scalar, length);
-        if (!array_ret.ok()) {
-            DB_WARNING("arrow make array from scalar fail, %s", array_ret.status().ToString().c_str());
-            return nullptr;
-        } else {
-            return *array_ret;
-        }
-        break;
-    }
-    case pb::UINT8: {
-        arrow::UInt8Scalar scalar;
-        if (!is_null) {
-            scalar = arrow::UInt8Scalar(expr_value.get_numberic<uint8_t>());
-        }
-        auto array_ret = arrow::MakeArrayFromScalar(scalar, length);
-        if (!array_ret.ok()) {
-            DB_WARNING("arrow make array from scalar fail, %s", array_ret.status().ToString().c_str());
-            return nullptr;
-        } else {
-            return *array_ret;
-        }
-        break;
-    }
-    case pb::INT16: {
-        arrow::Int16Scalar scalar;
-        if (!is_null) {
-            scalar = arrow::Int16Scalar(expr_value.get_numberic<int16_t>());
-        }
-        auto array_ret = arrow::MakeArrayFromScalar(scalar, length);
-        if (!array_ret.ok()) {
-            DB_WARNING("arrow make array from scalar fail, %s", array_ret.status().ToString().c_str());
-            return nullptr;
-        } else {
-            return *array_ret;
-        }
-        break;
-    }
-    case pb::UINT16: {
-        arrow::UInt16Scalar scalar;
-        if (!is_null) {
-            scalar = arrow::UInt16Scalar(expr_value.get_numberic<uint16_t>());
-        }
-        auto array_ret = arrow::MakeArrayFromScalar(scalar, length);
-        if (!array_ret.ok()) {
-            DB_WARNING("arrow make array from scalar fail, %s", array_ret.status().ToString().c_str());
-            return nullptr;
-        } else {
-            return *array_ret;
-        }
-        break;
-    }
-    case pb::INT32:
-    case pb::TIME: {
-        arrow::Int32Scalar scalar;
-        if (!is_null) {
-            scalar = arrow::Int32Scalar(expr_value.get_numberic<int32_t>());
-        }
-        auto array_ret = arrow::MakeArrayFromScalar(scalar, length);
-        if (!array_ret.ok()) {
-            DB_WARNING("arrow make array from scalar fail, %s", array_ret.status().ToString().c_str());
-            return nullptr;
-        } else {
-            return *array_ret;
-        }
-        break;
-    }
-    case pb::UINT32:
-    case pb::DATE:
-    case pb::TIMESTAMP: {
-        arrow::UInt32Scalar scalar;
-        if (!is_null) {
-            scalar = arrow::UInt32Scalar(expr_value.get_numberic<uint32_t>());
-        }
-        auto array_ret = arrow::MakeArrayFromScalar(scalar, length);
-        if (!array_ret.ok()) {
-            DB_WARNING("arrow make array from scalar fail, %s", array_ret.status().ToString().c_str());
-            return nullptr;
-        } else {
-            return *array_ret;
-        }
-        break;
-    }
-    case pb::INT64: {
-        arrow::Int64Scalar scalar;
-        if (!is_null) {
-            scalar = arrow::Int64Scalar(expr_value.get_numberic<int64_t>());
-        }
-        auto array_ret = arrow::MakeArrayFromScalar(scalar, length);
-        if (!array_ret.ok()) {
-            DB_WARNING("arrow make array from scalar fail, %s", array_ret.status().ToString().c_str());
-            return nullptr;
-        } else {
-            return *array_ret;
-        }
-        break;
-    }
-    case pb::UINT64:
-    case pb::DATETIME: {
-        arrow::UInt64Scalar scalar;
-        if (!is_null) {
-            scalar = arrow::UInt64Scalar(expr_value.get_numberic<uint8_t>());
-        }
-        auto array_ret = arrow::MakeArrayFromScalar(scalar, length);
-        if (!array_ret.ok()) {
-            DB_WARNING("arrow make array from scalar fail, %s", array_ret.status().ToString().c_str());
-            return nullptr;
-        } else {
-            return *array_ret;
-        }
-        break;
-    }
-    case pb::FLOAT: {
-        arrow::FloatScalar scalar;
-        if (!is_null) {
-            scalar = arrow::FloatScalar(expr_value.get_numberic<float>());
-        }
-        auto array_ret = arrow::MakeArrayFromScalar(scalar, length);
-        if (!array_ret.ok()) {
-            DB_WARNING("arrow make array from scalar fail, %s", array_ret.status().ToString().c_str());
-            return nullptr;
-        } else {
-            return *array_ret;
-        }
-        break;
-    }
-    case pb::DOUBLE: {
-        arrow::DoubleScalar scalar;
-        if (!is_null) {
-            scalar = arrow::DoubleScalar(expr_value.get_numberic<double>());
-        }
-        auto array_ret = arrow::MakeArrayFromScalar(scalar, length);
-        if (!array_ret.ok()) {
-            DB_WARNING("arrow make array from scalar fail, %s", array_ret.status().ToString().c_str());
-            return nullptr;
-        } else {
-            return *array_ret;
-        }
-        break;
-    }
-    case pb::STRING:
-    case pb::HLL:
-    case pb::BITMAP:
-    case pb::TDIGEST: {
-        auto array_ret = arrow::MakeArrayFromScalar(
-                is_null ? arrow::LargeBinaryScalar(): 
-                        arrow::LargeBinaryScalar(arrow::Buffer::FromString(expr_value.get_string())), 
-                length);
-        if (!array_ret.ok()) {
-            DB_WARNING("arrow make array from scalar fail, %s", array_ret.status().ToString().c_str());
-            return nullptr;
-        } else {
-            return *array_ret;
-        }
-        break;
-    }
-    default:
-        DB_WARNING("Invalid type: %d", type);
-        return nullptr;
-    }
-    return nullptr;
 }
 
 int ColumnRecord::init() {

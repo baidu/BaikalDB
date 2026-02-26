@@ -158,7 +158,7 @@ protected:
     int                     _upper_sufix = 0;
 
     bool                    _valid = true;
-    bool                    _use_ttl = false;
+    bool                    _use_normal_ttl = false;
     bool                    _is_cstore = false;
     bool                    _is_offline_binlog = false;
     int64_t                 _read_ttl_timestamp_us = 0;
