@@ -72,7 +72,7 @@ int TTLDeleteNode::open(RuntimeState* state) {
         }
         num_affected_rows += ret;
     }
-    auto s = _txn->commit();
+    auto s = _txn->commit(0, 0);
     if (!s.ok()) {
         DB_FATAL("TTL delete rows commit failed, status: %s", s.getState());
         return -1;

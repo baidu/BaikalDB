@@ -93,6 +93,38 @@ int mres_to_int(const std::ssub_match& mr, int deflt = -1, int begin = 0) {
     return res;
 }
 
+int VectorIndex::validate_vector_index_params(pb::IndexInfo* index, std::string& error_info) {
+    if (index->index_type() != pb::I_VECTOR) {
+        return 0;
+    }
+    int32_t dimension = index->dimension();
+    if (dimension <= 0) {
+        error_info = "vector index dimension must be greater than 0";
+        return -1;
+    }
+    std::string desc = index->vector_description();
+    if (desc.empty()) {
+        // 空描述默认为 HNSW16，与 vector_index.cpp 逻辑保持一致
+        return 0;
+    }
+    auto metrix_type = static_cast<faiss::MetricType>(index->metric_type());
+    faiss::Index* idx = nullptr;
+    try {
+        idx = faiss::index_factory(dimension, desc.c_str(), metrix_type);
+    } catch (std::exception& e) {
+        DB_FATAL("index init fail, dimension: %d, vector_description: %s, metrix_type: %d, err: %s",
+                    dimension, desc.c_str(), metrix_type, e.what());
+        error_info = "invalid vector description";
+        return -1;
+    }
+    if (idx == nullptr) {
+        error_info = "index init fail";
+        return -1;
+    }
+    delete idx;
+    return 0;
+}
+
 int VectorIndex::init(const pb::RegionInfo& region_info, int64_t region_id, int64_t index_id, int64_t table_id) {
     _rocksdb = RocksWrapper::get_instance();
     _region_id = region_id;
@@ -455,7 +487,7 @@ int VectorIndex::read_from_cacheinfo_file(const std::string& snapshot_path, cons
 
 int VectorIndex::insert_vector(
                    SmartTransaction& txn,
-                   const std::string& word, 
+                   std::vector<float>& word, 
                    const std::string& pk,
                    SmartRecord record) {
     int64_t cache_idx = 0;
@@ -501,7 +533,7 @@ int VectorIndex::insert_vector(
 
 int VectorIndex::delete_vector(
                    SmartTransaction& txn,
-                   const std::string& word, 
+                   std::vector<float>& word, 
                    const std::string& pk,
                    SmartRecord record,
                    pb::IndexState index_status) {
@@ -691,37 +723,8 @@ int VectorIndex::del_to_rocksdb(
     return 0;
 }
 
-void from_chars_to_float_vec(const std::string& str, std::vector<float>& vec) {
-    using ::arrow_vendored::fast_float::from_chars;
-    const char* ptr = str.data();
-    size_t i = 0;
-    //trim 空格 [
-    while (i < str.size() && (str[i] == '[' || isspace(str[i]))) {
-        ++ptr;
-        ++i;
-    }
-    size_t len = str.size();
-    while (len > 0 && (str[len - 1] == ']' || isspace(str[len - 1]))) {
-        --len;
-    }
-    
-    while (1) {
-        float flt = 0.0;
-        auto res = from_chars(ptr, str.data() + len, flt);
-        vec.emplace_back(flt);
-        if (res.ptr >= str.data() + len) {
-            break;
-        }
-        ptr = res.ptr;
-        while (ptr[0] == ' ') {
-            ++ptr;
-        }
-        ++ptr;
-    }
-}
-
 int VectorIndex::add_to_faiss(SmartFaissIndex faiss_index, 
-                              const std::string& word, 
+                              std::vector<float>& cache_vectors, 
                               int64_t cache_idx,
                               SmartRecord record,
                               bool enable_train) {
@@ -734,9 +737,6 @@ int VectorIndex::add_to_faiss(SmartFaissIndex faiss_index,
         return -1;
     }
     std::vector<int64_t> cache_idxs;
-    std::vector<float> cache_vectors;
-    cache_vectors.reserve(_dimension);
-    from_chars_to_float_vec(word, cache_vectors);
     if ((int)cache_vectors.size() != _dimension) {
         DB_FATAL("cache_vectors.size:%lu != _dimension:%d", cache_vectors.size(), _dimension);
         return -1;
@@ -999,8 +999,19 @@ int VectorIndex::search(
                     return -1;
                 }
                 prefilter_cost = tm.get_time();
-                auto datum_array = (*arrow_res).array_as<arrow::BooleanArray>();
-                bitmap_sel = std::make_shared<IDSelectorBitmap>(datum_array, faiss_index->del_bitmap);
+                if (arrow_res->is_scalar()) {
+                    const auto& mask_scalar = arrow_res->scalar_as<arrow::BooleanScalar>();
+                    if (mask_scalar.is_valid && mask_scalar.value == true) {
+                        // 常量过滤条件都满足，不打进去bitmap
+                        bitmap_sel = std::make_shared<IDSelectorBitmap>(nullptr, faiss_index->del_bitmap);
+                    } else {
+                        // 常量过滤条件都不满足，直接返回
+                        return 0;
+                    }
+                } else {
+                    auto datum_array = (*arrow_res).array_as<arrow::BooleanArray>();
+                    bitmap_sel = std::make_shared<IDSelectorBitmap>(datum_array, faiss_index->del_bitmap);
+                }
             } else {
                 bitmap_sel = std::make_shared<IDSelectorBitmap>(nullptr, faiss_index->del_bitmap);
             }
@@ -1016,6 +1027,7 @@ int VectorIndex::search(
             }
         } else {
             do {
+                bool flat_filter_emtpy = false;
                 if (faiss_index->index == nullptr || faiss_index->flat_index == nullptr) {
                     DB_WARNING("faiss_index->index/faiss_index->flat_index is nullptr");
                     return -1;
@@ -1036,17 +1048,30 @@ int VectorIndex::search(
                         return -1;
                     }
                     flat_prefilter_cost = tm.get_time();
-                    auto flat_datum_array = (*arrow_res).array_as<arrow::BooleanArray>();
-                    flat_bitmap_sel = std::make_shared<IDSelectorBitmap>(flat_datum_array, faiss_index->flat_del_bitmap);
+                    if (arrow_res->is_scalar()) {
+                        const auto& mask_scalar = arrow_res->scalar_as<arrow::BooleanScalar>();
+                        if (mask_scalar.is_valid && mask_scalar.value == true) {
+                            // 常量过滤条件都满足，不打进去bitmap
+                            flat_bitmap_sel = std::make_shared<IDSelectorBitmap>(nullptr, faiss_index->del_bitmap);
+                        } else {
+                            // 常量过滤条件都不满足
+                            flat_filter_emtpy = true;
+                        }
+                    } else {
+                        auto datum_array = (*arrow_res).array_as<arrow::BooleanArray>();
+                        flat_bitmap_sel = std::make_shared<IDSelectorBitmap>(datum_array, faiss_index->del_bitmap);
+                    }
                 } else {
                     flat_bitmap_sel = std::make_shared<IDSelectorBitmap>(nullptr, faiss_index->flat_del_bitmap);
                 }
                 flat_search_params.sel = flat_bitmap_sel.get();
-                try {
-                    faiss_index->flat_index->search(1, &search_vector[0], mink, &flat_dis[0], &flat_idxs[0], &flat_search_params);
-                } catch (...) {
-                    DB_WARNING("Fail to search, maybe not support search_params");
-                    return -1;
+                if (!flat_filter_emtpy) {
+                    try {
+                        faiss_index->flat_index->search(1, &search_vector[0], mink, &flat_dis[0], &flat_idxs[0], &flat_search_params);
+                    } catch (...) {
+                        DB_WARNING("Fail to search, maybe not support search_params");
+                        return -1;
+                    }
                 }
                 int64_t flat_search_cnt = 0;
                 for (int64_t i : flat_idxs) {
@@ -1073,9 +1098,20 @@ int VectorIndex::search(
                         DB_WARNING("Fail to ExecuteScalarExpression, %s", arrow_res.status().message().c_str());
                         return -1;
                     }
+                    if (arrow_res->is_scalar()) {
+                        const auto& mask_scalar = arrow_res->scalar_as<arrow::BooleanScalar>();
+                        if (mask_scalar.is_valid && mask_scalar.value == true) {
+                            // 常量过滤条件都满足，不打进去bitmap
+                            bitmap_sel = std::make_shared<IDSelectorBitmap>(nullptr, faiss_index->del_bitmap);
+                        } else {
+                            // 常量过滤条件都不满足
+                            break;
+                        }
+                    } else {
+                        auto datum_array = (*arrow_res).array_as<arrow::BooleanArray>();
+                        bitmap_sel = std::make_shared<IDSelectorBitmap>(datum_array, faiss_index->del_bitmap);
+                    }
                     prefilter_cost = tm.get_time();
-                    auto datum_array = (*arrow_res).array_as<arrow::BooleanArray>();
-                    bitmap_sel = std::make_shared<IDSelectorBitmap>(datum_array, faiss_index->del_bitmap);
                 } else {
                     bitmap_sel = std::make_shared<IDSelectorBitmap>(nullptr, faiss_index->del_bitmap);
                 }
@@ -1364,6 +1400,11 @@ int VectorIndex::truncate_del_faiss_index(SmartFaissIndex faiss_index) {
         } else {
             break;
         }
+    }
+    if (!iter->status().ok()) {
+        DB_FATAL("Iterator error during truncate to faiss: %s, region_id: %ld, index_id: %ld",
+                 iter->status().ToString().c_str(), _region_id, _index_id);
+        return -1;
     }
     DB_WARNING("truncate del cnt: %d, region_id: %ld, index_id: %ld, separate_value: %lu", 
                 del_cnt, _region_id, _index_id, faiss_index->separate_value);
@@ -1661,8 +1702,8 @@ int VectorIndex::restore_faiss_index(const pb::RegionInfo& region_info, SmartFai
                 if (record->is_null(field)) {
                     continue;
                 }
-                std::string word;
-                ret = record->get_reverse_word(*index_info, word);
+                std::vector<float> word;
+                ret = record->get_float_vector(*index_info, word);
                 if (ret < 0) {
                     DB_WARNING("index_info to word fail for index_id: %ld", _index_id);
                     return ret;
@@ -1720,7 +1761,7 @@ int VectorIndex::restore_faiss_index(const pb::RegionInfo& region_info, SmartFai
         }
         // 批量提交，减少锁冲突
         if (++seek_cnt % 100 == 0) {
-            auto s = txn->commit();
+            auto s = txn->commit(0, 0);
             if (!s.ok()) {
                 DB_WARNING("index %ld, region_id: %ld fail to commit failed, status: %s",
                             _index_id, _region_id, s.ToString().c_str());
@@ -1731,8 +1772,13 @@ int VectorIndex::restore_faiss_index(const pb::RegionInfo& region_info, SmartFai
             txn->set_resource(resource);
         }
     }
+    if (!iter->status().ok()) {
+        DB_FATAL("Iterator error during restore_index: %s, region_id: %ld, index_id: %ld",
+                 iter->status().ToString().c_str(), _region_id, _index_id);
+        return -1;
+    }
     if (seek_cnt % 100 != 0) {
-        auto s = txn->commit();
+        auto s = txn->commit(0, 0);
         if (!s.ok()) {
             DB_WARNING("index %ld, region_id: %ld fail to commit failed, status: %s",
                         _index_id, _region_id, s.ToString().c_str());
@@ -2010,6 +2056,11 @@ int VectorIndex::build_separate_faiss_index_map() {
                 return -1;
             }
         }
+    }
+    if (!iter->status().ok()) {
+        DB_FATAL("Iterator error during build_separate_faiss_index_map: %s, region_id: %ld, index_id: %ld",
+                 iter->status().ToString().c_str(), _region_id, _index_id);
+        return -1;
     }
     DB_WARNING("build_separate_faiss_index_map succ, region_id: %ld, index_id: %ld, size: %u", 
                 _region_id, _index_id, _separate_faiss_index_map->size());

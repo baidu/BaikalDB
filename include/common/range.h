@@ -32,7 +32,8 @@ enum RangeType {
     MATCH_VECTOR,
     OR_LIKE,
     IN,
-    INDEX_HAS_NULL
+    INDEX_HAS_NULL,
+    IS_NULL
 };
 
 struct FieldRange {

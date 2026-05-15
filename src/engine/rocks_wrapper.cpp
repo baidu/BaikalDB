@@ -26,6 +26,8 @@
 #include "rocksdb_merge_operator.h"
 #include "rocksdb_filesystem.h"
 #include "rocksdb/statistics.h"
+#include "rocksdb/sst_file_reader.h"
+// #include "rocksdb_compaction_ctrl.h"
 
 namespace baikaldb {
 
@@ -61,8 +63,10 @@ DEFINE_int64(flush_memtable_interval_us, 10 * 60 * 1000 * 1000LL,
 DEFINE_int32(max_background_jobs, 24, "max_background_jobs");
 DEFINE_int32(max_write_buffer_number, 6, "max_write_buffer_number");
 DEFINE_int32(write_buffer_size, 128 * 1024 * 1024, "write_buffer_size");
+DEFINE_int32(new_log_write_buffer_size, 256 * 1024 * 1024, "new_log_write_buffer_size default 256M");
 DEFINE_int32(min_write_buffer_number_to_merge, 2, "min_write_buffer_number_to_merge");
 DEFINE_int32(rocks_binlog_max_files_size_gb, 100, "binlog max size default 100G");
+DEFINE_int32(rocks_new_raft_log_size_mb, 4 * 1024, "rocks new raft log size default 4096M");
 DEFINE_int32(rocks_binlog_ttl_days, 7, "binlog ttl default 7 days");
 
 DEFINE_int32(level0_file_num_compaction_trigger, 5, "Number of files to trigger level-0 compaction");
@@ -88,27 +92,134 @@ DEFINE_uint64(rocks_min_blob_size, 4096, "rocksdb min_blob_size, default: 4096")
 DEFINE_bool(enable_remote_compaction, false, "enable remote compaction");
 DEFINE_string(compaction_server_bns, "10.143.17.41:8130", "compaction server bns");
 DEFINE_uint64(max_manifest_file_size, 1024 * 1024 * 1024, "max_manifest_file_size");
+DECLARE_bool(enable_compute_storage_decoupled_mode);
 
 const std::string RocksWrapper::RAFT_LOG_CF = "raft_log";
+const std::string RocksWrapper::NEW_RAFT_LOG_CF = "new_raft_log";
 const std::string RocksWrapper::BIN_LOG_CF  = "bin_log_new";
 const std::string RocksWrapper::DATA_CF     = "data";
 const std::string RocksWrapper::METAINFO_CF = "meta_info";
 const std::string RocksWrapper::COLD_DATA_CF = "cold_data";
 const std::string RocksWrapper::COLD_BINLOG_CF = "cold_binlog";
+const std::string NewRaftLogCollector::RAFT_LOG_PROPERTIES = "raft_log_properities";
 std::atomic<int64_t> RocksWrapper::raft_cf_remove_range_count = {0};
 std::atomic<int64_t> RocksWrapper::data_cf_remove_range_count = {0};
 std::atomic<int64_t> RocksWrapper::mata_cf_remove_range_count = {0};
 
+// struct LiveFileMetaData : SstFileMetaData {
+//   std::string column_family_name;  // Name of the column family
+//   int level;                       // Level at which this file resides.
+//   LiveFileMetaData() : column_family_name(), level(0) {}
+// };
+
+/*
+struct SstFileMetaData : public FileStorageInfo {
+
+
+  SequenceNumber smallest_seqno = 0;  // Smallest sequence number in file.
+  SequenceNumber largest_seqno = 0;   // Largest sequence number in file.
+  std::string smallestkey;            // Smallest user defined key in the file.
+  std::string largestkey;             // Largest user defined key in the file.
+  uint64_t num_reads_sampled = 0;     // How many times the file is read.
+  bool being_compacted =
+      false;  // true if the file is currently being compacted.
+
+  uint64_t num_entries = 0;
+  uint64_t num_deletions = 0;
+
+    uint64_t oldest_ancester_time = 0;
+    // Timestamp when the SST file is created, provided by
+    // SystemClock::GetCurrentTime(). 0 if the information is not available.
+    uint64_t file_creation_time = 0;
+    // The order of a file being flushed or ingested/imported.
+    // Compaction output file will be assigned with the minimum `epoch_number`
+    // among input files'.
+    // For L0, larger `epoch_number` indicates newer L0 file.
+    // 0 if the information is not available.
+    uint64_t epoch_number = 0;
+
+
+
+
+  // DEPRECATED: The name of the file within its directory with a
+  // leading slash (e.g. "/123456.sst"). Use relative_filename from base struct
+  // instead.
+  std::string name;
+
+  // DEPRECATED: replaced by `directory` in base struct
+  std::string db_path;
+};
+*/
+/*
+struct FileStorageInfo {
+  // The name of the file within its directory (e.g. "123456.sst")
+  std::string relative_filename;
+  // The directory containing the file, without a trailing '/'. This could be
+  // a DB path, wal_dir, etc.
+  std::string directory;
+
+  // The id of the file within a single DB. Set to 0 if the file does not have
+  // a number (e.g. CURRENT)
+  uint64_t file_number = 0;
+
+  // File size in bytes. See also `trim_to_size`.
+  uint64_t size = 0;
+};
+*/
+
+void print_metadata_info(const rocksdb::LiveFileMetaData& metadata) {
+    TableKey smallestkey(metadata.smallestkey);
+    TableKey largestkey(metadata.largestkey);
+    if (metadata.column_family_name == RocksWrapper::COLD_BINLOG_CF) {
+        int64_t smallest_region_id = smallestkey.extract_i64(0);
+        int64_t smallest_ts  = smallestkey.extract_i64(sizeof(int64_t));
+        int64_t largest_region_id  = largestkey.extract_i64(0);
+        int64_t largest_ts   = largestkey.extract_i64(sizeof(int64_t));
+        DB_WARNING("LiveFileMetaData[cf_name: %s level: %d];"
+            "smallestkey[region_id: %ld ts: %ld, %s]; largestkey[region_id: %ld ts: %ld, %s]; "
+            "SstFileMetaData[smallest_seqno: %lu largest_seqno: %lu num_reads_sampled: %lu being_compacted: %d "
+            "num_entries: %lu num_deletions: %lu file_creation_time: %lu name: %s db_path: %s]; "
+            "FileStorageInfo[relative_filename: %s directory: %s file_number: %lu size: %lu].", 
+            metadata.column_family_name.c_str(), metadata.level,
+            smallest_region_id, smallest_ts, ts_to_datetime_str(smallest_ts).c_str(), 
+            largest_region_id, largest_ts,  ts_to_datetime_str(largest_ts).c_str(),
+            metadata.smallest_seqno, metadata.largest_seqno, metadata.num_reads_sampled, (int)metadata.being_compacted,
+            metadata.num_entries, metadata.num_deletions, metadata.file_creation_time, metadata.name.c_str(), metadata.db_path.c_str(), 
+            metadata.relative_filename.c_str(), metadata.directory.c_str(), metadata.file_number, metadata.size);
+    } else {
+        int64_t smallest_region_id = smallestkey.extract_i64(0);
+        int64_t smallest_table_id  = smallestkey.extract_i64(sizeof(int64_t));
+        int64_t largest_region_id  = largestkey.extract_i64(0);
+        int64_t largest_table_id   = largestkey.extract_i64(sizeof(int64_t));
+        DB_WARNING("LiveFileMetaData[cf_name: %s level: %d]; "
+            "smallestkey[region_id: %ld table_id: %ld]; largestkey[region_id: %ld table_id: %ld]; "
+            "SstFileMetaData[smallest_seqno: %lu largest_seqno: %lu num_reads_sampled: %lu being_compacted: %d "
+            "num_entries: %lu num_deletions: %lu file_creation_time: %lu]; "
+            "FileStorageInfo[relative_filename: %s file_number: %lu size: %lu].", 
+            metadata.column_family_name.c_str(), metadata.level,
+            smallest_region_id, smallest_table_id, largest_region_id, largest_table_id,
+            metadata.smallest_seqno, metadata.largest_seqno, metadata.num_reads_sampled, (int)metadata.being_compacted,
+            metadata.num_entries, metadata.num_deletions, metadata.file_creation_time, 
+            metadata.relative_filename.c_str(), metadata.file_number, metadata.size);
+    }
+}
+
 RocksWrapper::RocksWrapper() : _is_init(false), _txn_db(nullptr)
     , _raft_cf_remove_range_count("raft_cf_remove_range_count")
     , _data_cf_remove_range_count("data_cf_remove_range_count")
-    , _mata_cf_remove_range_count("mata_cf_remove_range_count") {
-    _cold_env = rocksdb::NewCompositeEnv(std::make_shared<RocksdbFileSystemWrapper>(true));
+    , _mata_cf_remove_range_count("mata_cf_remove_range_count") { 
 }
-int32_t RocksWrapper::init(const std::string& path) {
+int32_t RocksWrapper::init(const std::string& path, std::shared_ptr<ExtFileSystem> ext_fs) {
     if (_is_init) {
         return 0;
     }
+    _external_filesystem = ext_fs;
+    auto linker = std::make_shared<SstExtLinker>(path, ext_fs);
+    if (linker->init() != 0) {
+        DB_FATAL("init SstExtLinker failed path: %s", path.c_str());
+        return -1;
+    }
+    _remote_env = rocksdb::NewCompositeEnv(std::make_shared<DSCRocksdbFileSystemWrapper>(linker));
     std::shared_ptr<rocksdb::EventListener> my_listener = std::make_shared<MyListener>();
     rocksdb::BlockBasedTableOptions table_options;
     pb::RocksdbGFLAGS rocksdb_gflags;
@@ -132,6 +243,10 @@ int32_t RocksWrapper::init(const std::string& path) {
     db_options.WAL_ttl_seconds = 10 * 60;
     db_options.WAL_size_limit_MB = 0;
     db_options.max_manifest_file_size = FLAGS_max_manifest_file_size;
+    if (FLAGS_enable_compute_storage_decoupled_mode) {
+        // 不校验行数
+        db_options.compaction_verify_record_count = false;
+    }
     //打开后有些集群内存严重上涨
     //db_options.avoid_unnecessary_blocking_io = true;
     db_options.max_background_compactions = FLAGS_rocks_max_background_compactions;
@@ -143,9 +258,20 @@ int32_t RocksWrapper::init(const std::string& path) {
     db_options.max_background_flushes = 2;
     db_options.env->SetBackgroundThreads(2, rocksdb::Env::HIGH);
     db_options.listeners.emplace_back(my_listener);
-    if (FLAGS_enable_remote_compaction) {
-        db_options.compaction_service.reset(new MyCompactionService(path, FLAGS_compaction_server_bns));
+
+    if (FLAGS_enable_compute_storage_decoupled_mode) {
+        _remote_compaction_service = std::make_shared<RemoteCompactionService>();
+        db_options.compaction_service = _remote_compaction_service;
+        db_options.env = _remote_env.get();
+        DB_NOTICE("init remote compaction service.");
+    } else {
+        if (!linker->sst_ext_map_empty()) {
+            // linker不为空，存在afs remote file，需要使用remote env
+            db_options.env = _remote_env.get();
+            DB_NOTICE("init remote env. but dsc close");
+        }
     }
+    
     rocksdb::TransactionDBOptions txn_db_options;
     DB_NOTICE("FLAGS_rocks_transaction_lock_timeout_ms:%d FLAGS_rocks_default_lock_timeout_ms:%d", FLAGS_rocks_transaction_lock_timeout_ms, FLAGS_rocks_default_lock_timeout_ms);
     txn_db_options.transaction_lock_timeout = FLAGS_rocks_transaction_lock_timeout_ms;
@@ -205,7 +331,7 @@ int32_t RocksWrapper::init(const std::string& path) {
     _data_cf_option.compaction_pri = static_cast<rocksdb::CompactionPri>(FLAGS_rocks_data_compaction_pri);
     _data_cf_option.compaction_filter = SplitCompactionFilter::get_instance();
     _data_cf_option.merge_operator.reset(new OLAPMergeOperator());
-    if (FLAGS_rocks_use_sst_partitioner_fixed_prefix) {
+    if (FLAGS_rocks_use_sst_partitioner_fixed_prefix || FLAGS_enable_compute_storage_decoupled_mode) {
         // 按region_id拆分
 #if ROCKSDB_MAJOR >= 7 || (ROCKSDB_MAJOR == 6 && ROCKSDB_MINOR > 22)
         _data_cf_option.sst_partitioner_factory = rocksdb::NewSstPartitionerFixedPrefixFactory(sizeof(int64_t));
@@ -245,7 +371,7 @@ int32_t RocksWrapper::init(const std::string& path) {
                                                 rocksdb::CompressionType::kLZ4Compression,
                                                 rocksdb::CompressionType::kLZ4Compression,
                                                 rocksdb::CompressionType::kLZ4Compression};
-    if (FLAGS_key_point_collector_interval > 0) { 
+    if (FLAGS_key_point_collector_interval > 0 || FLAGS_enable_compute_storage_decoupled_mode) { 
         _data_cf_option.table_properties_collector_factories.emplace_back(
                         new KeyPointsTblPropCollectorFactory());
     }
@@ -407,11 +533,17 @@ int32_t RocksWrapper::init(const std::string& path) {
             return -1;
         }
     }
-    int ret = init_cold_rocksdb(path + "_cold");
+    int ret = init_cold_rocksdb(path + "_cold", ext_fs);
     if (ret < 0) {
         DB_FATAL("init cold rocksdb failed");
         return -1;
     }
+    ret = init_new_raft_log_rocksdb(path + "_raft_log");
+    if (ret < 0) {
+        DB_FATAL("init new raft log rocksdb failed");
+        return -1;
+    }
+
     _is_init = true;
     update_oldest_ts_in_binlog_cf();
     collect_rocks_options();
@@ -419,7 +551,141 @@ int32_t RocksWrapper::init(const std::string& path) {
     return 0;
 }
 
-int32_t RocksWrapper::init_cold_rocksdb(const std::string& path) {
+int32_t RocksWrapper::init_new_raft_log_rocksdb(const std::string& path) {
+    if (!FLAGS_enable_new_raft_log_storage) {
+        DB_WARNING("disable new raft log storage");
+        return 0;
+    }
+    rocksdb::BlockBasedTableOptions table_options;
+    pb::RocksdbGFLAGS rocksdb_gflags;
+    set_rocksdb_flags(&rocksdb_gflags);
+    set_table_options(table_options, rocksdb_gflags);
+
+    rocksdb::BlockBasedTableOptions tbl_options;
+    tbl_options.no_block_cache = true;
+    tbl_options.block_size = FLAGS_rocks_block_size; // 64 KB
+    tbl_options.pin_l0_filter_and_index_blocks_in_cache = true;
+#if ROCKSDB_MAJOR >= 7 || (ROCKSDB_MAJOR == 6 && ROCKSDB_MINOR > 22)
+    table_options.filter_policy.reset(rocksdb::NewRibbonFilterPolicy(9.9));
+#else
+    tbl_options.filter_policy = std::shared_ptr<const rocksdb::FilterPolicy>(rocksdb::NewBloomFilterPolicy(10, false));
+#endif
+
+    rocksdb::CompactionOptionsFIFO fifo_option;
+    //如果观察到TTL无法让文件总数量少于配置的大小，RocksDB会暂时下降到基于大小的FIFO删除
+    //https://rocksdb.org.cn/doc/FIFO-compaction-style.html
+    fifo_option.max_table_files_size = FLAGS_rocks_new_raft_log_size_mb * 1024 * 1024LL;
+    fifo_option.allow_compaction = FLAGS_rocksdb_fifo_allow_compaction;
+
+    // 复制的老配置
+    rocksdb::Options db_options;
+    db_options.IncreaseParallelism(FLAGS_max_background_jobs);
+    db_options.create_if_missing = true;
+    db_options.use_direct_reads = FLAGS_use_direct_reads;
+    db_options.use_direct_io_for_flush_and_compaction = FLAGS_use_direct_io_for_flush_and_compaction;
+    // FIFO compaction only supported with max_open_files = -1.
+    db_options.max_open_files = -1;
+    db_options.skip_stats_update_on_db_open = FLAGS_rocks_skip_stats_update_on_db_open;
+    db_options.compaction_readahead_size = FLAGS_rocks_compaction_readahead_size;
+    // rocksdb默认是6，之前配错了8，导致很大概率频繁read_file，大量加载了index和filter block
+    db_options.table_cache_numshardbits = 6;
+    db_options.WAL_ttl_seconds = 10 * 60;
+    db_options.WAL_size_limit_MB = 0;
+    db_options.max_manifest_file_size = FLAGS_max_manifest_file_size;
+    db_options.statistics = rocksdb::CreateDBStatistics();
+    db_options.max_subcompactions = FLAGS_rocks_max_subcompactions;
+    db_options.max_background_flushes = 2;
+    db_options.env->SetBackgroundThreads(2, rocksdb::Env::HIGH);
+    std::shared_ptr<rocksdb::EventListener> my_listener = std::make_shared<MyListener>();
+    db_options.listeners.emplace_back(my_listener);
+
+    _new_log_option.prefix_extractor.reset(
+            rocksdb::NewFixedPrefixTransform(sizeof(int64_t) + 1));
+    _new_log_option.OptimizeLevelStyleCompaction();
+    _new_log_option.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
+    _new_log_option.compaction_style = rocksdb::kCompactionStyleFIFO;
+    _new_log_option.compaction_options_fifo = fifo_option;
+    _new_log_option.sst_compaction_picker = check_new_log_sst_removeable;
+    _new_log_option.target_file_size_base = FLAGS_target_file_size_base;
+
+    _new_log_option.max_write_buffer_number = FLAGS_max_write_buffer_number;
+    _new_log_option.max_write_buffer_number_to_maintain = _new_log_option.max_write_buffer_number;
+    _new_log_option.write_buffer_size = FLAGS_new_log_write_buffer_size;
+    _new_log_option.min_write_buffer_number_to_merge = FLAGS_min_write_buffer_number_to_merge;
+    _new_log_option.table_properties_collector_factories.emplace_back(
+        std::make_shared<NewRaftLogCollectorFactory>());
+    // List Column Family
+    std::vector<std::string> column_family_names;
+    rocksdb::Status s;
+    s = rocksdb::DB::ListColumnFamilies(db_options, path, &column_family_names);
+
+    // db已存在
+    if (s.ok()) {
+        std::vector<rocksdb::ColumnFamilyDescriptor> column_family_desc;
+        column_family_desc.reserve(3);
+        std::vector<rocksdb::ColumnFamilyHandle*> handles;
+        handles.reserve(column_family_desc.size());
+        for (auto& column_family_name : column_family_names) {
+            if (column_family_name == NEW_RAFT_LOG_CF) {
+                column_family_desc.push_back(rocksdb::ColumnFamilyDescriptor(NEW_RAFT_LOG_CF, _new_log_option));
+            } else {
+                column_family_desc.push_back(
+                        rocksdb::ColumnFamilyDescriptor(column_family_name,
+                            rocksdb::ColumnFamilyOptions()));
+            }
+        }
+        s = rocksdb::DB::Open(db_options,
+                path,
+                column_family_desc,
+                &handles,
+                &_new_log_db);
+        if (s.ok()) {
+            DB_WARNING("reopen db:%s success", path.c_str());
+            for (auto& handle : handles) {
+                if (handle != nullptr && handle->GetName() == NEW_RAFT_LOG_CF) {
+                    _new_log_cf = handle;
+                    DB_WARNING("open column family:%s", handle->GetName().c_str());
+                }
+            }
+        } else {
+            DB_FATAL("reopen db:%s fail, err_message:%s", path.c_str(), s.ToString().c_str());
+            return -1;
+        }
+    } else {
+        // new db
+        s = rocksdb::DB::Open(db_options, path, &_new_log_db);
+        if (s.ok()) {
+            DB_WARNING("open db:%s success", path.c_str());
+        } else {
+            DB_FATAL("open db:%s fail, err_message:%s", path.c_str(), s.ToString().c_str());
+            return -1;
+        }
+    }
+
+    if (_new_log_cf == nullptr) {
+        //create new_raft_log column_familiy
+        rocksdb::ColumnFamilyHandle* raft_log_handle;
+        s = _new_log_db->CreateColumnFamily(_new_log_option, NEW_RAFT_LOG_CF, &raft_log_handle);
+        if (s.ok()) {
+            DB_WARNING("create column family success, column family:%s", NEW_RAFT_LOG_CF.c_str());
+            _new_log_cf = raft_log_handle;
+        } else {
+            DB_FATAL("create column family fail, column family:%s, err_message:%s",
+                    NEW_RAFT_LOG_CF.c_str(), s.ToString().c_str());
+            return -1;
+        }
+    }
+    DB_WARNING("new raft log rocksdb init success");
+    return 0;
+}
+
+int32_t RocksWrapper::init_cold_rocksdb(const std::string& path, std::shared_ptr<ExtFileSystem> ext_fs) {
+    auto linker = std::make_shared<SstExtLinker>(path, ext_fs);
+    if (linker->init() != 0) {
+        DB_FATAL("init SstExtLinker failed path: %s", path.c_str());
+        return -1;
+    }
+    _cold_env = rocksdb::NewCompositeEnv(std::make_shared<RocksdbFileSystemWrapper>(linker, true));
     if (FLAGS_cold_rocksdb_afs_infos.empty()) {
         DB_WARNING("not init cold rocksdb");
         _cold_txn_db = nullptr;
@@ -692,6 +958,11 @@ void RocksWrapper::update_oldest_ts_in_binlog_cf() {
     option.fill_cache = false;
     std::unique_ptr<rocksdb::Iterator> iter(new_iterator(option, get_bin_log_handle()));
     iter->Seek(start_key);
+    if (!iter->Valid() && !iter->status().ok()) {
+        DB_FATAL("Iterator error when seeking oldest_ts_in_binlog_cf: %s", 
+                 iter->status().ToString().c_str());
+        return;
+    }
     bool find = false;
     for (; iter->Valid(); iter->Next()) {
         int64_t tmp_ts = TableKey(iter->key()).extract_i64(0);
@@ -981,5 +1252,44 @@ void RocksWrapper::decode_key_points(const std::string& region_start_key, const 
             out_keys.emplace_back(key);
         }
     }
+}
+
+int64_t RocksWrapper::get_file_raft_index(const std::string& file, int64_t region_id) {
+    rocksdb::Options options = get_options(get_data_handle()); 
+    rocksdb::SstFileReader reader(options);
+    auto s = reader.Open(file);
+    if (!s.ok()) {
+        DB_WARNING("region_id: %ld, get_file_raft_index: %s open failed", region_id, file.c_str());
+        return -1;
+    }
+    std::unique_ptr<rocksdb::Iterator> db_iter(reader.NewIterator(rocksdb::ReadOptions()));
+    db_iter->SeekToFirst();
+    if (!db_iter->Valid()) {
+        if (!db_iter->status().ok()) {
+            DB_FATAL("region_id: %ld, get_file_raft_index: %s iterator error: %s", 
+                     region_id, file.c_str(), db_iter->status().ToString().c_str());
+            return -1;
+        }
+        DB_WARNING("region_id: %ld, get_file_raft_index: %s no data", region_id, file.c_str());
+        return -1;
+    }
+
+    TableKey smallestkey(db_iter->key());
+    int64_t smallest_region_id = smallestkey.extract_i64(0);
+    int64_t smallest_table_id  = smallestkey.extract_i64(sizeof(int64_t));
+    if (smallest_table_id != 0) {
+        DB_WARNING("region_id: %ld, get_file_raft_index: %s smallest_table_id: %ld", region_id, file.c_str(), smallest_table_id);
+        return -1;
+    }
+
+    if (db_iter->value().size() != sizeof(int64_t)) {
+        DB_WARNING("region_id: %ld, value size: %lu", region_id, db_iter->value().size());
+        return -1;
+    }
+
+    TableKey table_user_value(db_iter->value());
+    int64_t raft_index = table_user_value.extract_i64(0);
+    DB_WARNING("region_id: %ld, get_file_raft_index: %s raft_index: %ld", region_id, file.c_str(), raft_index);
+    return raft_index;
 }
 }

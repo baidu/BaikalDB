@@ -306,6 +306,7 @@ enum SegmentType {
     S_WORDWEIGHT_NO_FILTER  = 9;
     S_WORDRANK_Q2B_ICASE_UNLIMIT = 10;// 转小写，全角转半角后wordrank切词，取消长度限制。
     S_WORDWEIGHT_NO_FILTER_SAME_WEIGHT  = 11; // wordweight，不过滤，每个term weight相同
+    S_SPLIT_PUNCT_SPACE  = 12; // 按标点符号和空格切词，类似数组分词
 };  
 
 // 普通索引，默认的格式是format1
@@ -316,7 +317,7 @@ enum SegmentType {
 enum StorageType {
     ST_PROTOBUF_OR_FORMAT1 = 0;
     ST_ARROW = 1;
-    ST_FORMAT2 = 2;
+    ST_NULL_KEY = 2;
     ST_UNKNOWN = 3;
 };
 

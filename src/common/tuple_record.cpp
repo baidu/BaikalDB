@@ -289,6 +289,7 @@ int TupleRecord::decode_fields(const std::map<int32_t, FieldInfo*>& fields,
     uint64_t field_num  = 0;
     int32_t  wired_type = 0;
     auto iter = fields.begin();
+    bool last_repeat_string_has_set_value = false;
 
     while (_offset < _size && iter != fields.end()) {
         field_key = get_varint<uint64_t>();
@@ -299,7 +300,10 @@ int TupleRecord::decode_fields(const std::map<int32_t, FieldInfo*>& fields,
             DB_WARNING("error: %lu, %lu", _offset, _size);
             return -1;
         }
-
+        if (iter != fields.end() && field_num > static_cast<uint64_t>(iter->first) && last_repeat_string_has_set_value) {
+            iter++;
+            last_repeat_string_has_set_value = false;
+        }
         while (iter != fields.end() && field_num > static_cast<uint64_t>(iter->first)) {
             auto field = get_field(iter->second, field_slot, record, tuple_id, mem_row);
             //add default value
@@ -324,6 +328,7 @@ int TupleRecord::decode_fields(const std::map<int32_t, FieldInfo*>& fields,
                     skip_fixed<double>();
                     break;
                 case 2:
+                    // string or repeated-array
                     skip_string();
                     break;
                 case 5:
@@ -335,87 +340,30 @@ int TupleRecord::decode_fields(const std::map<int32_t, FieldInfo*>& fields,
             }
         } else if (field_num == static_cast<uint64_t>(iter->first)) {
             auto field = get_field(iter->second, field_slot, record, tuple_id, mem_row);
-            switch (field->type()) {
-            case FieldDescriptor::TYPE_SINT32: {
-                //zigzag
-                int32_t value = 0;
-                uint32_t raw_val = get_varint<uint32_t>();
-                if (raw_val & 0x1) {
-                    value = (raw_val << 31) | ~(raw_val >> 1);
-                } else {
-                    value = (raw_val >> 1);
+            bool is_array = field->is_repeated();
+            if (!is_array) {                
+                if (0 != decode_one_value(iter->first, field, message, str_size)) {
+                    return -1;
                 }
-                MessageHelper::set_int32(field, message, value);
-                break;
-            }
-            case FieldDescriptor::TYPE_SINT64: {
-                //zigzag
-                int64_t value = 0;
-                uint64_t raw_val = get_varint<uint64_t>();
-                if (raw_val & 0x1) {
-                    value = (raw_val << 63) | ~(raw_val >> 1);
-                } else {
-                    value = (raw_val >> 1);
+                iter++;
+                last_repeat_string_has_set_value = false;
+            } else if (iter->second->type == pb::ARRAY_STRING) {
+                // flag, length, value, flag, length, value
+                if (0 != decode_one_value(iter->first, field, message, str_size)) {
+                    return -1;
                 }
-                MessageHelper::set_int64(field, message, value);
-                break;
-            }
-            case FieldDescriptor::TYPE_INT32: {
-                MessageHelper::set_int32(field, message, get_varint<int32_t>());
-                break;
-            }
-            case FieldDescriptor::TYPE_INT64: {
-                MessageHelper::set_int64(field, message, get_varint<int64_t>());
-                break;
-            }
-            case FieldDescriptor::TYPE_SFIXED32: {
-                MessageHelper::set_int32(field, message, get_fixed<int32_t>());
-                break;
-            }
-            case FieldDescriptor::TYPE_SFIXED64: {
-                MessageHelper::set_int64(field, message, get_fixed<int64_t>());
-                break;
-            }
-            case FieldDescriptor::TYPE_UINT32: {
-                MessageHelper::set_uint32(field, message, get_varint<uint32_t>());
-                break;
-            }
-            case FieldDescriptor::TYPE_UINT64: {
-                MessageHelper::set_uint64(field, message, get_varint<uint64_t>());
-                break;
-            }
-            case FieldDescriptor::TYPE_FIXED32: {
-                MessageHelper::set_uint32(field, message, get_fixed<uint32_t>());
-                break;
-            }
-            case FieldDescriptor::TYPE_FIXED64: {
-                MessageHelper::set_uint64(field, message, get_fixed<uint64_t>());
-                break;
-            }
-            case FieldDescriptor::TYPE_FLOAT: {
-                MessageHelper::set_float(field, message, get_fixed<float>());
-                break;
-            }
-            case FieldDescriptor::TYPE_DOUBLE: {
-                MessageHelper::set_double(field, message, get_fixed<double>());
-                break;
-            }
-            case FieldDescriptor::TYPE_BOOL: {
-                MessageHelper::set_boolean(field, message, get_varint<uint32_t>());
-                break;
-            }
-            case FieldDescriptor::TYPE_STRING: 
-            case FieldDescriptor::TYPE_BYTES: {
-                std::string tmp = get_string();
-                str_size = tmp.size();
-                MessageHelper::set_string(field, message, tmp);
-                break;
-            }
-            default: {
-                DB_FATAL("invalid TYPE: %d, field_id:%d, offset: %lu,%lu",
-                        field->type(), iter->first, _offset, _size);
-                return -1;
-            }
+                last_repeat_string_has_set_value = true;
+            } else {
+                // packed: [length, val1, val2, val...]
+                uint64_t length = get_varint<uint64_t>();
+                size_t end_ptr = _offset + length;
+                while (_offset < end_ptr && _offset < _size) {
+                    if (0 != decode_one_value(iter->first, field, message, str_size)) {
+                        return -1;
+                    }
+                }
+                iter++;
+                last_repeat_string_has_set_value = false;
             }
             if (record == nullptr) {
                 switch (field->type()) {
@@ -454,8 +402,11 @@ int TupleRecord::decode_fields(const std::map<int32_t, FieldInfo*>& fields,
                 }
                 }
             }
-            iter++;
         }
+    }
+    if (iter != fields.end() && last_repeat_string_has_set_value) {
+        iter++;
+        last_repeat_string_has_set_value = false;
     }
     while (iter != fields.end()) {
         auto field = get_field(iter->second, field_slot, record, tuple_id, mem_row);
@@ -465,6 +416,93 @@ int TupleRecord::decode_fields(const std::map<int32_t, FieldInfo*>& fields,
             (*mem_row)->update_used_size(iter->second->default_expr_value.size());
         }
         iter++;
+    }
+    return 0;
+}
+
+int TupleRecord::decode_one_value(int32_t field_id, const google::protobuf::FieldDescriptor* field,
+        google::protobuf::Message* message, int& str_size) { 
+    switch (field->type()) {
+        case FieldDescriptor::TYPE_SINT32: {
+            //zigzag
+            int32_t value = 0;
+            uint32_t raw_val = get_varint<uint32_t>();
+            if (raw_val & 0x1) {
+                value = (raw_val << 31) | ~(raw_val >> 1);
+            } else {
+                value = (raw_val >> 1);
+            }
+            MessageHelper::set_int32(field, message, value);
+            break;
+        }
+        case FieldDescriptor::TYPE_SINT64: {
+            //zigzag
+            int64_t value = 0;
+            uint64_t raw_val = get_varint<uint64_t>();
+            if (raw_val & 0x1) {
+                value = (raw_val << 63) | ~(raw_val >> 1);
+            } else {
+                value = (raw_val >> 1);
+            }
+            MessageHelper::set_int64(field, message, value);
+            break;
+        }
+        case FieldDescriptor::TYPE_INT32: {
+            MessageHelper::set_int32(field, message, get_varint<int32_t>());
+            break;
+        }
+        case FieldDescriptor::TYPE_INT64: {
+            MessageHelper::set_int64(field, message, get_varint<int64_t>());
+            break;
+        }
+        case FieldDescriptor::TYPE_SFIXED32: {
+            MessageHelper::set_int32(field, message, get_fixed<int32_t>());
+            break;
+        }
+        case FieldDescriptor::TYPE_SFIXED64: {
+            MessageHelper::set_int64(field, message, get_fixed<int64_t>());
+            break;
+        }
+        case FieldDescriptor::TYPE_UINT32: {
+            MessageHelper::set_uint32(field, message, get_varint<uint32_t>());
+            break;
+        }
+        case FieldDescriptor::TYPE_UINT64: {
+            MessageHelper::set_uint64(field, message, get_varint<uint64_t>());
+            break;
+        }
+        case FieldDescriptor::TYPE_FIXED32: {
+            MessageHelper::set_uint32(field, message, get_fixed<uint32_t>());
+            break;
+        }
+        case FieldDescriptor::TYPE_FIXED64: {
+            MessageHelper::set_uint64(field, message, get_fixed<uint64_t>());
+            break;
+        }
+        case FieldDescriptor::TYPE_FLOAT: {
+            MessageHelper::set_float(field, message, get_fixed<float>());
+            break;
+        }
+        case FieldDescriptor::TYPE_DOUBLE: {
+            MessageHelper::set_double(field, message, get_fixed<double>());
+            break;
+        }
+        case FieldDescriptor::TYPE_BOOL: {
+            MessageHelper::set_boolean(field, message, get_varint<uint32_t>());
+            break;
+        }
+        case FieldDescriptor::TYPE_STRING: 
+        case FieldDescriptor::TYPE_BYTES: {
+            std::string tmp = get_string();
+            str_size += tmp.size();
+            MessageHelper::set_string(field, message, tmp);
+            break;
+        }
+        default: {
+            DB_FATAL("invalid TYPE: %d, field_id:%d, offset: %lu,%lu",
+                    field->type(), field_id, _offset, _size);
+            return -1;
+        }
     }
     return 0;
 }

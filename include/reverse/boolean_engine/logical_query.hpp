@@ -181,6 +181,9 @@ int LogicalQuery<Schema>::_multi_get_level_reverse_list(uint8_t level, std::vect
                 return -1;
             }
             reverse_list_ptrs[i] = tmp_ptr;
+            if (_schema != nullptr) {
+                _schema->statistic().allocate(reverse_list_ptrs[i]->ByteSizeLong());
+            }
         } else if (statuses[i].IsNotFound()) {
 
         } else {

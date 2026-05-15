@@ -1066,6 +1066,7 @@ void RegionManager::leader_load_balance_on_pk_prefix(const std::string& instance
     }
 }
 
+// 只支持主键region，若要拓展到全局索引region需要修改get_pk_prefix_key
 void RegionManager::leader_load_balance(bool whether_can_decide,
             bool load_balance,
             const pb::StoreHeartBeatRequest* request,

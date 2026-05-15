@@ -23,45 +23,7 @@ namespace baikaldb {
 using namespace range;
 DEFINE_uint64(max_in_records_num, 10000, "max_in_records_num");
 DEFINE_uint64(cut_huge_in_filter_size, 500000, "cut_huge_in_filter_size, maybe 50w is suitable");
-DEFINE_int64(index_use_for_learner_delay_s, 3600, "1h");
 DEFINE_bool(date_range_to_in, false, "date range to in");
-
-bool AccessPath::need_add_to_learner_paths() {
-    int64_t _1h = FLAGS_index_use_for_learner_delay_s * 1000 * 1000LL;
-    int64_t _2h = 2 * _1h;
-    if (table_info_ptr->learner_resource_tags.size() > 0) {
-        if (index_info_ptr->index_hint_status == pb::IHS_NORMAL) {
-            if (butil::gettimeofday_us() - index_info_ptr->disable_time < _2h && butil::gettimeofday_us() - index_info_ptr->restore_time < _1h) {
-                // 关闭以后马上打开，可以使用
-                return true;
-            } else if (butil::gettimeofday_us() - index_info_ptr->restore_time > _1h) {
-                // 正常打开超过1h可以使用
-                return true;
-            }
-            return false;
-        } else if (index_info_ptr->index_hint_status == pb::IHS_DISABLE) {
-            if (butil::gettimeofday_us() - index_info_ptr->restore_time < _2h && butil::gettimeofday_us() - index_info_ptr->disable_time < _1h) {
-                // 打开以后马上关闭，不可以使用
-                return false;
-            } else if (butil::gettimeofday_us() - index_info_ptr->disable_time > _1h) {
-                // 关闭超过1h不可以使用
-                return false;
-            }
-            return true;
-        }
-    }
-
-    return false;
-}
-
-bool AccessPath::need_select_learner_index() {
-    if (butil::gettimeofday_us() - index_info_ptr->restore_time < FLAGS_index_use_for_learner_delay_s * 1000 * 1000LL
-            && table_info_ptr->learner_resource_tags.size() > 0) {
-        return true;
-    }
-
-    return false;
-}
 
 void AccessPath::calc_row_expr_range(std::vector<int32_t>& range_fields, ExprNode* expr, bool in_open,
         std::vector<ExprValue>& values, MutTableKey& key, size_t field_idx) {
@@ -78,9 +40,13 @@ void AccessPath::calc_row_expr_range(std::vector<int32_t>& range_fields, ExprNod
     }
     for (; row_idx < range_fields.size() &&
             field_idx < avaliable_key_fields.size(); row_idx++, field_idx++) {
+        bool field_nullable = index_info_ptr->storage_type == pb::ST_NULL_KEY && field_idx < index_info_ptr->fields.size();
         if (avaliable_key_fields[field_idx].id == range_fields[row_idx]) {
-            key.append_value(values[row_idx].cast_to(avaliable_key_fields[field_idx].type));
+            key.append_value(values[row_idx].cast_to(avaliable_key_fields[field_idx].type), field_nullable);
             hit_index_field_ids.insert(range_fields[row_idx]);
+            if (field_nullable && row_idx >= pos_index.not_null_fields_size()) {
+                pos_index.add_not_null_fields(field_idx);
+            }
         } else {
             break;
         }
@@ -262,7 +228,8 @@ void AccessPath::calc_normal(Property& sort_property) {
                 } else {
                     // 第一个in不限制FLAGS_max_in_records_num
                     if (FLAGS_cut_huge_in_filter_size > 0 
-                            && (index_type == pb::I_KEY && !index_info_ptr->is_global)
+                            && (index_type == pb::I_KEY)
+                            && !index_info_ptr->is_global
                             && range.eq_in_values.size() > FLAGS_cut_huge_in_filter_size) {
                         field_break = true;
                         break;
@@ -298,6 +265,19 @@ void AccessPath::calc_normal(Property& sort_property) {
                     need_cut_index_range_condition.insert(range.conditions.begin(), range.conditions.end());
                 }
                 break;
+            case IS_NULL: {
+                if (index_info_ptr->storage_type != pb::ST_NULL_KEY || field_cnt >= index_info_ptr->fields.size()) {
+                    field_break = true;
+                    break;
+                }
+                ++field_cnt;
+                hit_index_field_ids.insert(field.id);
+                _left_field_cnt = field_cnt;
+                _right_field_cnt = field_cnt;
+                _left_open = false;
+                _right_open = false;
+                need_cut_index_range_condition.insert(range.conditions.begin(), range.conditions.end());
+            }
             default:
                 break;
         }
@@ -354,10 +334,11 @@ void AccessPath::calc_index_range(
     MutTableKey left_key;
     MutTableKey right_key;
     std::unordered_set<int64_t> partition_ids;
-    if (index_type == pb::I_KEY || index_type == pb::I_UNIQ || index_type == pb::I_ROLLUP) {
+    if ((index_type == pb::I_KEY || index_type == pb::I_UNIQ || index_type == pb::I_ROLLUP)
+            && index_info_ptr->storage_type != pb::ST_NULL_KEY) {
         uint8_t null_flag = 0;
-        left_key.append_u8(null_flag);
-        right_key.append_u8(null_flag);
+        left_key.append_null_flag(null_flag);
+        right_key.append_null_flag(null_flag);
     }
     std::vector<RecordRange> in_records;
     // offset: in条件组合展开后的步长,用于非首字段的对应
@@ -368,7 +349,7 @@ void AccessPath::calc_index_range(
     // 主键a b, 索引c a 且包含变长字段， 则avaliable_key_fields为c a a b
     // 如果发生主键压缩，主键a b, 索引c b, 则avaliable_key_fields 为 c b a
     std::vector<FieldInfo>  avaliable_key_fields = index_info_ptr->fields;
-    if (index_info_ptr->type == pb::I_KEY) {
+    if (index_type == pb::I_KEY) {
         avaliable_key_fields.insert(avaliable_key_fields.end(), index_info_ptr->pk_fields.begin(), index_info_ptr->pk_fields.end());
     }
     for (auto& field : avaliable_key_fields) {
@@ -381,23 +362,37 @@ void AccessPath::calc_index_range(
             break;
         }
         FieldRange& range = iter->second;
+        bool field_nullable = index_info_ptr->storage_type == pb::ST_NULL_KEY
+                && field_cnt <= index_info_ptr->fields.size();
+        if (range.type == IS_NULL && !field_nullable) {
+            break;
+        }
         switch (range.type) {
             case RANGE: {
-                auto range_func = [&range, this, field_cnt, field](
+                auto range_func = [&range, this, field_cnt, field, field_nullable](
                         MutTableKey& left_key, MutTableKey& right_key) {
                     size_t field_idx = field_cnt - 1;
+                    bool has_left = false;
                     if (range.left.size() == 1) {
                         // join on 条件两表字段类型可能不同，导致slotref的类型不准，需要处理
-                        left_key.append_value(range.left[0].cast_to(field.type));
+                        left_key.append_value(range.left[0].cast_to(field.type), field_nullable);
+                        has_left = true;
                     } else if (range.left.size() > 1) {
                         calc_row_expr_range(range.left_row_field_ids, range.left_expr, 
                             range.left_open, range.left, left_key, field_idx);
+                        has_left = true;
                     }
                     if (range.right.size() == 1) {
-                        right_key.append_value(range.right[0].cast_to(field.type));
+                        right_key.append_value(range.right[0].cast_to(field.type), field_nullable);
+                        if (field_nullable && !has_left) {
+                            left_key.append_null_byte(false);
+                        }
                     } else if (range.right.size() > 1) {
                         calc_row_expr_range(range.right_row_field_ids, range.right_expr, 
                             range.right_open, range.right, right_key, field_idx);
+                        if (field_nullable && !has_left) {
+                            left_key.append_null_byte(false);
+                        }
                     }
                 };
                 if (in_records.size() > 0) {
@@ -433,8 +428,8 @@ void AccessPath::calc_index_range(
                                 partition_ids = iter->second;
                             }
                         }
-                        left_key.append_value(range.eq_in_values[0].cast_to(field.type));
-                        right_key.append_value(range.eq_in_values[0].cast_to(field.type));
+                        left_key.append_value(range.eq_in_values[0].cast_to(field.type), field_nullable);
+                        right_key.append_value(range.eq_in_values[0].cast_to(field.type), field_nullable);
                     } else {
                         for (auto& rg : in_records) {
                             if (range.type == EQ && field.id == partition_field_id) {
@@ -443,7 +438,7 @@ void AccessPath::calc_index_range(
                                     rg.partition_ids = iter->second;
                                 }
                             }
-                            rg.left_key.append_value(range.eq_in_values[0].cast_to(field.type));
+                            rg.left_key.append_value(range.eq_in_values[0].cast_to(field.type), field_nullable);
                         }
                     }
                 }
@@ -464,7 +459,7 @@ void AccessPath::calc_index_range(
                                     rg.partition_ids = iter->second;
                                 }
                             }
-                            rg.left_key.append_value(range.eq_in_values[vi].cast_to(field.type));
+                            rg.left_key.append_value(range.eq_in_values[vi].cast_to(field.type), field_nullable);
                             if ((++i) == offset) {
                                 i = 0;
                                 vi = ((vi + 1) % vs);
@@ -503,7 +498,7 @@ void AccessPath::calc_index_range(
                                 }
                             }
                             rg.left_key = record.left_key;
-                            rg.left_key.append_value(value.cast_to(field.type));
+                            rg.left_key.append_value(value.cast_to(field.type), field_nullable);
                             comb_in_records.emplace_back(rg);
                         }
                     }
@@ -524,6 +519,16 @@ void AccessPath::calc_index_range(
                 }
                 */
                 break;
+            case IS_NULL: {
+                if (field_nullable) {
+                    left_key.append_null_byte(true);
+                    right_key.append_null_byte(true);
+                } else {
+                    // do nothing
+                    DB_WARNING("non ST_NULL_KEY storage_type index should not reach here.");
+                }
+                break;
+            }
             default:
                 break;
         }
@@ -745,7 +750,10 @@ double AccessPath::calc_field_selectivity(int32_t field_id, FieldRange& range) {
                 eq_in_values_set.insert(value);
             }
             return in_selectivity;
-                 }
+        }
+        case IS_NULL: {
+            return SchemaFactory::get_instance()->get_eq_field_ratio(table_id, field_id, ExprValue(pb::NULL_TYPE));
+        }
         default:
                  break;
     }

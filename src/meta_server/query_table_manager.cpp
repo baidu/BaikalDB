@@ -421,7 +421,7 @@ void QueryTableManager::decode_key(int64_t table_id, const TableKey& start_key, 
         }
         for (int idx = 0; idx < index_info.field_names_size(); ++idx) {
             pb::PrimitiveType field_type = get_field_type(table_id, index_info.field_ids(idx), table_info);
-            start_key_string += start_key.decode_start_key_string(field_type, pos);
+            start_key_string += start_key.decode_start_key_string(field_type, pos, index_info.storage_type() == pb::ST_NULL_KEY);
             start_key_string += ",";
         }
     }

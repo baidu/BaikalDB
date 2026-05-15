@@ -122,6 +122,14 @@ public:
                 _value.type = pb::MAXVALUE_TYPE;
                 break;
             }
+            case pb::ARRAY_LITERAL: {
+                _value.type = node.col_type();
+                int ret = init_array_from_pb(node);
+                if (ret < 0) {
+                    return ret;
+                }
+                break;
+            }
             default:
                 return -1;
         }
@@ -145,6 +153,34 @@ public:
         if (_is_place_holder) {
             placeholders.insert({_place_holder_id, this});
             return;
+        }
+    }
+
+    template<typename T>
+    void add_array_values_impl(pb::ExprNode* pb_node) {
+        auto array = _value.get_array<T>();
+        if (array == nullptr) {
+            DB_FATAL("array is nullptr");
+            return;
+        }
+        auto* derive_node = pb_node->mutable_derive_node();
+        
+        if constexpr (std::is_same_v<T, bool>) {
+            for (auto v : array->data) {
+                derive_node->add_array_bool_vals(v);
+            }
+        } else if constexpr (std::is_same_v<T, std::string>) {
+            for (const auto& v : array->data) {
+                derive_node->add_array_string_vals(v);
+            }
+        } else if constexpr (std::is_floating_point_v<T>) {
+            for (auto v : array->data) {
+                derive_node->add_array_double_vals(v);
+            }
+        } else {
+            for (auto v : array->data) {
+                derive_node->add_array_int_vals(v);
+            }
         }
     }
 
@@ -177,6 +213,9 @@ public:
             case pb::PLACE_HOLDER_LITERAL:
                 pb_node->mutable_derive_node()->set_placeholder_id(_place_holder_id);
                 DB_FATAL("place holder need not transfer pb, %d", _place_holder_id);
+                break;
+            case pb::ARRAY_LITERAL:
+                add_array_values(pb_node);
                 break;
             default:
                 break;
@@ -318,8 +357,89 @@ private:
             _node_type = pb::BITMAP_LITERAL;
         } else if (_value.is_maxvalue()) {
             _node_type = pb::MAXVALUE_LITERAL;
+        } else if (_value.is_array()) {
+            _node_type = pb::ARRAY_LITERAL;
         } else {
             _node_type = pb::NULL_LITERAL;
+        }
+    }
+
+    template<typename T>
+    int init_array_from_pb_impl(const pb::ExprNode& node, pb::PrimitiveType array_type) {
+        _value.init_array(array_type);
+        auto array = _value.get_array<T>();
+        if (array == nullptr) {
+            DB_WARNING("array is nullptr");
+            return -1;
+        }
+        const auto& derive_node = node.derive_node();
+        
+        if constexpr (std::is_same_v<T, bool>) {
+            for (const auto& v : derive_node.array_bool_vals()) {
+                array->add_value(v);
+            }
+        } else if constexpr (std::is_same_v<T, std::string>) {
+            for (const auto& v : derive_node.array_string_vals()) {
+                array->add_value(v);
+            }
+        } else if constexpr (std::is_floating_point_v<T>) {
+            for (const auto& v : derive_node.array_double_vals()) {
+                array->add_value(static_cast<T>(v));
+            }
+        } else {
+            // uint64_t 也从 array_int_vals 读取，通过 static_cast 转换回来
+            for (const auto& v : derive_node.array_int_vals()) {
+                array->add_value(static_cast<T>(v));
+            }
+        }
+        return 0;
+    }
+
+    int init_array_from_pb(const pb::ExprNode& node) {
+        pb::PrimitiveType col_type = node.col_type();
+        
+        switch (col_type) {
+            case pb::ARRAY_BOOL:
+                return init_array_from_pb_impl<bool>(node, col_type);
+            case pb::ARRAY_INT64:
+                return init_array_from_pb_impl<int64_t>(node, col_type);
+            case pb::ARRAY_UINT64:
+                return init_array_from_pb_impl<uint64_t>(node, col_type);
+            case pb::ARRAY_FLOAT:
+                return init_array_from_pb_impl<float>(node, col_type);
+            case pb::ARRAY_DOUBLE:
+                return init_array_from_pb_impl<double>(node, col_type);
+            case pb::ARRAY_STRING:
+                return init_array_from_pb_impl<std::string>(node, col_type);
+            default:
+                DB_FATAL("unsupported array type: %s", pb::PrimitiveType_Name(col_type).c_str());
+                return -1;
+        }
+    }
+
+    void add_array_values(pb::ExprNode* pb_node) {
+        switch (_col_type) {
+            case pb::ARRAY_BOOL:
+                add_array_values_impl<bool>(pb_node);
+                break;
+            case pb::ARRAY_INT64:
+                add_array_values_impl<int64_t>(pb_node);
+                break;
+            case pb::ARRAY_UINT64:
+                add_array_values_impl<uint64_t>(pb_node);
+                break;
+            case pb::ARRAY_FLOAT:
+                add_array_values_impl<float>(pb_node);
+                break;
+            case pb::ARRAY_DOUBLE:
+                add_array_values_impl<double>(pb_node);
+                break;
+            case pb::ARRAY_STRING:
+                add_array_values_impl<std::string>(pb_node);
+                break;
+            default:
+                DB_FATAL("array type not support: %s", pb::PrimitiveType_Name(_col_type).c_str());
+                break;
         }
     }
 

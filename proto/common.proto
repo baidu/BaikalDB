@@ -69,6 +69,12 @@ enum PrimitiveType {
     TDIGEST = 22;
     JSON = 23;
     MAXVALUE_TYPE = 24; //用做分区表less than MAXVALUE，后续增加类型不要改变这个tag
+    ARRAY_BOOL = 25;
+    ARRAY_INT64 = 26;
+    ARRAY_UINT64 = 27;
+    ARRAY_FLOAT = 28;
+    ARRAY_DOUBLE = 29;
+    ARRAY_STRING = 30;
 };
 
 enum SchemaType {
@@ -125,6 +131,7 @@ message SchemaConf {
     optional bool cold_use_column_only      = 24; // 是否冷数据只使用列存
     optional bool force_column_storage      = 25; // 是否强制使用列存
     optional bool column_only_read_base     = 26; // 列存只读base文件，可以避免merge on read
+    optional bool enable_compute_storage_decoupled = 27; // 计算存储解耦模式
 };
 
 enum Engine {
@@ -199,6 +206,8 @@ message CompactionFileInfo {
     required string file_path = 1;
     optional uint64 file_size = 2;
     optional uint64 file_mtime = 3;
+    optional bytes smallest_key = 4;
+    optional bytes largest_key = 5;
 };
 
 message MysqlInfo {

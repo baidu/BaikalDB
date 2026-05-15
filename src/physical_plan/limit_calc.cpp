@@ -16,6 +16,7 @@
 #include "join_node.h"
 #include "filter_node.h"
 #include "agg_node.h"
+#include "dual_scan_node.h"
 
 namespace baikaldb {
 int LimitCalc::analyze(QueryContext* ctx) {
@@ -54,6 +55,13 @@ void LimitCalc::_analyze_limit(QueryContext* ctx, ExecNode* node, int64_t limit)
             } else {
                 return;
             }
+        case pb::DUAL_SCAN_NODE: {
+            DualScanNode* dual = static_cast<DualScanNode*>(node);
+            if (dual->sub_query_node() != nullptr) {
+                _analyze_limit(dual->sub_query_ctx(), dual->sub_query_node(), limit);
+            }
+            return;
+        }
         case pb::HAVING_FILTER_NODE: 
         case pb::SORT_NODE:
         case pb::AGG_NODE:

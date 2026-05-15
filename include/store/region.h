@@ -94,7 +94,6 @@ DECLARE_int64(disable_write_wait_timeout_us);
 DECLARE_int32(prepare_slow_down_wait);
 DECLARE_int64(binlog_warn_timeout_minute);
 extern void print_metadata_info(const rocksdb::LiveFileMetaData& metadata);
-extern int copy_file(const std::string& local_file, const std::string& user_define_path, std::string& external_file, uint64_t size);
 extern void print_external_info(const rocksdb::ExternalSstFileInfo& info);
 extern std::string make_make_relative_path_without_filename(const std::string& prefix, int64_t table_id, int64_t partition_id);
 
@@ -1338,8 +1337,6 @@ public:
                         std::map<int64_t, std::vector<std::string> > new_index_ext_paths_mapping);
     void do_cold_index_ddl_work(const pb::OlapRegionInfo& olap_info);
     int doing_cold_data_rollup(int64_t index_id);
-    // int copy_files(const std::vector<rocksdb::LiveFileMetaData>& sst_files, std::vector<std::string>& external_files);
-    // int copy_file(const std::string& local_file, std::string& external_file);
     int get_cold_sst(std::set<std::string>& sst_relative_filename);
     int get_cold_sst(std::set<std::string>& sst_relative_filename, std::set<int64_t>& index_ids);
     int ingest_cold_sst(const std::vector<std::string>& external_files);
@@ -1637,7 +1634,24 @@ private:
         const pb::ExchangeSenderNode& pb_exchange_sender_node, const bool is_merge, const int64_t region_id,
         const ::google::protobuf::RepeatedPtrField<pb::RegionInfo>& region_infos);
 
-    bool need_decode_ttl_field() const { return _ttl_field_type >= TTLFieldType::T_FIELD_KEY; }
+    int write_raft_index(int64_t region_id, int64_t raft_index) {
+        MutTableKey apply_index_key;
+        apply_index_key.append_i64(region_id).append_i64(0);
+        MutTableKey apply_index_value;
+        apply_index_value.append_i64(raft_index);
+        rocksdb::WriteOptions write_options;
+        if (_rocksdb == nullptr) {
+            return -1;
+        }
+        auto status = _rocksdb->put(write_options, _data_cf,
+            apply_index_key.data(), apply_index_value.data());
+        if (!status.ok()) {
+            DB_FATAL("write raft index failed, region_id: %ld, raft_index: %ld", region_id, raft_index);
+            return -1;
+        }
+
+        return 0;
+    }
 
 private:
     static constexpr int KEY_PREFIX_LENGTH = sizeof(int64_t) * 2;
@@ -1792,7 +1806,7 @@ private:
     std::unique_ptr<ColumnSnapshotClosure> _snapshot_closure = nullptr; // 使用
 
     // ttl 相关
-    enum class TTLFieldType {
+    enum class TTLFieldType : int32_t {
         // 请勿更改顺序，部分判断依赖于大小比较
         T_NON_TTL = 0,          // region 没有ttl
         T_NORMAL_TTL = 1,       // 常规ttl，时间戳在value前缀里，为过期时间
@@ -1802,20 +1816,21 @@ private:
         T_FIELD_GUI_VALUE = 5,  // 指定字段ttl, region是全局唯一索引，时间戳在pk_fields内，在value内
     };
 
-    bool is_field_ttl() const {
-        return _ttl_field_type > TTLFieldType::T_NORMAL_TTL;
+    bool use_field_ttl() const {
+        return _ttl_type > TTLFieldType::T_NORMAL_TTL;
     }
 
     bool use_normal_ttl() const {
-        return _ttl_field_type == TTLFieldType::T_NORMAL_TTL;
+        return _ttl_type == TTLFieldType::T_NORMAL_TTL;
     }
 
     bool use_ttl() const {
-        return _ttl_field_type > TTLFieldType::T_NON_TTL;
+        return _ttl_type > TTLFieldType::T_NON_TTL;
     }
 
-    TTLFieldType                _ttl_field_type = TTLFieldType::T_NON_TTL;
-    int64_t                     _online_ttl_base_expire_time_us = 0; // 存量数据过期时间，仅online TTL的表使用
+    TTLFieldType                _ttl_type = TTLFieldType::T_NON_TTL;
+    // 存量数据过期时间，仅online TTL的表使用,
+    int64_t                     _online_ttl_base_expire_time_us = 0;
     int64_t                     _ttl_duration_s;
     std::map<int, FieldInfo*>   _decode_ttl_field_map; // field ttl时只有一个ttl字段，其他情况下为空
     std::shared_ptr<FieldInfo>  _ttl_field = nullptr;

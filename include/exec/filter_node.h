@@ -101,15 +101,6 @@ public:
         }
         _raw_filter_node.SerializeToString(&_filter_node);
     }
-    void modifiy_pruned_conjuncts_by_index_learner(std::vector<ExprNode*>& filter_condition) {
-        _pruned_conjuncts_learner.clear();
-        _pruned_conjuncts_learner.swap(filter_condition);
-        if (!_pruned_conjuncts_learner.empty()) {
-            for (auto expr : _pruned_conjuncts_learner) {
-                ExprNode::create_pb_expr(_raw_filter_node.add_conjuncts_learner(), expr);
-            }
-        }
-    }
     virtual int show_explain(QueryContext* ctx, std::vector<std::map<std::string, std::string>>& output, int& next_id, int display_id);
 
     bool has_huge_in_condition();
@@ -135,7 +126,6 @@ private:
 private:
     std::vector<ExprNode*> _conjuncts;
     std::vector<ExprNode*> _pruned_conjuncts;
-    std::vector<ExprNode*> _pruned_conjuncts_learner; // learner集群使用
     RowBatch _child_row_batch;
     size_t  _child_row_idx = 0;
     bool    _child_eos = false;

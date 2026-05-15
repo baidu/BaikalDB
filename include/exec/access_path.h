@@ -60,8 +60,6 @@ enum IndexHint {
         }
     }
 
-    bool need_add_to_learner_paths();
-    bool need_select_learner_index();
     
     void calc_row_expr_range(std::vector<int32_t>& range_fields, ExprNode* expr, bool in_open,
             std::vector<ExprValue>& values, MutTableKey& key, size_t field_idx);

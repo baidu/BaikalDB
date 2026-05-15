@@ -28,6 +28,7 @@
 #include <re2/re2.h>
 #include <boost/algorithm/string.hpp>
 #include <boost/regex.hpp>
+#include <faiss/utils/distances.h>
 
 namespace baikaldb {
 #ifdef BAIKALDB_REVISION
@@ -321,7 +322,11 @@ ExprValue length(const std::vector<ExprValue>& input) {
         return ExprValue::Null();
     }
     ExprValue tmp(pb::UINT32);
-    tmp._u.uint32_val = input[0].get_string().size();
+    if (input[0].is_array()) {
+        tmp._u.uint32_val = input[0].size();
+    } else {
+        tmp._u.uint32_val = input[0].get_string().size();
+    }
     return tmp;
 }
 
@@ -3405,6 +3410,144 @@ ExprValue soundex(const std::vector<ExprValue>& input) {
     res.str_val = code;
     return res;
 }
+
+ExprValue element_at(const std::vector<ExprValue>& input) {
+    INPUT_CHECK_NULL;
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+    if (!input[0].is_array()) {
+        return ExprValue::Null();
+    }
+    return input[0].get_array_element(input[1].get_numberic<int64_t>() - 1);
+}
+
+bool array_contain_opt(const std::vector<ExprValue>& input, ArrayContainOpt opt) {
+    ExprValue values_array = input[1];
+    values_array.cast_to(input[0].type);
+    switch (input[0].type) {
+        case pb::ARRAY_BOOL:
+            return static_cast<ArrayValue<bool>*>(input[0]._u.array_ptr)->contain(static_cast<ArrayValue<bool>*>(values_array._u.array_ptr), opt);
+        case pb::ARRAY_INT64:
+            return static_cast<ArrayValue<int64_t>*>(input[0]._u.array_ptr)->contain(static_cast<ArrayValue<int64_t>*>(values_array._u.array_ptr), opt);
+        case pb::ARRAY_UINT64:
+            return static_cast<ArrayValue<uint64_t>*>(input[0]._u.array_ptr)->contain(static_cast<ArrayValue<uint64_t>*>(values_array._u.array_ptr), opt);
+        case pb::ARRAY_FLOAT:
+            return static_cast<ArrayValue<float>*>(input[0]._u.array_ptr)->contain(static_cast<ArrayValue<float>*>(values_array._u.array_ptr), opt);
+        case pb::ARRAY_DOUBLE:
+            return static_cast<ArrayValue<double>*>(input[0]._u.array_ptr)->contain(static_cast<ArrayValue<double>*>(values_array._u.array_ptr), opt);
+        case pb::ARRAY_STRING:
+            return static_cast<ArrayValue<std::string>*>(input[0]._u.array_ptr)->contain(static_cast<ArrayValue<std::string>*>(values_array._u.array_ptr), opt);
+        default:
+            break;
+    }
+    return false;
+} 
+
+ExprValue contain(const std::vector<ExprValue>& input) {
+    INPUT_CHECK_NULL;
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+    if (!input[0].is_array()) {
+        return ExprValue::Null();
+    }
+    ExprValue res(pb::BOOL);
+    res._u.bool_val = array_contain_opt(input, ArrayContainOpt::ContainAll);
+    return res;
+}
+
+ExprValue contain_any(const std::vector<ExprValue>& input) {
+    INPUT_CHECK_NULL;
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+    if (!input[0].is_array()) {
+        return ExprValue::Null();
+    }
+    ExprValue res(pb::BOOL);
+    res._u.bool_val = array_contain_opt(input, ArrayContainOpt::ContainAny);
+    return res;
+}
+
+ExprValue contain_all(const std::vector<ExprValue>& input) {
+    INPUT_CHECK_NULL;
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+    if (!input[0].is_array()) {
+        return ExprValue::Null();
+    }
+    ExprValue res(pb::BOOL);
+    res._u.bool_val = array_contain_opt(input, ArrayContainOpt::ContainAll);
+    return res; 
+}
+
+// 余弦相似度, 即归一化后的向量内积
+ExprValue cosine_similarity(const std::vector<ExprValue>& input) {
+    INPUT_CHECK_NULL;
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+    ExprValue res(pb::FLOAT);
+    ArrayValue<float>* i1_vec = input[0].get_array<float>();
+    ArrayValue<float>* i2_vec = input[1].get_array<float>();
+    if (i1_vec == nullptr || i2_vec == nullptr || i1_vec->size() != i2_vec->size()) {
+        return ExprValue::Null();
+    }
+    // 计算内积
+    float dot_product = faiss::fvec_inner_product(
+        i1_vec->data.data(), 
+        i2_vec->data.data(), 
+        i1_vec->size()
+    );
+
+    // 计算两个向量的L2范数平方
+    float norm1_sq = faiss::fvec_norm_L2sqr(i1_vec->data.data(), i1_vec->size());
+    float norm2_sq = faiss::fvec_norm_L2sqr(i2_vec->data.data(), i2_vec->size());
+    float norm_sq = norm1_sq * norm2_sq;
+    // 避免除以零
+    if (norm_sq > 0) {
+        // 余弦相似度 = (x·y) / (|x||y|) = (x·y) / sqrt(|x|²|y|²)
+        res._u.float_val = dot_product / sqrtf(norm_sq);
+        return res;
+    }
+    return ExprValue::Null();
+}
+
+// IP (Inner Product) 向量内积，定义为：IP(x, y) = x · y = Σ(x_i * y_i)
+ExprValue inner_product(const std::vector<ExprValue>& input) {
+    INPUT_CHECK_NULL;
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+    ExprValue res(pb::FLOAT);
+    ArrayValue<float>* i1_vec = input[0].get_array<float>();
+    ArrayValue<float>* i2_vec = input[1].get_array<float>();
+    if (i1_vec == nullptr || i2_vec == nullptr || i1_vec->size() != i2_vec->size()) {
+        return ExprValue::Null();
+    }
+    res._u.float_val = faiss::fvec_inner_product(i1_vec->data.data(), i2_vec->data.data(), i1_vec->size());
+    return res;
+}
+
+// 平方欧几里得距离
+ExprValue l2_distance(const std::vector<ExprValue>& input) {
+    INPUT_CHECK_NULL;
+    if (input.size() != 2) {
+        return ExprValue::Null();
+    }
+    ExprValue res(pb::FLOAT);
+    ArrayValue<float>* i1_vec = input[0].get_array<float>();
+    ArrayValue<float>* i2_vec = input[1].get_array<float>();
+
+    if (i1_vec == nullptr || i2_vec == nullptr || i1_vec->size() != i2_vec->size()) {
+        return ExprValue::Null();
+    }
+    res._u.float_val = faiss::fvec_L2sqr(i1_vec->data.data(), i2_vec->data.data(), i1_vec->size());
+    return res;
+}
+
 
 // to_sql
 #define TO_SQL_FUNC_DEFINE(FUNC_NAME)                               \

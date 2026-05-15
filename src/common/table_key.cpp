@@ -27,8 +27,19 @@ int TableKey::extract_index(IndexInfo& index, TableRecord* record, int& pos) {
     return record->decode_key(index, *this, pos);
 }
 
-std::string TableKey::decode_start_key_string(pb::PrimitiveType field_type, int& pos) const {
+std::string TableKey::decode_start_key_string(pb::PrimitiveType field_type, int& pos, bool nullable) const {
     std::string start_key_string;
+    if (nullable) {
+        if (pos + sizeof(int8_t) > size()) {
+            start_key_string = "nullflag byte decode fail";
+            return start_key_string;
+        } else {
+            if (check_is_null_and_move_forward(pos)) {
+                start_key_string += "NULL";
+                return start_key_string;
+            }
+        }
+    }
     switch (field_type) {
         case pb::INT8: {
             if (pos + sizeof(int8_t) > size()) {
@@ -149,7 +160,7 @@ std::string TableKey::decode_start_key_string(const IndexInfo& index) const {
     std::string start_key_string;
     int pos = 0;
     for (auto& field : index.fields) {
-        start_key_string += decode_start_key_string(field.type, pos);
+        start_key_string += decode_start_key_string(field.type, pos, index.storage_type == pb::ST_NULL_KEY);
         start_key_string += ",";
     }
     if (start_key_string.size() > 0) {
@@ -158,11 +169,11 @@ std::string TableKey::decode_start_key_string(const IndexInfo& index) const {
     return start_key_string;
 }
     
-std::string TableKey::decode_start_key_string(const std::vector<pb::PrimitiveType>& types, int32_t dimension) const {
+std::string TableKey::decode_start_key_string(const std::vector<pb::PrimitiveType>& types, int32_t dimension, bool nullable) const {
     std::string start_key_string;
     int pos = 0;
     for (auto& field : types) {
-        start_key_string += decode_start_key_string(field, pos);
+        start_key_string += decode_start_key_string(field, pos, nullable);
         start_key_string += ",";
         dimension--;
         if (dimension <= 0) {
@@ -180,7 +191,16 @@ int TableKey::decode_field(Message* message,
         const Reflection* reflection,
         const FieldDescriptor* field, 
         const FieldInfo& field_info,
-        int& pos) const {
+        int& pos, bool nullable) const {
+    if (nullable) {
+        if (pos + sizeof(uint8_t) > size()) {
+            DB_WARNING("nullbyte pos out of bound: %d %d %zu", field->number(), pos, size());
+            return -2;
+        }
+        if (check_is_null_and_move_forward(pos)) {
+            return 0;
+        }
+    }
     switch (field_info.type) {
         case pb::INT8: {
             if (pos + sizeof(int8_t) > size()) {
@@ -293,9 +313,18 @@ int TableKey::decode_field(Message* message,
     return 0;
 }
 
-
 //TODO: secondary key
-int TableKey::decode_field_for_chunk(ExprValue* value, const FieldInfo& field_info, int& pos) const {
+int TableKey::decode_field_for_chunk(ExprValue* value, const FieldInfo& field_info, int& pos, bool nullable) const {
+    if (nullable) {
+        if (pos + sizeof(int8_t) > size()) {
+            DB_WARNING("nullflag pos out of bound: %d %zu", pos, size());
+            return -2;
+        }
+        if (check_is_null_and_move_forward(pos)) {
+            value->set_is_null();
+            return 0;
+        }
+    }
     value->type = field_info.type;
     switch (field_info.type) {
         case pb::INT8: {
@@ -410,43 +439,96 @@ int TableKey::decode_field_for_chunk(ExprValue* value, const FieldInfo& field_in
 }
 
 //TODO: secondary key
-int TableKey::skip_field(const FieldInfo& field_info, int& pos) const {
+int TableKey::skip_field(const FieldInfo& field_info, int& pos, bool nullable) const {
+    if (nullable) {
+        if (pos + sizeof(int8_t) > size()) {
+            DB_WARNING("nullflag pos out of bound: %d %zu", pos, size());
+            return -2;
+        }
+        if (true == check_is_null_and_move_forward(pos)) {
+            return 0;
+        }
+    }
     switch (field_info.type) {
         case pb::INT8: {
+            if (pos + sizeof(int8_t) > size()) {
+                DB_WARNING("int8_t pos out of bound: %d %zu", pos, size());
+                return -2;
+            }
             pos += sizeof(int8_t);
         } break;
         case pb::INT16: {
+            if (pos + sizeof(int16_t) > size()) {
+                DB_WARNING("int16_t pos out of bound: %d %zu", pos, size());
+                return -2;
+            }
             pos += sizeof(int16_t);
         } break;
         case pb::TIME:
         case pb::INT32: {
+            if (pos + sizeof(int32_t) > size()) {
+                DB_WARNING("int32_t pos out of bound: %d %zu", pos, size());
+                return -2;
+            }
             pos += sizeof(int32_t);
         } break;
         case pb::INT64: {
+            if (pos + sizeof(int64_t) > size()) {
+                DB_WARNING("int64_t pos out of bound: %d %zu", pos, size());
+                return -2;
+            }
             pos += sizeof(int64_t);
         } break;
         case pb::UINT8: {
+            if (pos + sizeof(uint8_t) > size()) {
+                DB_WARNING("uint8_t pos out of bound: %d %zu", pos, size());
+                return -2;
+            }
             pos += sizeof(uint8_t);
         } break;
         case pb::UINT16: {
+            if (pos + sizeof(uint16_t) > size()) {
+                DB_WARNING("uint16_t pos out of bound: %d %zu", pos, size());
+                return -2;
+            }
             pos += sizeof(uint16_t);
         } break;
         case pb::TIMESTAMP:
         case pb::DATE:
         case pb::UINT32: {
+            if (pos + sizeof(uint32_t) > size()) {
+                DB_WARNING("uint32_t pos out of bound: %d %zu", pos, size());
+                return -2;
+            }
             pos += sizeof(uint32_t);
         } break;
         case pb::DATETIME:
         case pb::UINT64: {
+            if (pos + sizeof(uint64_t) > size()) {
+                DB_WARNING("uint64_t pos out of bound: %d %zu", pos, size());
+                return -2;
+            }
             pos += sizeof(uint64_t);
         } break;
         case pb::FLOAT: {
+            if (pos + sizeof(float) > size()) {
+                DB_WARNING("float pos out of bound: %d %zu", pos, size());
+                return -2;
+            }
             pos += sizeof(float);
         } break;
         case pb::DOUBLE: {
+            if (pos + sizeof(double) > size()) {
+                DB_WARNING("double pos out of bound: %d %zu", pos, size());
+                return -2;
+            }
             pos += sizeof(double);
         } break;
         case pb::BOOL: {
+            if (pos + sizeof(uint8_t) > size()) {
+                DB_WARNING("uint8_t pos out of bound: %d %zu", pos, size());
+                return -2;
+            }
             pos += sizeof(uint8_t);
         } break;
         case pb::STRING: {

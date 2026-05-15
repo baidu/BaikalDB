@@ -76,6 +76,7 @@ public:
             int64_t index_id,
             int64_t table_id);
     int restore_index(const pb::RegionInfo& region_info); // 恢复增量
+    static int validate_vector_index_params(pb::IndexInfo* index, std::string& error_info);
     int write_to_file(const std::string& snapshot_path, std::vector<std::string>& faiss_name_vec) {
         if (_faiss_index == nullptr) {
             DB_WARNING("_faiss_index is nullptr");
@@ -169,12 +170,12 @@ public:
             const std::string& snapshot_path, const std::string& file_name);
     int insert_vector(
             SmartTransaction& txn,
-            const std::string& word,
+            std::vector<float>& word,
             const std::string& pk,
             SmartRecord record);
     int delete_vector(
             SmartTransaction& txn,
-            const std::string& word,
+            std::vector<float>& word,
             const std::string& pk,
             SmartRecord record,
             pb::IndexState index_status);
@@ -192,7 +193,7 @@ public:
             std::vector<ExprNode*>& pre_filter_exprs);
     int add_to_faiss(
             SmartFaissIndex faiss_index,
-            const std::string& word, 
+            std::vector<float>& word, 
             int64_t cache_idx,
             SmartRecord record,
             bool enable_train);

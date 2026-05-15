@@ -197,13 +197,7 @@ private:
 };
 
 struct ScanIndexInfo {
-    enum IndexUseFor {
-        U_INIT = 0,
-        U_GLOBAL_LEARNER, //
-        U_LOCAL_LEARNER
-    };
     bool covering_index = false;
-    IndexUseFor use_for = U_INIT;
     int64_t router_index_id = 0;
     int64_t index_id = 0;
     pb::PossibleIndex* router_index = nullptr;
@@ -277,27 +271,13 @@ public:
         return &_scan_indexs[0];
     }
 
-    ScanIndexInfo* backup_scan_index() {
-        if (_scan_indexs.empty()) {
-            return nullptr;
-        }
-        for (auto& scan_index_info : _scan_indexs) {
-            if (scan_index_info.use_for == ScanIndexInfo::U_GLOBAL_LEARNER) {
-                return &scan_index_info;
-            }
-        }
-        return nullptr;
-    }
-
-    void serialize_index_and_set_router_index(const pb::PossibleIndex& pos_index, pb::PossibleIndex* router_index, bool covering_index,
-                ScanIndexInfo::IndexUseFor use_for = ScanIndexInfo::U_INIT) {
+    void serialize_index_and_set_router_index(const pb::PossibleIndex& pos_index, pb::PossibleIndex* router_index, bool covering_index) {
         ScanIndexInfo index;
         pos_index.SerializeToString(&index.raw_index);
         index.covering_index = covering_index;
         index.router_index_id = router_index->index_id();
         index.router_index = router_index;
         index.index_id = pos_index.index_id();
-        index.use_for = use_for;
         _scan_indexs.emplace_back(std::move(index));
         bool has_index = false;
         if (pos_index.has_sort_index()) {
@@ -328,10 +308,8 @@ public:
     void clear_possible_indexes() {
         _main_path.clear();
         _join_path.clear();
-        _learner_path.clear();
         _scan_indexs.clear();
         _pb_node.mutable_derive_node()->mutable_scan_node()->clear_indexes();
-        _pb_node.mutable_derive_node()->mutable_scan_node()->clear_learner_index();
         clear_merge_index_info();
     }
     bool need_copy(MemRow* row, std::vector<ExprNode*>& conjuncts) {
@@ -362,9 +340,6 @@ public:
             //disable之后不用于主集群选索引
             _main_path.add_access_path(access_path);
         }
-        if (access_path->need_add_to_learner_paths()) {
-            _learner_path.add_access_path(access_path);
-        }
     }
 
     void add_expr_partition_pair(const std::string& expr_str, int64_t partition_id) {
@@ -385,34 +360,7 @@ public:
 
     int create_fulltext_index_tree(FulltextInfoNode* node, pb::FulltextIndex* root);
     int create_fulltext_index_tree();
-    bool learner_use_diff_index() const {
-        return _learner_use_diff_index;
-    }
 
-    void set_index_useage_and_lock(bool use_global_backup) {
-        // 只有在存在global backup的时候才加锁
-        for (auto& scan_index_info : _scan_indexs) {
-            if (scan_index_info.use_for == ScanIndexInfo::U_GLOBAL_LEARNER) {
-                _current_index_mutex.lock();
-                _current_global_backup = use_global_backup;
-                break;
-            }
-        }
-    }
-
-    void current_index_unlock() {
-        for (auto& scan_index_info : _scan_indexs) {
-            if (scan_index_info.use_for == ScanIndexInfo::U_GLOBAL_LEARNER) {
-                _current_index_mutex.unlock();
-                break;
-            }
-        }
-    }
-
-    bool current_use_global_backup() const {
-        return _current_global_backup;
-    }
-    
     bool is_rocksdb_scan_node() const {
         return _is_rocksdb_scan_node;
     }
@@ -532,12 +480,10 @@ protected:
     int32_t _tuple_id = 0;
     int64_t _table_id = -1;
     AccessPathMgr _main_path;    //主集群索引选择
-    AccessPathMgr _learner_path; //learner集群索引选择
     AccessPathMgr _join_path;    //join on条件下推的索引选择
     std::map<std::string, std::unordered_set<int64_t>> _expr_partition_map;
     int64_t _partition_field_id = -1;
     pb::TupleDescriptor* _tuple_desc = nullptr;
-    bool _learner_use_diff_index = false;
     bool _is_covering_index = true; // 只有store会用
     bool _has_index = false;
     bool _is_rocksdb_scan_node = false;
@@ -552,8 +498,6 @@ protected:
     int64_t _select_index_for_join = -1;  // join on条件推到scannode,命中的索引
 
     std::vector<ScanIndexInfo> _scan_indexs;
-    bthread::Mutex _current_index_mutex;
-    bool _current_global_backup = false;
     GetMode _get_mode = GET_ONLY; // set to GET_LOCK, when "select ... for update"
     uint64_t _watt_stats_version = 0;
 

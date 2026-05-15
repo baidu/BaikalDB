@@ -310,6 +310,7 @@ protected:
     int create_alias_node(const parser::ColumnName* term, pb::Expr& expr, bool can_agg);
 
     //TODO: primitive len for STRING, BOOL and NULL
+    void parse_array_literal(pb::ExprNode* node, const parser::LiteralExpr* literal);
     int create_term_literal_node(const parser::LiteralExpr* term, pb::Expr& expr, const CreateExprOptions& options);
     // (a,b)
     int create_row_expr_node(const parser::RowExpr* term, pb::Expr& expr, const CreateExprOptions& options);

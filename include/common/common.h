@@ -1384,29 +1384,64 @@ struct RocksdbVars {
     // 统计未提交的binlog最大时间
     bvar::Maxer<int64_t>     binlog_not_commit_max_cost;
     bvar::Window<bvar::Maxer<int64_t>> binlog_not_commit_max_cost_minute;
+
+    // raft 内部读取raft_log 次数统计
+    bvar::Adder<int64_t>     raft_log_internal_get_entry_times_count;
+    bvar::PerSecond<bvar::Adder<int64_t>> raft_log_internal_get_entry_times_qps;
+
+    // baikal 读取raft log次数统计
     // 对于vector memtable, 只要读取就需要排序，因此只记录读取次数而非扫描量
-    bvar::Adder<int64_t>     raft_log_scan_times_count;
-    bvar::PerSecond<bvar::Adder<int64_t>> raft_log_scan_count_qps;
+    bvar::Adder<int64_t>     raft_log_baikal_scan_times_count;
+    bvar::PerSecond<bvar::Adder<int64_t>> raft_log_baikal_scan_count_qps;
+
+    // 下列用于统计各种读取raftlog的操作
+    bvar::Adder<int64_t>     raft_log_read_log_entry_count;
+    bvar::PerSecond<bvar::Adder<int64_t>> raft_log_read_log_entry_qps;
+
+    bvar::Adder<int64_t>     raft_log_raftLogReader_count;
+    bvar::PerSecond<bvar::Adder<int64_t>> raft_log_raftLogReader_qps;
+
+    bvar::Adder<int64_t>     raft_log_print_log_entry_count;
+    bvar::PerSecond<bvar::Adder<int64_t>> raft_log_print_log_entry_qps;
+
+    bvar::Adder<int64_t>     raft_log_rollup_region_count;
+    bvar::PerSecond<bvar::Adder<int64_t>> raft_log_rollup_region_qps;
+
+    bvar::Adder<int64_t>     raft_log_get_log_for_split_count;
+    bvar::PerSecond<bvar::Adder<int64_t>> raft_log_get_log_for_split_qps;
+
 
 private:
     RocksdbVars(): rocksdb_put_time_cost_latency("rocksdb_put_time_cost_latency", &rocksdb_put_time, -1),
-                   rocksdb_put_time_cost_qps("rocksdb_put_time_cost_qps", &rocksdb_put_count),
-                   rocksdb_get_time_cost_latency("rocksdb_get_time_cost_latency", &rocksdb_get_time, -1),
-                   rocksdb_get_time_cost_qps("rocksdb_get_time_cost_qps", &rocksdb_get_count),
-                   rocksdb_multiget_time_cost_latency("rocksdb_multiget_time_cost_latency", &rocksdb_multiget_time, -1),
-                   rocksdb_multiget_time_cost_qps("rocksdb_multiget_time_cost_qps", &rocksdb_multiget_count),
-                   rocksdb_scan_time_cost_latency("rocksdb_scan_time_cost_latency", &rocksdb_scan_time, -1),
-                   rocksdb_scan_time_cost_qps("rocksdb_scan_time_cost_qps", &rocksdb_scan_count),
-                   rocksdb_seek_time_cost_latency("rocksdb_seek_time_cost_latency", &rocksdb_seek_time, -1),
-                   rocksdb_seek_time_cost_qps("rocksdb_seek_time_cost_qps", &rocksdb_seek_count),
-                   qos_fetch_tokens_wait_time_cost("qos_fetch_tokens_wait_time_cost"),
-                   qos_fetch_tokens_wait_count("qos_fetch_tokens_wait_count"),
-                   qos_fetch_tokens_qps("qos_fetch_tokens_qps", &qos_fetch_tokens_count),
-                   qos_token_waste_qps("qos_token_waste_qps", &qos_token_waste_count),
-                   binlog_not_commit_max_cost_minute("binlog_not_commit_max_cost_minute", &binlog_not_commit_max_cost, 60),
-                   raft_log_scan_times_count("raft_log_scan_times_count"),
-                   raft_log_scan_count_qps("raft_log_scan_count_qps", &raft_log_scan_times_count, 60) {
-                   }
+                    rocksdb_put_time_cost_qps("rocksdb_put_time_cost_qps", &rocksdb_put_count),
+                    rocksdb_get_time_cost_latency("rocksdb_get_time_cost_latency", &rocksdb_get_time, -1),
+                    rocksdb_get_time_cost_qps("rocksdb_get_time_cost_qps", &rocksdb_get_count),
+                    rocksdb_multiget_time_cost_latency("rocksdb_multiget_time_cost_latency", &rocksdb_multiget_time, -1),
+                    rocksdb_multiget_time_cost_qps("rocksdb_multiget_time_cost_qps", &rocksdb_multiget_count),
+                    rocksdb_scan_time_cost_latency("rocksdb_scan_time_cost_latency", &rocksdb_scan_time, -1),
+                    rocksdb_scan_time_cost_qps("rocksdb_scan_time_cost_qps", &rocksdb_scan_count),
+                    rocksdb_seek_time_cost_latency("rocksdb_seek_time_cost_latency", &rocksdb_seek_time, -1),
+                    rocksdb_seek_time_cost_qps("rocksdb_seek_time_cost_qps", &rocksdb_seek_count),
+                    qos_fetch_tokens_wait_time_cost("qos_fetch_tokens_wait_time_cost"),
+                    qos_fetch_tokens_wait_count("qos_fetch_tokens_wait_count"),
+                    qos_fetch_tokens_qps("qos_fetch_tokens_qps", &qos_fetch_tokens_count),
+                    qos_token_waste_qps("qos_token_waste_qps", &qos_token_waste_count),
+                    binlog_not_commit_max_cost_minute("binlog_not_commit_max_cost_minute", &binlog_not_commit_max_cost, 60),
+                    raft_log_baikal_scan_times_count("raft_log_baikal_scan_times_count"),
+                    raft_log_baikal_scan_count_qps("raft_log_baikal_scan_count_qps", &raft_log_baikal_scan_times_count, 60),
+                    raft_log_internal_get_entry_times_count("raft_log_internal_get_entry_times_count"),
+                    raft_log_internal_get_entry_times_qps("raft_log_internal_get_entry_times_qps", &raft_log_internal_get_entry_times_count),
+                    raft_log_read_log_entry_count("raft_log_read_log_entry_count"),
+                    raft_log_read_log_entry_qps("raft_log_read_log_entry_qps", &raft_log_read_log_entry_count),
+                    raft_log_raftLogReader_count("raft_log_raftLogReader_count"),
+                    raft_log_raftLogReader_qps("raft_log_raftLogReader_qps", &raft_log_raftLogReader_count),
+                    raft_log_print_log_entry_count("raft_log_print_log_entry_count"),
+                    raft_log_print_log_entry_qps("raft_log_print_log_entry_qps", &raft_log_print_log_entry_count),
+                    raft_log_rollup_region_count("raft_log_rollup_region_count"),
+                    raft_log_rollup_region_qps("raft_log_rollup_region_qps", &raft_log_rollup_region_count),
+                    raft_log_get_log_for_split_count("raft_log_get_log_for_split_count"),
+                    raft_log_get_log_for_split_qps("raft_log_get_log_for_split_qps", &raft_log_get_log_for_split_count)
+        {}
 };
 
 template <typename T, typename Compare = std::less<T>>
@@ -1807,6 +1842,21 @@ private:
     iconv_t _cd;
 };
 
+template<typename T>
+bool set_diff(const std::set<T>& s1, const std::set<T>& s2) {
+    // typename std::set<T>::iterator it;
+    if (s1.size() != s2.size()) {
+        return true;
+    }
+
+    std::set<T> diff;
+    // 计算s1和s2的差集，并将结果保存到diff中
+    std::set_difference(s1.begin(), s1.end(), s2.begin(), s2.end(),
+                        std::inserter(diff, diff.begin()));
+    // 如果diff为空集，则说明s1和s2中的元素相同
+    return !diff.empty();
+}
+
 template <pb::Charset To, pb::Charset From, IconvOnError ErrMode = IconvOnError::ABORT>
 inline int iconv_convert(std::string& dst, const char* psrc, const size_t nsrc) {
     thread_local IconvConverter<To, From, ErrMode> iconv_converter;
@@ -1822,6 +1872,100 @@ extern int convert_charset(const pb::Charset& from_charset, const std::string& f
                            const pb::Charset& to_charset, std::string& to_str);
 
 extern bool is_valid_ip(const std::string& ip);
+
+std::string get_store_ip_port();
+
+// 合并file_system.h TODO
+class ExtFileReader {
+public:
+    virtual ~ExtFileReader() {}
+
+    virtual int64_t read(char* buf, uint32_t count, uint32_t offset, bool* eof) = 0;
+
+    virtual int64_t skip(uint32_t n, bool* eof) {
+        DB_FATAL("ExtFileReader::skip not implemented");
+        return -1;
+    }
+    // Close the descriptor of this file adaptor
+    virtual bool close() { return true; }
+
+    virtual std::string file_name() { return ""; }
+
+protected:
+
+    ExtFileReader() {}
+
+private:
+    DISALLOW_COPY_AND_ASSIGN(ExtFileReader);
+};
+
+class ExtFileWriter {
+public:
+    virtual ~ExtFileWriter() {}
+    // Return |data.size()| if successful, -1 otherwise.
+    virtual int64_t append(const char* buf, uint32_t count) = 0;
+
+    virtual int64_t tell() = 0;
+
+    // Sync data of the file to disk device
+    virtual bool sync() = 0;
+
+    // Close the descriptor of this file adaptor
+    virtual bool close() { return true; }
+
+    virtual std::string file_name() { return ""; }
+
+protected:
+
+    ExtFileWriter() {}
+
+private:
+    DISALLOW_COPY_AND_ASSIGN(ExtFileWriter);
+};
+
+class ExtFileSystem {
+public:
+    ExtFileSystem() {}
+    virtual ~ExtFileSystem() {}
+
+    virtual int init() = 0;
+    // cluster : 指定集群
+    // force   : 是否强制使用指定的cluster
+    virtual std::string make_full_name(const std::string& cluster, bool force, const std::string& user_define_path) = 0;
+    virtual int open_reader(const std::string& full_name, std::shared_ptr<ExtFileReader>* reader) = 0;
+    virtual int open_writer(const std::string& full_name, std::unique_ptr<ExtFileWriter>* writer) = 0;
+    virtual int link(const std::string& old_path, const std::string& new_path) = 0;
+
+    // Deletes the given path, whether it's a file or a directory. If it's a directory,
+    // it's perfectly happy to delete all of the directory's contents. Passing true to 
+    // recursive deletes subdirectories and their contents as well.
+    // Returns true if successful, false otherwise. It is considered successful
+    // to attempt to delete a file that does not exist.
+    virtual int delete_path(const std::string& full_name, bool recursive) = 0;
+
+    // 创建文件，需要支持递归创建路径上不存在的目录
+    virtual int create(const std::string& full_name) = 0;
+
+    // Creates a directory. If create_parent_directories is true, parent directories
+    // will be created if not exist, otherwise, the create operation will fail.
+    // Returns 'true' on successful creation, or if the directory already exists. 
+    virtual int create_directory(const std::string& full_name, 
+                              bool create_parent_directories) {
+        // create接口支持递归创建path中不存在的目录，暂时不使用create_directory
+        DB_FATAL("not support");
+        return -1;
+    }
+
+    // virtual int file_size(const std::string& path, int64_t* size) = 0; 
+
+    // Returns -1:failed; 0: not exists; 1: exists
+    virtual int path_exists(const std::string& full_name) = 0;
+
+    virtual int readdir(const std::string& full_name, std::set<std::string>& sub_files) = 0;
+
+private:
+    DISALLOW_COPY_AND_ASSIGN(ExtFileSystem);
+};
 
 } // namespace baikaldb
 

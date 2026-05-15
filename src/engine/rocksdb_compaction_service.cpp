@@ -1,8 +1,6 @@
-#include "rocksdb_compaction_service.h"
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
-#include "rocks_wrapper.h"
 #ifdef BAIDU_INTERNAL
 #include <base/files/file.h>
 #include <base/file_util.h>
@@ -12,6 +10,8 @@
 #include <butil/file_util.h>
 #include <butil/files/file_path.h>
 #endif
+#include "rocksdb_compaction_service.h"
+#include "rocks_wrapper.h"
 #include "store.h"
 
 namespace baikaldb {

@@ -1122,8 +1122,9 @@ public:
             if (iter != info->table_pk_types.end() && !iter->second.empty()) {
                 // 之前解析过表主键，则直接从双buffer获取表主键解析key即可
                 TableKey tableKey(start_key, true);
+                // tableid 必为主键, nullable 永远为 false
                 key = std::to_string(table_id) + "_" +
-                      tableKey.decode_start_key_string(iter->second, pk_prefix_dimension);
+                      tableKey.decode_start_key_string(iter->second, pk_prefix_dimension, false);
                 return true;
             }
         }
@@ -1162,7 +1163,7 @@ public:
             return false;
         }
         TableKey tableKey(start_key, true);
-        key = std::to_string(table_id) + "_" + tableKey.decode_start_key_string(pk_types, pk_prefix_dimension);
+        key = std::to_string(table_id) + "_" + tableKey.decode_start_key_string(pk_types, pk_prefix_dimension, false);
         auto call_func = [table_id, pk_types](TableSchedulingInfo& infos) -> int {
             infos.table_pk_types[table_id] = pk_types;
             return 1;
@@ -1735,7 +1736,8 @@ private:
 
     bool check_field_exist(const std::string& field_name,
                         int64_t table_id);
-    
+    pb::PrimitiveType get_field_type(const std::string &field_name,
+                        int64_t table_id);
     int check_index(const pb::IndexInfo& index_info_to_check,
                    const pb::SchemaInfo& schema_info, int64_t& index_id);
     static int check_gflag(const IdcInfo& idc, const std::string& gflag_name, const std::string& expected_value);

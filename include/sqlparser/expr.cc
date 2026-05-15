@@ -373,6 +373,9 @@ void LiteralExpr::to_stream(std::ostream& os) const {
         case LT_MAXVALUE:
             os << "MAXVALUE";
             break;
+        case LT_ARRAY:
+            os << array_to_string();
+            break;
         default:
             break;
     }
@@ -413,6 +416,9 @@ std::string LiteralExpr::to_string() const {
             break;
         case LT_MAXVALUE:
             os << "MAXVALUE";
+            break;
+        case LT_ARRAY:
+            os << array_to_string();
             break;
         default:
             break;

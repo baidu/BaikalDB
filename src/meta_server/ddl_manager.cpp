@@ -190,7 +190,7 @@ void DBManager::process_baikal_heartbeat(const pb::BaikalHeartBeatRequest* reque
         return;
     }
     TimeCost tc;
-    std::string address = butil::endpoint2str(cntl->remote_side()).c_str();
+    std::string address = request->baikal_status().address();
     if (!request->has_physical_room()) {
         DB_WARNING("!has_physical_room, addr:%s", address.c_str());
         // 非baikaldb心跳

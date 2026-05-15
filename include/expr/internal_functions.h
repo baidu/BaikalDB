@@ -211,6 +211,16 @@ ExprValue cast_to_unsigned(const std::vector<ExprValue>& inpt);
 ExprValue cast_to_string(const std::vector<ExprValue>& inpt);
 ExprValue cast_to_double(const std::vector<ExprValue>& inpt);
 int calc_week(const uint64_t dt, int32_t mode, bool is_yearweek, int& year, int& weeks);
+// array
+ExprValue element_at(const std::vector<ExprValue>& input);
+ExprValue contain(const std::vector<ExprValue>& input);
+ExprValue contain_any(const std::vector<ExprValue>& input);
+ExprValue contain_all(const std::vector<ExprValue>& input);
+
+// 向量相关
+ExprValue inner_product(const std::vector<ExprValue>& input);
+ExprValue l2_distance(const std::vector<ExprValue>& input);
+ExprValue cosine_similarity(const std::vector<ExprValue>& input);
 
 // to_sql
 // ~ - !

@@ -28,6 +28,8 @@
 #include "file_scan_node.h"
 
 namespace baikaldb {
+DEFINE_bool(index_prefer_eq_conditions, false, "When enabled, equality and IN predicates are given higher priority during index selection");
+
 int64_t AccessPathMgr::select_index_common() {
     std::multimap<uint32_t, int64_t> prefix_ratio_id_mapping;
     std::unordered_set<int32_t> primary_fields;
@@ -70,6 +72,12 @@ int64_t AccessPathMgr::select_index_common() {
             continue;
         }
         uint16_t prefix_ratio_round = field_count * 100 / info.fields.size();
+        if (FLAGS_index_prefer_eq_conditions || (_explain_hint != nullptr && _explain_hint->get_flag<ExplainHint::PREFER_EQ>())) {
+            if (!path->is_eq_or_in()) {
+                // 非等于条件算命中半个
+                prefix_ratio_round = (field_count * 100 - 50) / info.fields.size();
+            }
+        }
         uint16_t index_priority = 0;
         if (info.type == pb::I_PRIMARY || info.type == pb::I_ROLLUP) {
             index_priority = 300;
@@ -142,7 +150,6 @@ int ScanNode::init(const pb::PlanNode& node) {
         _engine = node.derive_node().scan_node().engine();
     }
     _main_path.init(_table_id);
-    _learner_path.init(_table_id);
     _join_path.init(_table_id);
     return 0;
 }
@@ -503,7 +510,7 @@ int64_t AccessPathMgr::pre_process_select_index() {
         if (outer_loop_iter->second->index_type != pb::I_PRIMARY && 
             outer_loop_iter->second->index_type != pb::I_UNIQ &&
             outer_loop_iter->second->index_type != pb::I_KEY &&
-            outer_loop_iter->second->index_type != pb::I_ROLLUP) {
+                        outer_loop_iter->second->index_type != pb::I_ROLLUP) {
             continue;
         }
 
@@ -661,42 +668,6 @@ int64_t ScanNode::select_index_in_baikaldb(const std::string& sample_sql) {
         }
         filter_condition.insert(filter_condition.end(), path->other_condition.begin(),
                 path->other_condition.end());
-        
-        _learner_use_diff_index = false;
-        int64_t learner_idx = 0;
-        if (path->need_select_learner_index() || _learner_path.has_disable_index()) {
-            _learner_path.reset();
-            learner_idx = _learner_path.select_index();
-        }
-        if (learner_idx != 0 && learner_idx != path->index_id) {
-            auto learner_path = _learner_path.path(learner_idx);
-            for (auto& expr : learner_path->index_other_condition) {
-                ExprNode::create_pb_expr(learner_path->pos_index.add_index_conjuncts(), expr);
-            }
-            if (learner_path->index_info_ptr->is_global) {
-                serialize_index_and_set_router_index(learner_path->pos_index, &learner_path->pos_index,
-                    learner_path->is_covering_index, ScanIndexInfo::U_GLOBAL_LEARNER);
-            } else {
-                // 如果主集群和backup选择的索引都非全局二级索引则使用learner
-                ScanIndexInfo::IndexUseFor backup_use_for = ScanIndexInfo::U_GLOBAL_LEARNER;
-                if (!path->index_info_ptr->is_global) {
-                    backup_use_for = ScanIndexInfo::U_LOCAL_LEARNER;
-                } 
-                serialize_index_and_set_router_index(learner_path->pos_index, &_main_path.path(_table_id)->pos_index,
-                    learner_path->is_covering_index, backup_use_for);
-            }
-            _learner_use_diff_index = true;
-            DB_WARNING("need_select_learner_index: %d, has_disable_index: %d, index_id: %ld, learner_idx: %ld, sample_sql: %s", 
-                path->need_select_learner_index(), _learner_path.has_disable_index(), 
-                path->index_id, learner_idx, sample_sql.c_str());
-            std::vector<ExprNode*> learner_condition;
-            learner_condition.insert(learner_condition.end(), learner_path->other_condition.begin(),
-                    learner_path->other_condition.end());
-            if (get_parent()->node_type() == pb::TABLE_FILTER_NODE ||
-                get_parent()->node_type() == pb::WHERE_FILTER_NODE) {
-                static_cast<FilterNode*>(get_parent())->modifiy_pruned_conjuncts_by_index_learner(learner_condition);
-            }
-        }
     }
     // modify filter conjuncts
     if (get_parent()->node_type() == pb::TABLE_FILTER_NODE ||
@@ -898,9 +869,6 @@ int ScanNode::create_fulltext_index_tree() {
 }
   
 bool ScanNode::need_index_merge() {
-    if (backup_scan_index() != nullptr) {
-        return false;
-    }
     if (_main_path.use_fulltext() || _main_path.use_cost()) {
         return false;
     }

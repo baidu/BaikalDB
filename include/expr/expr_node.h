@@ -88,6 +88,7 @@ public:
             case pb::TIMESTAMP_LITERAL:
             case pb::PLACE_HOLDER_LITERAL:
             case pb::MAXVALUE_LITERAL:
+            case pb::ARRAY_LITERAL:
                 return true;
             default:
                 return false;

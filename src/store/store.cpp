@@ -37,6 +37,7 @@
 #include "qos.h"
 #include "rocksdb_filesystem.h"
 #include "rocksdb/statistics.h"
+#include "region_compaction.h"
 
 namespace baikaldb {
 DECLARE_int64(store_heart_beat_interval_us);
@@ -153,12 +154,6 @@ int Store::init_before_listen(std::vector<std::int64_t>& init_region_ids) {
         DB_FATAL("init external filesystem failed");
         return -1;
     }
-
-    ret = SstExtLinker::get_instance()->init(ext_fs, FLAGS_db_path + "_cold");
-    if (ret < 0) {
-        DB_FATAL("init sst ext linker failed");
-        return -1;
-    }
 #endif
     // init rocksdb handler
     _rocksdb = RocksWrapper::get_instance();
@@ -170,7 +165,7 @@ int Store::init_before_listen(std::vector<std::int64_t>& init_region_ids) {
         DB_FATAL("create dir failed");
         return -1;
     }
-    int32_t res = _rocksdb->init(FLAGS_db_path);
+    int32_t res = _rocksdb->init(FLAGS_db_path, ext_fs);
     if (res != 0) {
         DB_FATAL("rocksdb init failed: code:%d", res);
         return -1;
@@ -179,7 +174,7 @@ int Store::init_before_listen(std::vector<std::int64_t>& init_region_ids) {
     _meta_writer->init(_rocksdb, _rocksdb->get_meta_info_handle());
     
     LogEntryReader* reader = LogEntryReader::get_instance();
-    reader->init(_rocksdb, _rocksdb->get_raft_log_handle());
+    reader->init(_rocksdb, _rocksdb->get_raft_log_handle(), _rocksdb->get_new_raft_log_handle());
 
     //系统重启之前有哪些reigon
     std::vector<pb::RegionInfo> region_infos;
@@ -341,6 +336,7 @@ int Store::init_after_listen(const std::vector<int64_t>& init_region_ids) {
         init_bth.run(init_call);
     }
     init_bth.join();
+    NewMyRaftLogStorage::set_first_log_idx_map_inited(true);
     DB_WARNING("init all region success init_region_time:%ld", step_time_cost.get_time());
     
     _split_check_bth.run([this]() {whether_split_thread();});
@@ -362,6 +358,7 @@ int Store::init_after_listen(const std::vector<int64_t>& init_region_ids) {
     _binlog_fake_bth.run([this]() {binlog_fake_thread();});
     _region_peer_delay_bth.run([this]() {check_region_peer_delay();});
     _compact_region_by_total_sst_delete_keys.run([this]() {compact_region_by_sst_delete_keys_thread();});
+    _remote_compaction_trigger_bth.run([this]() {remote_compaction_trigger_thread();});
     _has_prepared_tran = true;
     prepared_txns.clear();
     doing_snapshot_regions.clear();
@@ -1157,7 +1154,7 @@ void Store::query_region(google::protobuf::RpcController* controller,
         }
 
         std::map<std::string, SstExtLinker::ExtFileInfo> sst_ext_map;
-        SstExtLinker::get_instance()->sst_ext_map(sst_ext_map);
+        get_cold_sst_ext_linker()->sst_ext_map(sst_ext_map);
         std::map<int64_t, int64_t> hot_region_size_map;
         get_hot_region_size(hot_region_size_map);
 
@@ -1288,7 +1285,7 @@ void Store::query_region(google::protobuf::RpcController* controller,
     if (request->query_all_afs_file()) {
         auto extra_res = response->mutable_extra_res();
         std::map<std::string, SstExtLinker::ExtFileInfo> sst_ext_map;
-        SstExtLinker::get_instance()->sst_ext_map(sst_ext_map);
+        get_cold_sst_ext_linker()->sst_ext_map(sst_ext_map);
         for (const auto& pair : sst_ext_map) {
             std::string* full_name = extra_res->add_afs_full_names();
             *full_name = pair.second.full_name;
@@ -1905,6 +1902,7 @@ void Store::flush_memtable_thread() {
             if (!status.ok()) {
                 DB_WARNING("flush data to rocksdb fail, err_msg:%s", status.ToString().c_str());
             }
+            DB_WARNING("flush data to rocksdb");
         }
         //last_file_number发生变化，data cf有新的flush数据需要flush meta，gc wal
         if (force_flush || mata_count > FLAGS_rocks_cf_flush_remove_range_times || last_file_number != _rocksdb->flush_file_number()) {
@@ -1997,7 +1995,7 @@ void Store::cold_region_check() {
     }
 
     std::map<std::string, SstExtLinker::ExtFileInfo> sst_ext_map;
-    SstExtLinker::get_instance()->sst_ext_map(sst_ext_map);
+    get_cold_sst_ext_linker()->sst_ext_map(sst_ext_map);
     DB_WARNING("region cnt in sst: %ld, in store: %ld rocksdb sst cnt: %ld, ext sst cnt: %ld", 
             region_sst_map.size(), regions.size(), metadata.size(), sst_ext_map.size());
     for (SmartRegion region : regions) {
@@ -2107,6 +2105,7 @@ void Store::hot_region_check() {
     _rocksdb->get_db()->GetLiveFilesMetaData(&metadata);
     std::map<int64_t, int64_t> region_size_map;
     std::map<int64_t, EstimateLines> tmp_region_lines;
+    std::set<int64_t> region_ids_need_remove_files;
     for (const auto& md : metadata) {
         if (md.column_family_name == RocksWrapper::DATA_CF) {
             print_metadata_info(md);
@@ -2115,7 +2114,9 @@ void Store::hot_region_check() {
             TableKey smallestkey(md.smallestkey);
             TableKey largestkey(md.largestkey);
             int64_t smallest_region_id = smallestkey.extract_i64(0);
+            int64_t smallest_table_id  = smallestkey.extract_i64(sizeof(int64_t));
             int64_t largest_region_id  = largestkey.extract_i64(0);
+            int64_t largest_table_id   = largestkey.extract_i64(sizeof(int64_t));
             if (smallest_region_id != largest_region_id) {
                 region_size_map[smallest_region_id] += md.size;
                 region_size_map[largest_region_id]  += md.size;
@@ -2124,6 +2125,9 @@ void Store::hot_region_check() {
             }
 
             if (smallest_region_id == largest_region_id) {
+                if (smallest_table_id == 0 && largest_table_id == 0) {
+                    region_ids_need_remove_files.insert(smallest_region_id);
+                }
                 if (regions.count(smallest_region_id) <= 0) {
                     continue;
                 }
@@ -2161,6 +2165,26 @@ void Store::hot_region_check() {
             auto it = regions.find(iter.first);
             if (it != regions.end()) {
                 DB_WARNING("table_id: %ld region_id: %ld size: %ld too big", it->second->get_table_id(), iter.first, iter.second);
+            }
+        }
+    }
+
+    for (const auto& region_id : region_ids_need_remove_files) {
+        auto it = regions.find(region_id);
+        if (it != regions.end()) {
+            if (it->second->has_sst_data(nullptr, nullptr)) {
+                continue;
+            }
+            MutTableKey start_key;
+            MutTableKey end_key;
+            start_key.append_i64(region_id).append_i64(0);
+            end_key.append_i64(region_id).append_i64(0).append_u64(UINT64_MAX);
+            rocksdb::Slice start(start_key.data()), end(end_key.data());
+            auto s = rocksdb::DeleteFilesInRange(_rocksdb->get_db(), _rocksdb->get_data_handle(), &start, &end, true);
+            if (!s.ok()) {
+                DB_WARNING("delete region_id: %ld files range fail: %s", region_id, s.ToString().c_str());
+            } else {
+                DB_WARNING("delete region_id: %ld files range success", region_id);
             }
         }
     }
@@ -2875,6 +2899,25 @@ void Store::compact_region_by_sst_delete_keys_thread() {
         }
     }
     return;
+}
+
+void Store::remote_compaction_trigger_thread() {
+    while (!_shutdown) {
+        bthread_usleep_fast_shutdown(1000ULL * 1000 * 10, _shutdown);
+        std::vector<std::string> database_table;
+        std::set<int64_t> table_ids;
+        _factory->get_schema_conf_open("enable_compute_storage_decoupled", database_table, table_ids);
+        auto service = _rocksdb->get_remote_compaction_service();
+        if (service != nullptr) {
+            service->swap_dsc_table_ids(table_ids);
+        }
+        std::ostringstream oss;
+        for (const auto& t : database_table) {
+            oss << t << " ";
+        }
+        DB_WARNING("enable_compute_storage_decoupled: %s", oss.str().c_str());
+        RegionCompactFiles::get_instance()->compaction_files();
+    }
 }
 
 void Store::start_db_statistics() {

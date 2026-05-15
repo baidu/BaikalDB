@@ -613,9 +613,10 @@ void Joiner::encode_hash_key(MemRow* row,
         ExprValue value = row->get_value(static_cast<SlotRef*>(slot_ref_expr)->tuple_id(), 
                                          static_cast<SlotRef*>(slot_ref_expr)->slot_id());
         if (idx < _equal_slot_cast_types.size()) {
-            key.append_value(value.cast_to(_equal_slot_cast_types[idx]));
+            // join key 不可能是null
+            key.append_value(value.cast_to(_equal_slot_cast_types[idx]), false);
         } else {
-            key.append_value(value.cast_to(pb::STRING)); 
+            key.append_value(value.cast_to(pb::STRING), false);
         }
         ++idx;
     }

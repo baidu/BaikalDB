@@ -534,7 +534,14 @@ std::pair<int32_t, int32_t> primitive_to_other_type(pb::PrimitiveType type) {
         { pb::BOOL,         {FieldDescriptorProto::TYPE_BOOL,     arrow::Type::type::BOOL}},
         { pb::BITMAP,       {FieldDescriptorProto::TYPE_BYTES,    arrow::Type::type::LARGE_BINARY}},
         { pb::TDIGEST,      {FieldDescriptorProto::TYPE_BYTES,    arrow::Type::type::LARGE_BINARY}},
-        { pb::NULL_TYPE,    {FieldDescriptorProto::TYPE_BOOL,     arrow::Type::type::BOOL}}
+        { pb::JSON,         {FieldDescriptorProto::TYPE_BYTES,    arrow::Type::type::LARGE_BINARY}},
+        { pb::NULL_TYPE,    {FieldDescriptorProto::TYPE_BOOL,     arrow::Type::type::BOOL}},
+        { pb::ARRAY_BOOL,   {FieldDescriptorProto::TYPE_BOOL,     arrow::Type::type::BOOL}},
+        { pb::ARRAY_INT64,  {FieldDescriptorProto::TYPE_SINT64,   arrow::Type::type::INT64}},
+        { pb::ARRAY_UINT64, {FieldDescriptorProto::TYPE_UINT64,   arrow::Type::type::UINT64}},
+        { pb::ARRAY_FLOAT,  {FieldDescriptorProto::TYPE_FLOAT,    arrow::Type::type::FLOAT}},
+        { pb::ARRAY_DOUBLE, {FieldDescriptorProto::TYPE_DOUBLE,   arrow::Type::type::DOUBLE}},
+        { pb::ARRAY_STRING, {FieldDescriptorProto::TYPE_BYTES,    arrow::Type::type::LARGE_BINARY}}
     };
     if (_mysql_pb_type_mapping.count(type) == 0) {
         DB_WARNING("mysql_type %d not supported.", type);
@@ -1043,6 +1050,14 @@ bool is_valid_ip(const std::string& ip) {
     struct sockaddr_in sa;
     int result = inet_pton(AF_INET, ip.c_str(), &(sa.sin_addr));
     return result != 0;
+}
+
+std::string get_store_ip_port() {
+    butil::EndPoint addr;
+    addr.ip = butil::my_ip();
+    addr.port = FLAGS_store_port;
+    const std::string& address = endpoint2str(addr).c_str();
+    return address;
 }
 
 }  // baikaldb

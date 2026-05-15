@@ -25,7 +25,7 @@ protected:
             DB_FATAL("create rocksdb handler failed");
             return;
         }
-        int ret = rocksdb->init("./rocks_db");
+        int ret = rocksdb->init("./rocks_db", nullptr);
         if (ret != 0) {
             DB_FATAL("rocksdb init failed: code:%d", ret);
             return;

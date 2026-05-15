@@ -2459,37 +2459,36 @@ void TableManager::update_ttl_info(const pb::MetaManagerRequest& request,
     }
     pb::SchemaInfo old_schema;
     get_table_info(table_id, old_schema);
-    // 更新ttl_duration
-    if (old_schema.has_ttl_duration() && old_schema.ttl_duration() > 0) {
-        if (request.table_info().has_ttl_field() && !request.table_info().ttl_field().field_name().empty()) {
-            // 更新时不指定ttl field就默认不变
-            std::string old_field_name = old_schema.has_ttl_field() ? old_schema.ttl_field().field_name() : "";
-            std::string new_field_name = request.table_info().ttl_field().field_name();
-            if (old_field_name != new_field_name) {
-                DB_WARNING("new_ttl_field_name[%s] doesn't match old_ttl_field_name[%s]",
-                                old_field_name.c_str(), new_field_name.c_str());
-                IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "can not change ttl_field");
-                return;
-            }
-        }
-        DB_WARNING("update table ttl info, table_id:%ld", table_id);
-    } else {
-        // 添加ttl
-        old_schema.set_ttl_duration(request.table_info().ttl_duration());
-        if (request.table_info().has_ttl_field()) {
-            old_schema.mutable_ttl_field()->CopyFrom(request.table_info().ttl_field());
-        }
-        std::string err_msg;
-        if (check_ttl_info(old_schema, err_msg) != 0) {
-            DB_WARNING("add ttl to table[%ld] failed, err_msg: %s", table_id, err_msg.c_str());
-            IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, err_msg);
+
+    if (request.table_info().has_ttl_field() && !request.table_info().ttl_field().field_name().empty()) {
+        std::string old_field_name = old_schema.has_ttl_field() ? old_schema.ttl_field().field_name() : "";
+        std::string new_field_name = request.table_info().ttl_field().field_name();
+        if (old_field_name != new_field_name && !old_field_name.empty()) {
+            DB_WARNING("new_ttl_field_name[%s] doesn't match old_ttl_field_name[%s]",
+                            old_field_name.c_str(), new_field_name.c_str());
+            IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "can not change ttl_field");
             return;
         }
     }
+    old_schema.set_ttl_duration(request.table_info().ttl_duration());
+    if (request.table_info().has_ttl_field()) {
+        old_schema.mutable_ttl_field()->CopyFrom(request.table_info().ttl_field());
+    }
+
+    std::string err_msg;
+    if (check_ttl_info(old_schema, err_msg) != 0) {
+        DB_WARNING("add ttl to table[%ld] failed, err_msg: %s", table_id, err_msg.c_str());
+        IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, err_msg);
+        return;
+    }
+
     update_table_internal(request, apply_index, done,
         [](const pb::MetaManagerRequest& request, pb::SchemaInfo& mem_schema_pb, braft::Closure* done) {
             if (mem_schema_pb.ttl_duration() > 0 && request.table_info().ttl_duration() > 0) {
                 // 只修改ttl
+                if (request.table_info().has_ttl_field()) {
+                    mem_schema_pb.mutable_ttl_field()->CopyFrom(request.table_info().ttl_field());
+                }
                 mem_schema_pb.set_ttl_duration(request.table_info().ttl_duration());
             } else if (mem_schema_pb.ttl_duration() <= 0 && request.table_info().ttl_duration() > 0) {
                 // online ttl
@@ -4902,7 +4901,7 @@ void TableManager::drop_index(const pb::MetaManagerRequest& request, const int64
         [&index_req](const pb::IndexInfo& info) {
             // 忽略大小写
             return boost::algorithm::iequals(info.index_name(), index_req.index_name()) &&
-                (info.index_type() == pb::I_UNIQ || info.index_type() == pb::I_KEY || 
+                (info.index_type() == pb::I_UNIQ || info.index_type() == pb::I_KEY ||
                 info.index_type() == pb::I_FULLTEXT || info.index_type() == pb::I_ROLLUP || info.index_type() == pb::I_VECTOR);
         });
     if (index_to_del != std::end(schema_info.indexs())) {
@@ -5081,6 +5080,22 @@ void TableManager::add_index(const pb::MetaManagerRequest& request,
         DB_WARNING("DDL_LOG[add_index] check fields info fail, request:%s", request.ShortDebugString().c_str());
         IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "fields info fail");
         return;
+    }
+
+    if (request.table_info().indexs(0).index_type() != pb::I_VECTOR) {
+        auto has_array_field = std::any_of(
+            std::begin(first_index_fields),
+            std::end(first_index_fields),
+            [&](const std::string& field_name) -> bool {
+                auto field_type = get_field_type(field_name, table_id);
+                return is_array(field_type);
+            }
+        );
+        if (has_array_field) {
+            DB_WARNING("DDL_LOG[add_index] not support array field in vector index, request:%s", request.ShortDebugString().c_str());
+            IF_DONE_SET_RESPONSE(done, pb::INPUT_PARAM_ERROR, "not support array field in index");
+            return;
+        }
     }
 
     pb::SchemaInfo mem_schema_pb;
@@ -5406,6 +5421,27 @@ bool TableManager::check_field_exist(const std::string &field_name,
         return true;
     }
     return false;
+}
+
+pb::PrimitiveType TableManager::get_field_type(const std::string &field_name,
+                        int64_t table_id) {
+    DoubleBufferedTableMemMapping::ScopedPtr info;
+    if (_table_mem_infos.Read(&info) != 0) {
+        DB_WARNING("read double_buffer_table error.");
+        return pb::NULL_TYPE;
+    }
+    auto table_mem_iter = info->table_info_map.find(table_id);
+    if (table_mem_iter == info->table_info_map.end()) {
+        DB_WARNING("table_id:[%ld] not exist.", table_id);
+        return pb::NULL_TYPE;
+    }
+    auto& table_mem = table_mem_iter->second;
+    for (const auto& field : table_mem.schema_pb.fields()) {
+        if (field.field_name() == field_name) {
+            return field.mysql_type();
+        }
+    }
+    return pb::NULL_TYPE;
 }
 
 int TableManager::check_index(const pb::IndexInfo& index_info_to_check,

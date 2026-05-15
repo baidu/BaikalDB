@@ -133,12 +133,12 @@ inline size_t double_buffer_table_region_update_leader(
 
 struct FieldInfo {
     int32_t             id;
-    int32_t             size = -1;// STRING类型的size为-1，表示变长
+    int32_t             size = -1;          // STRING类型的size为-1，表示变长
     int64_t             table_id;
     int                 pb_idx = 0; 
-    std::string         name;   // db.table.field
-    std::string         lower_name;   // db.table.(lower)field
-    std::string         short_name; // field
+    std::string         name;               // db.table.field
+    std::string         lower_name;         // db.table.(lower)field
+    std::string         short_name;         // field
     std::string         lower_short_name;   // (lower)field
     std::string         default_value;
     ExprValue           default_expr_value;
@@ -215,6 +215,7 @@ struct TableInfo {
     bool                    has_fulltext = false;
     bool                    has_rollup_index = false;
     bool                    has_vector_index = false;
+    bool                    has_array_column = false;
     std::set<int64_t>       rollup_indexs;
     // 该表是否已和 binlog 表关联
     bool is_linked = false;
@@ -1256,7 +1257,7 @@ public:
     int get_tail_split_step(int64_t table_id);
     int get_binlog_backup_days(int64_t table_id);
     void get_cost_switch_open(std::vector<std::string>& database_table);
-    void get_schema_conf_open(const std::string& conf_name, std::vector<std::string>& database_table);
+    void get_schema_conf_open(const std::string& conf_name, std::vector<std::string>& database_table, std::set<int64_t>& table_ids);
     void get_table_by_filter(std::vector<std::string>& database_table,
             const std::function<bool(const SmartTable&)>& select_table);
     void table_with_statistics_info(std::vector<std::string>& database_table);

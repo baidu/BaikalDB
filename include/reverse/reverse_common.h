@@ -80,6 +80,8 @@ public:
         std::string word, uint32_t word_count, std::map<std::string, float>& term_map, const pb::Charset& charset);
     int es_standard(
         std::string word, std::map<std::string, float>& term_map, const pb::Charset& charset);
+    int split_punct_space(
+        std::string word, std::map<std::string, float>& term_map, const pb::Charset& charset);
 
 private:
     int q2b_tolower(std::string& word, const pb::Charset& charset);
@@ -94,6 +96,7 @@ private:
     int es_standard_gbk(std::string word, std::map<std::string, float>& term_map);
     int simple_seg_gbk(std::string word, uint32_t word_count, std::map<std::string, float>& term_map);
     void split_str_gbk(const std::string& word, std::vector<std::string>& split_word, char delim);
+    int split_punct_space_gbk(std::string word, std::map<std::string, float>& term_map);
 
     // utf8
     std::vector<SeperateIndex> q2b_tolower_utf8_with_index(std::string& word);
@@ -101,6 +104,7 @@ private:
     int es_standard_utf8(std::string word, std::map<std::string, float>& term_map);
     int simple_seg_utf8(std::string word, uint32_t word_count, std::map<std::string, float>& term_map);
     void split_str_utf8(const std::string& word, std::vector<std::string>& split_word, char delim);
+    int split_punct_space_utf8(std::string word, std::map<std::string, float>& term_map);
     size_t get_utf8_len(const char c);
     size_t get_utf8_bom_len(const std::string& word);
 
@@ -308,6 +312,12 @@ public:
     std::vector<ItemStatistic> term_times;
     int64_t create_exe_time = 0;
     int64_t bool_engine_time = 0;
+    int64_t mem_allocated = 0;
+
+    void allocate(int64_t size) {
+        mem_allocated += size;
+    }
+
     void print_log() {
         if (FLAGS_reverse_print_log) {
             int64_t all_time = delete_time + segment_time + bool_engine_time;

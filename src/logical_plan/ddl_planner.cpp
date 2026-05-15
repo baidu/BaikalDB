@@ -19,10 +19,12 @@
 #include "expr_node.h"
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string.hpp>
+#include "vector_index.h"
 
 namespace baikaldb {
 DEFINE_bool(unique_index_default_global, true, "Default unique index as global, default: true");
 DEFINE_bool(normal_index_default_global, false, "Default normal index as global, default: false");
+DEFINE_int32(min_replica_num, 1, "min_replica_num, default: 1; recommended to set to 3 in production environments");
 int DDLPlanner::plan() {
     pb::MetaManagerRequest request;
     if (!_ctx->user_info->allow_ddl()) {
@@ -382,6 +384,12 @@ int DDLPlanner::add_column_def(pb::SchemaInfo& table, parser::ColumnDef* column,
             return -1;
         }
     }
+    if (is_array(data_type)) {
+        // 强制array类型 NOT NULL DEFAULT '[]';
+        field->set_can_null(false);
+        field->set_default_literal("[]");
+        field->set_default_value("[]");
+    }
     // can_null default is true
     if (!field->has_can_null()) {
         field->set_can_null(true);
@@ -399,13 +407,14 @@ int DDLPlanner::fill_index_fields(const std::set<std::string>& index_field_names
                                   const std::vector<const pb::FieldInfo*>& pk_index_fields,
                                   const pb::IndexInfo* index,
                                   MutTableKey& key) {
+    bool nullable_idx = index->storage_type() == pb::ST_NULL_KEY;
     for(size_t i = 1; i < index_fields.size(); ++i) {
         if (index_fields[i] == nullptr) {
             DB_FATAL("%d index_fields is null", (int)i);
             return -1;
         }
-        ExprValue value(index_fields[i]->mysql_type(), "");
-        key.append_value(value);
+        ExprValue value = ExprValue(index_fields[i]->mysql_type(), "");
+        key.append_value(value, nullable_idx);
     }
     if (index->index_type() == pb::I_KEY) {
         // 不是unique的全局索引，需要补齐其他主键字段
@@ -416,13 +425,13 @@ int DDLPlanner::fill_index_fields(const std::set<std::string>& index_field_names
             }
             if (index_field_names.find(field->field_name()) == index_field_names.end()) {
                 ExprValue value(field->mysql_type(), "");
-                key.append_value(value);
+                key.append_value(value, nullable_idx);
             }
         }
     }
-    if (index->is_global()) {
+    if (index->is_global() && !nullable_idx) {
         uint8_t null_flag = 0;
-        key.append_u8(null_flag);
+        key.append_null_flag(null_flag);
     }
     return 0;
 }
@@ -448,6 +457,7 @@ int DDLPlanner::pre_split_index(const std::string& start_key,
     }
     auto split_keys = table.add_split_keys();
     split_keys->set_index_name(index->index_name());
+    bool nullable_idx = index->storage_type() == pb::ST_NULL_KEY;
     switch (index_fields[0]->mysql_type()) {
         case pb::INT8:
         case pb::INT16:
@@ -467,12 +477,12 @@ int DDLPlanner::pre_split_index(const std::string& start_key,
                 // 生成split key
                 for (; split_value <= end_value_i; split_value += step) {
                     MutTableKey key;
-                    if (index->is_global()) {
+                    if (index->is_global() && !nullable_idx) {
                         uint8_t null_flag = 0;
-                        key.append_u8(null_flag);
+                        key.append_null_flag(null_flag);
                     }
-                    ExprValue first_filed_value(index_fields[0]->mysql_type(), std::to_string(split_value));
-                    key.append_value(first_filed_value);
+                    ExprValue first_field_value(index_fields[0]->mysql_type(), std::to_string(split_value));
+                    key.append_value(first_field_value, nullable_idx);
                     if (fill_index_fields(index_field_names, index_fields, pk_index_fields, index, key) < 0) {
                         return -1;
                     }
@@ -498,12 +508,12 @@ int DDLPlanner::pre_split_index(const std::string& start_key,
                 // 生成split key
                 for (; split_value <= end_value_u; split_value += step) {
                     MutTableKey key;
-                    if (index->is_global()) {
+                    if (index->is_global() && !nullable_idx) {
                         uint8_t null_flag = 0;
-                        key.append_u8(null_flag);
+                        key.append_null_flag(null_flag);
                     }
-                    ExprValue first_filed_value(index_fields[0]->mysql_type(), std::to_string(split_value));
-                    key.append_value(first_filed_value);
+                    ExprValue first_field_value(index_fields[0]->mysql_type(), std::to_string(split_value));
+                    key.append_value(first_field_value, nullable_idx);
                     if (fill_index_fields(index_field_names, index_fields, pk_index_fields, index, key) < 0) {
                         return -1;
                     }
@@ -527,12 +537,12 @@ int DDLPlanner::pre_split_index(const std::string& start_key,
                 // 生成split key
                 for (; split_value <= end_value_d; split_value += step) {
                     MutTableKey key;
-                    if (index->is_global()) {
+                    if (index->is_global() && !nullable_idx) {
                         uint8_t null_flag = 0;
-                        key.append_u8(null_flag);
+                        key.append_null_flag(null_flag);
                     }
-                    ExprValue first_filed_value(index_fields[0]->mysql_type(), std::to_string(split_value));
-                    key.append_value(first_filed_value);
+                    ExprValue first_field_value(index_fields[0]->mysql_type(), std::to_string(split_value));
+                    key.append_value(first_field_value, nullable_idx);
                     if (fill_index_fields(index_field_names, index_fields, pk_index_fields, index, key) < 0) {
                         return -1;
                     }
@@ -574,12 +584,12 @@ int DDLPlanner::pre_split_index(const std::string& start_key,
                     DB_WARNING("uint64: %lu, key: %s", start_uint64, key.c_str());
                     // 生成key
                     MutTableKey split_key;
-                    if (index->is_global()) {
+                    if (index->is_global() && !nullable_idx) {
                         uint8_t null_flag = 0;
-                        split_key.append_u8(null_flag);
+                        split_key.append_null_flag(null_flag);
                     }
-                    ExprValue first_filed_value(index_fields[0]->mysql_type(), common_prefix + key);
-                    split_key.append_value(first_filed_value);
+                    ExprValue first_field_value(index_fields[0]->mysql_type(), common_prefix + key);
+                    split_key.append_value(first_field_value, nullable_idx);
                     if (fill_index_fields(index_field_names, index_fields, pk_index_fields, index, split_key) < 0) {
                         return -1;
                     }
@@ -749,6 +759,7 @@ int DDLPlanner::parse_partition_pre_split_keys(const std::string& partition_spli
             return -1;
         }
         split_keys->set_index_name(index_info.index_name());
+        bool nullable_idx = index_info.storage_type() == pb::ST_NULL_KEY; // should always be false
         for (const auto& partition_split_key : partition_split_key_vec) {
             ExprValue first_field_value;
             switch (index_fields[0]->mysql_type()) {
@@ -783,11 +794,11 @@ int DDLPlanner::parse_partition_pre_split_keys(const std::string& partition_spli
                 return -1;
             }
             MutTableKey key;
-            if (index_info.is_global()) {
+            if (index_info.is_global() && !nullable_idx) {
                 uint8_t null_flag = 0;
-                key.append_u8(null_flag);
+                key.append_null_flag(null_flag);
             }
-            key.append_value(first_field_value);
+            key.append_value(first_field_value, nullable_idx);
             if (fill_index_fields(index_field_names, index_fields, pk_fields, &index_info, key) < 0) {
                 DB_WARNING("Fail to fill_index_fields");
                 return -1;
@@ -971,11 +982,15 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
         }
         for (int col_idx = 0; col_idx < constraint->columns.size(); ++col_idx) {
             parser::ColumnName* col_name = constraint->columns[col_idx];
-            if (_column_can_null[col_name->name.value] && index->index_type() != pb::I_FULLTEXT) {
-                DB_WARNING("index column : %s should NOT NULL", col_name->name.value);
-                _ctx->stat_info.error_code = ER_NO_DB_ERROR;
-                _ctx->stat_info.error_msg << "index column : " << col_name->name.value << " should NOT NULL";
-                return -1;
+            if (_column_can_null[col_name->name.value]) {
+                if (index->index_type() == pb::I_KEY) {
+                    index->set_storage_type(pb::ST_NULL_KEY);
+                } else if (index->index_type() != pb::I_FULLTEXT) {
+                    DB_WARNING("index column : %s should NOT NULL", col_name->name.value);
+                    _ctx->stat_info.error_code = ER_NO_DB_ERROR;
+                    _ctx->stat_info.error_msg << "index column : " << col_name->name.value << " should NOT NULL";
+                    return -1;
+                }
             }
             index->add_field_names(col_name->name.value);
         }
@@ -1046,6 +1061,10 @@ int DDLPlanner::parse_create_table(pb::SchemaInfo& table) {
                 if (json_iter != root.MemberEnd()) {
                     int64_t replica_num = json_iter->value.GetInt64();
                     table.set_replica_num(replica_num);
+                    if (replica_num < FLAGS_min_replica_num) {
+                        DB_WARNING("replica_num: %ld < min_replica_num: %d", replica_num, FLAGS_min_replica_num);
+                        return -1;
+                    }
                     DB_WARNING("replica_num: %ld", replica_num);
                 }
                 json_iter = root.FindMember("dists");
@@ -1636,7 +1655,12 @@ int DDLPlanner::parse_create_database(pb::DataBaseInfo& database) {
                 }
                 json_iter = root.FindMember("replica_num");
                 if (json_iter != root.MemberEnd() && root["replica_num"].IsInt64()) {
-                    database.set_replica_num(json_iter->value.GetInt64());
+                    int64_t replica_num = json_iter->value.GetInt64();
+                    database.set_replica_num(replica_num);
+                    if (replica_num < FLAGS_min_replica_num) {
+                        DB_WARNING("replica_num: %ld < min_replica_num: %d", replica_num, FLAGS_min_replica_num);
+                        return -1;
+                    }
                 }
                 json_iter = root.FindMember("region_split_lines");
                 if (json_iter != root.MemberEnd() && root["region_split_lines"].IsInt64()) {
@@ -2405,6 +2429,21 @@ pb::PrimitiveType DDLPlanner::to_baikal_type(parser::FieldType* field_type) {
     case parser::MYSQL_TYPE_JSON: {
         return pb::JSON;
     } break;
+    case parser::MYSQL_TYPE_ARRAY_BOOL:
+        return pb::ARRAY_BOOL;
+    case parser::MYSQL_TYPE_ARRAY_INT64: {
+        if (field_type->flag & parser::MYSQL_FIELD_FLAG_UNSIGNED) {
+            return pb::ARRAY_UINT64;
+        } else {
+            return pb::ARRAY_INT64;
+        }
+    }
+    case parser::MYSQL_TYPE_ARRAY_FLOAT:
+        return pb::ARRAY_FLOAT;
+    case parser::MYSQL_TYPE_ARRAY_DOUBLE:
+        return pb::ARRAY_DOUBLE;
+    case parser::MYSQL_TYPE_ARRAY_STRING:
+        return pb::ARRAY_STRING;
     default : {
         DB_WARNING("unsupported item type: %d", field_type->type);
         return pb::INVALID_TYPE;
@@ -2445,6 +2484,8 @@ int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* co
             index_type = pb::I_VECTOR;
             if (constraint->columns.size() > 2) {
                 DB_WARNING("vector index only support one or two field.");
+                _ctx->stat_info.error_code = ER_ERROR_COMMON;
+                _ctx->stat_info.error_msg << "vector index only support one or two field.";
                 return -1;
             }
             break;
@@ -2476,11 +2517,15 @@ int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* co
     std::unordered_set<std::string> index_fields_set;
     for (int32_t column_index = 0; column_index < constraint->columns.size(); ++column_index) {
         std::string column_name = constraint->columns[column_index]->name.value;
-        if (_column_can_null[column_name] && index->index_type() != pb::I_FULLTEXT) {
-            DB_WARNING("index column : %s should NOT NULL", column_name.c_str());
-            _ctx->stat_info.error_code = ER_NO_DB_ERROR;
-            _ctx->stat_info.error_msg << "index column : " << column_name << " should NOT NULL";
-            return -1;
+        if (_column_can_null[column_name]) {
+            if (index->index_type() == pb::I_KEY) {
+                index->set_storage_type(pb::ST_NULL_KEY);
+            } else if (index->index_type() != pb::I_FULLTEXT) {
+                DB_WARNING("index column : %s should NOT NULL", column_name.c_str());
+                _ctx->stat_info.error_code = ER_NO_DB_ERROR;
+                _ctx->stat_info.error_msg << "index column : " << column_name << " should NOT NULL";
+                return -1;
+            }
         }
         if (index_fields_set.count(column_name) != 0) {
             DB_WARNING("index column : %s duplicate", column_name.c_str());
@@ -2552,6 +2597,13 @@ int DDLPlanner::add_constraint_def(pb::SchemaInfo& table, parser::Constraint* co
             DB_WARNING("parse create table json comments error [%s]", value);
             return -1;
         }
+    }
+    std::string error_info;
+    if (VectorIndex::validate_vector_index_params(index, error_info) != 0) {
+        DB_WARNING("validate vector index params failed, error_info:%s", error_info.c_str());
+        _ctx->stat_info.error_code = ER_ERROR_COMMON;
+        _ctx->stat_info.error_msg << error_info;
+        return -1;
     }
     return 0;
 }

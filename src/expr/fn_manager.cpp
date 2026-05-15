@@ -306,6 +306,17 @@ void FunctionManager::register_operators() {
     register_object_ret("cast_to_signed", cast_to_signed, pb::INT64);
     register_object_ret("cast_to_unsigned", cast_to_unsigned, pb::UINT64);
     register_object_ret("cast_to_double", cast_to_double, pb::DOUBLE);
+
+    // array
+    register_object_ret("element_at", element_at, pb::STRING);
+    register_object_ret("contain", contain, pb::BOOL);
+    register_object_ret("contain_any", contain_any, pb::BOOL);
+    register_object_ret("contain_all", contain_all, pb::BOOL);
+
+    // 向量相似度
+    register_object_ret("inner_product", inner_product, pb::FLOAT);
+    register_object_ret("l2_distance", l2_distance, pb::FLOAT);
+    register_object_ret("cosine_similarity", cosine_similarity, pb::FLOAT);
 }
 
 int FunctionManager::init() {
@@ -510,6 +521,12 @@ void FunctionManager::complete_common_fn(pb::Function& fn, std::vector<pb::Primi
         fn.set_return_type(ret_type);
     } else if (fn.name() == "match_against") {
         fn.set_return_type(pb::BOOL);
+    } else if (fn.name() == "inner_product" || fn.name() == "l2_distance" || fn.name() == "cosine_similarity") {
+        // 向量距离函数, STRING literal 只用转一次 array float
+        if (types.size() == 2) {
+            fn.add_arg_types(pb::ARRAY_FLOAT);
+            fn.add_arg_types(pb::ARRAY_FLOAT);
+        }
     }
 }
 

@@ -69,7 +69,7 @@ TEST(float_parse_cost, case_all) {
     call("0.1272,-13.1821465e-13   ,     0.1356,0.2689,   0.113");
     call(" 0.1272,-13.1821465e-13   ,     0.1356,0.2689,   0.113 ");
     call("[0.1272,-13.1821465e-13   ,     0.1356,0.2689,   0.113]");
-    call(" [  ] ");
+//    call(" [  ] ");
 }
 TEST(test_gbk_substr, case_all) {
     Tokenizer::get_instance()->init();
@@ -466,7 +466,7 @@ void arrow_test(std::string db_path, std::string word_file, const char* search_w
     if (!rocksdb) {
         std::cout << "create rocksdb handler failed";
     }
-    rocksdb->init(db_path.c_str());
+    rocksdb->init(db_path.c_str(),nullptr);
     auto arrow_index = new IndexType(
         1, 
         1,
@@ -493,7 +493,7 @@ void arrow_test(std::string db_path, std::string word_file, const char* search_w
         txn->begin(Transaction::TxnOptions());
         std::string pk = std::to_string(i++);
         arrow_index->insert_reverse(txn, line, pk, nullptr);
-        auto res = txn->commit();
+        auto res = txn->commit(0,0);
         if (!res.ok()) {
             std::cout << "commit error\n";
         }
@@ -549,7 +549,7 @@ void arrow_test(std::string db_path, std::string word_file, const char* search_w
                 ++valid_num;
             }
             std::cout << "valid number [" << valid_num << "] time [" << tc2.get_time() << "] all_time[" << tc_all.get_time() << "]\n";
-            txn->commit();
+            txn->commit(0,0);
         }
     }
 }

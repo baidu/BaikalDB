@@ -28,7 +28,7 @@
 #include "type_utils.h"
 #include "roaring.hh"
 #include "arrow/compute/expression.h"
-#include "arrow/vendored/fast_float/fast_float.h"
+#include "expr_value_array.h"
 
 namespace baikaldb {
 
@@ -48,8 +48,37 @@ struct ExprValue {
         float float_val;
         double double_val;
         Roaring* bitmap;
+
+        // array: BOOLEAN,TINYINT,SMALLINT,INT,BIGINT,FLOAT,DOUBLE,VARCHAR
+        ArrayDataBase* array_ptr;
     } _u;
     std::string str_val;
+
+    void init_array(pb::PrimitiveType array_type = pb::PrimitiveType::NULL_TYPE) {
+        switch(array_type) {
+            case pb::ARRAY_BOOL:
+                _u.array_ptr = new(std::nothrow) ArrayValue<bool>();
+                break;
+            case pb::ARRAY_INT64:
+                _u.array_ptr = new(std::nothrow) ArrayValue<int64_t>();
+                break;
+            case pb::ARRAY_UINT64:
+                _u.array_ptr = new(std::nothrow) ArrayValue<uint64_t>();
+                break;
+            case pb::ARRAY_FLOAT:
+                _u.array_ptr = new(std::nothrow) ArrayValue<float>();
+                break;
+            case pb::ARRAY_DOUBLE:
+                _u.array_ptr = new(std::nothrow) ArrayValue<double>();
+                break;
+            case pb::ARRAY_STRING:
+                _u.array_ptr = new(std::nothrow) ArrayValue<std::string>();
+                break;
+            default:
+                DB_WARNING("not support array data type %s", pb::PrimitiveType_Name(array_type).c_str());
+                break;
+        }
+    }
 
     explicit ExprValue(pb::PrimitiveType type_ = pb::NULL_TYPE) : type(type_) {
         _u.int64_val = 0;
@@ -60,6 +89,8 @@ struct ExprValue {
             str_val.resize(tdigest::td_required_buf_size(tdigest::COMPRESSION));
             uint8_t* buff = (uint8_t*)str_val.data();
             tdigest::td_init(tdigest::COMPRESSION, buff, str_val.size());
+        } else if (is_array()) {
+            init_array(type_);
         }
     }
 
@@ -71,6 +102,12 @@ struct ExprValue {
         if (type == pb::BITMAP) {
             _u.bitmap = new(std::nothrow) Roaring();
             *_u.bitmap = *other._u.bitmap;
+        } else if (is_array()) {
+            if (other._u.array_ptr != nullptr) {
+                _u.array_ptr = other._u.array_ptr->clone();
+            } else {
+                init_array(type);
+            }
         }
     }
     
@@ -79,6 +116,9 @@ struct ExprValue {
             if (type == pb::BITMAP) {
                 delete _u.bitmap;
                 _u.bitmap = nullptr;
+            } else if (is_array() && _u.array_ptr != nullptr) {
+                delete _u.array_ptr;
+                _u.array_ptr = nullptr;
             }
             type = other.type;
             _u = other._u;
@@ -87,6 +127,12 @@ struct ExprValue {
             if (type == pb::BITMAP) {
                 _u.bitmap = new(std::nothrow) Roaring();
                 *_u.bitmap = *other._u.bitmap;
+            } else if (is_array()) {
+                if (other._u.array_ptr != nullptr) {
+                    _u.array_ptr = other._u.array_ptr->clone();
+                } else {
+                    init_array(type);
+                }
             }
         }
         return *this;
@@ -99,6 +145,8 @@ struct ExprValue {
         str_val = other.str_val;
         if (type == pb::BITMAP) {
             other._u.bitmap = nullptr;
+        } else if (is_array()) {
+            other._u.array_ptr = nullptr;
         }
     }
 
@@ -107,12 +155,17 @@ struct ExprValue {
             if (type == pb::BITMAP) {
                 delete _u.bitmap;
                 _u.bitmap = nullptr;
+            } else if (is_array() && _u.array_ptr != nullptr) {
+                delete _u.array_ptr;
+                _u.array_ptr = nullptr;
             }
             type = other.type;
             _u = other._u;
             float_precision_len = other.float_precision_len;
             if (type == pb::BITMAP) {
                 other._u.bitmap = nullptr;
+            } else if (is_array()) {
+                other._u.array_ptr = nullptr;
             }
             str_val = other.str_val;
         }
@@ -123,6 +176,9 @@ struct ExprValue {
         if (type == pb::BITMAP) {
             delete _u.bitmap;
             _u.bitmap = nullptr;
+        } else if (is_array() && _u.array_ptr != nullptr) {
+            delete _u.array_ptr;
+            _u.array_ptr = nullptr;
         }
     }
     explicit ExprValue(const pb::ExprValue& value) {
@@ -184,6 +240,16 @@ struct ExprValue {
                 }
                 break;
             }
+            case pb::ARRAY_BOOL:
+            case pb::ARRAY_INT64:
+            case pb::ARRAY_UINT64:
+            case pb::ARRAY_FLOAT:
+            case pb::ARRAY_DOUBLE:
+            case pb::ARRAY_STRING: {
+                // ARRAY_TODO, CHECK, 应该用不到
+                DB_FATAL("NOT REACH");
+                break;
+            }
             default:
                 break;
         }
@@ -236,7 +302,7 @@ struct ExprValue {
             case pb::UINT8:
                 return static_cast<double>(_u.uint8_val);
             case pb::UINT16:
-                return static_cast<double>(_u.uint16_val );
+                return static_cast<double>(_u.uint16_val);
             case pb::UINT32:
             case pb::TIMESTAMP:
                 return static_cast<double>(_u.uint32_val);
@@ -331,6 +397,16 @@ struct ExprValue {
             case pb::JSON:
             case pb::TDIGEST:
                 value->set_string_val(str_val);
+                break;
+            case pb::ARRAY_BOOL:
+            case pb::ARRAY_INT64:
+            case pb::ARRAY_UINT64:
+            case pb::ARRAY_FLOAT:
+            case pb::ARRAY_DOUBLE:
+            case pb::ARRAY_STRING:
+                // ARRAY_TODO, CHECK, 应该用不到
+                value->set_type(pb::STRING);
+                value->set_string_val(get_string());
                 break;
             default:
                 break;
@@ -494,14 +570,108 @@ struct ExprValue {
                 } 
                 return 0;
             }
+            case pb::ARRAY_BOOL:
+            case pb::ARRAY_INT64:
+            case pb::ARRAY_UINT64:
+            case pb::ARRAY_FLOAT:
+            case pb::ARRAY_DOUBLE:
+            case pb::ARRAY_STRING: {
+                if (_u.array_ptr != nullptr) {
+                    return _u.array_ptr->size();
+                }
+                return 0;
+            }
             default:
                 return 0;
         }
     }
 
+    template <typename T>
+    void cast_to_array() {
+        ArrayValue<T>* new_array = new(std::nothrow) ArrayValue<T>();
+        if (is_string()) {
+            from_chars_to_array<T>(str_val.c_str(), new_array->data);
+        } else if (is_array()) {
+            if (_u.array_ptr != nullptr) {
+                switch (type) {
+                    case pb::ARRAY_BOOL:
+                        static_cast<ArrayValue<bool>*>(_u.array_ptr)->copy_to<T>(new_array->data);
+                        break;
+                    case pb::ARRAY_INT64: 
+                        static_cast<ArrayValue<int64_t>*>(_u.array_ptr)->copy_to<T>(new_array->data);
+                        break;
+                    case pb::ARRAY_UINT64: 
+                        static_cast<ArrayValue<uint64_t>*>(_u.array_ptr)->copy_to<T>(new_array->data);
+                        break;
+                    case pb::ARRAY_FLOAT: 
+                        static_cast<ArrayValue<float>*>(_u.array_ptr)->copy_to<T>(new_array->data);
+                        break;
+                    case pb::ARRAY_DOUBLE:
+                        static_cast<ArrayValue<double>*>(_u.array_ptr)->copy_to<T>(new_array->data);
+                        break;
+                    case pb::ARRAY_STRING:
+                        static_cast<ArrayValue<std::string>*>(_u.array_ptr)->copy_to<T>(new_array->data);
+                        break;
+                    default:
+                        // not reach here
+                        break;
+                }
+                delete _u.array_ptr;
+            }
+        } else {
+            if constexpr (std::is_same<T, std::string>::value) {
+                new_array->add_value(get_string());
+            } else {
+                new_array->add_value(get_numberic<T>());
+            }
+        }
+        _u.array_ptr = new_array;
+    }
+
+    ExprValue& cast_to_array(pb::PrimitiveType array_type_) {
+        if (is_null() || is_maxvalue()) {
+            return *this;
+        }
+        switch (array_type_) {
+            case pb::ARRAY_BOOL: 
+                cast_to_array<bool>();
+                break;
+            case pb::ARRAY_INT64: 
+                cast_to_array<int64_t>();
+                break;
+            case pb::ARRAY_UINT64: 
+                cast_to_array<uint64_t>();
+                break;
+            case pb::ARRAY_FLOAT: 
+                cast_to_array<float>();
+                break;
+            case pb::ARRAY_DOUBLE: 
+                cast_to_array<double>();
+                break;
+            case pb::ARRAY_STRING: {
+                cast_to_array<std::string>();
+                break;
+            }
+            default:
+                // can not reached
+                DB_WARNING("not support array data type, type: %s", pb::PrimitiveType_Name(array_type_).c_str());
+                break;
+        }
+        type = array_type_;
+        return *this;
+    }
+
     ExprValue& cast_to(pb::PrimitiveType type_) {
         if (is_null() || is_maxvalue() || type == type_) {
             return *this;
+        }
+        if (baikaldb::is_array(type_)) {
+            return cast_to_array(type_);
+        }
+        
+        ArrayDataBase* ori_array = nullptr;
+        if (is_array()) {
+            ori_array = _u.array_ptr;
         }
         switch (type_) {
             case pb::BOOL:
@@ -606,6 +776,9 @@ struct ExprValue {
             default:
                 break;
         }
+        if (ori_array != nullptr) {
+            delete ori_array;
+        }
         type = type_;
         return *this;
     }
@@ -696,6 +869,17 @@ struct ExprValue {
                 butil::MurmurHash3_x64_128(str_val.c_str(), str_val.size(), seed, out);
                 return out[0];
             }
+            case pb::ARRAY_BOOL:
+            case pb::ARRAY_INT64:
+            case pb::ARRAY_UINT64:
+            case pb::ARRAY_FLOAT:
+            case pb::ARRAY_DOUBLE:
+            case pb::ARRAY_STRING: {
+                // ARRAY_TODO
+                std::string str_val = get_string();
+                butil::MurmurHash3_x64_128(str_val.c_str(), str_val.size(), seed, out);
+                return out[0];
+            }
             default:
                 return 0;
         }
@@ -758,6 +942,20 @@ struct ExprValue {
                     _u.bitmap->write(buff);
                 }
                 return final_str;
+            }
+            case pb::ARRAY_BOOL:
+            case pb::ARRAY_INT64:
+            case pb::ARRAY_UINT64:
+            case pb::ARRAY_FLOAT:
+            case pb::ARRAY_DOUBLE:
+            case pb::ARRAY_STRING: {
+                if (_u.array_ptr == nullptr) {
+                    return "[]";
+                }
+                std::string str_val = "[";
+                str_val += _u.array_ptr->get_values_string();
+                str_val += "]";
+                return str_val;
             }
             default:
                 return "";
@@ -831,6 +1029,20 @@ struct ExprValue {
                     _u.bitmap->write(buff);
                 }
                 return final_str;
+            }
+            case pb::ARRAY_BOOL:
+            case pb::ARRAY_INT64:
+            case pb::ARRAY_UINT64:
+            case pb::ARRAY_FLOAT:
+            case pb::ARRAY_DOUBLE:
+            case pb::ARRAY_STRING: {
+                if (_u.array_ptr == nullptr) {
+                    return "[]";
+                }
+                std::string str_val = "[";
+                str_val += _u.array_ptr->get_values_string();
+                str_val += "]";
+                return str_val;
             }
             default:
                 return "";
@@ -937,6 +1149,13 @@ struct ExprValue {
                 return str_val.compare(other.str_val);
             case pb::NULL_TYPE:
                 return other.type == pb::NULL_TYPE ? 0 : -1;
+            case pb::ARRAY_BOOL:
+            case pb::ARRAY_INT64:
+            case pb::ARRAY_UINT64:
+            case pb::ARRAY_FLOAT:
+            case pb::ARRAY_DOUBLE:
+            case pb::ARRAY_STRING: 
+                return get_string().compare(other.get_string());
             default:
                 return 0;
         }
@@ -1004,6 +1223,10 @@ struct ExprValue {
         return type == pb::NULL_TYPE || type == pb::INVALID_TYPE;
     }
 
+    void set_is_null() {
+        type = pb::NULL_TYPE;
+    }
+
     bool is_bool() const {
         return type == pb::BOOL;
     }
@@ -1066,6 +1289,15 @@ struct ExprValue {
 
     bool is_maxvalue() const {
         return type == pb::MAXVALUE_TYPE;
+    }
+
+    bool is_array() const {
+        return type == pb::ARRAY_BOOL
+            || type == pb::ARRAY_INT64
+            || type == pb::ARRAY_UINT64
+            || type == pb::ARRAY_FLOAT
+            || type == pb::ARRAY_DOUBLE
+            || type == pb::ARRAY_STRING;
     }
 
     SerializeStatus serialize_to_mysql_text_packet(char* buf, size_t size, size_t& len) const;
@@ -1176,6 +1408,54 @@ struct ExprValue {
         if (type == pb::DATETIME) {
             dt_cast_len();
         }
+    }
+
+    template<typename T>
+    ArrayValue<T>* get_array() const {
+        if (is_array()) {
+            return static_cast<ArrayValue<T>*>(_u.array_ptr);
+        }
+        return nullptr;
+    }
+
+    ExprValue get_array_element(int64_t index) const {
+        if (!is_array() 
+                || _u.array_ptr == nullptr 
+                || index < 0 
+                || index >= _u.array_ptr->size()) {
+            return ExprValue::Null();
+        }
+        ExprValue ret;
+        bool has_pos = false;
+        switch (type) {
+            case pb::ARRAY_BOOL: 
+                ret.type = pb::BOOL;
+                ret._u.bool_val = static_cast<ArrayValue<bool>*>(_u.array_ptr)->get_element(index, has_pos);
+                break;
+            case pb::ARRAY_INT64: 
+                ret.type = pb::INT64;
+                ret._u.int64_val = static_cast<ArrayValue<int64_t>*>(_u.array_ptr)->get_element(index, has_pos);
+                break;
+            case pb::ARRAY_UINT64: 
+                ret.type = pb::UINT64;
+                ret._u.int64_val = static_cast<ArrayValue<uint64_t>*>(_u.array_ptr)->get_element(index, has_pos);
+                break;
+            case pb::ARRAY_FLOAT: 
+                ret.type = pb::FLOAT;
+                ret._u.float_val = static_cast<ArrayValue<float>*>(_u.array_ptr)->get_element(index, has_pos);
+                break;
+            case pb::ARRAY_DOUBLE: 
+                ret.type = pb::DOUBLE;
+                ret._u.double_val = static_cast<ArrayValue<double>*>(_u.array_ptr)->get_element(index, has_pos);
+                break;
+            case pb::ARRAY_STRING: 
+                ret.type = pb::STRING;
+                ret.str_val = static_cast<ArrayValue<std::string>*>(_u.array_ptr)->get_element(index, has_pos);
+                break;
+            default: 
+                return ExprValue::Null();
+        }
+        return ret;
     }
 };
 

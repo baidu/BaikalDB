@@ -376,7 +376,7 @@ int SelectManagerNode::single_fetcher_store_open(FetcherInfo* fetcher, RuntimeSt
     // 如果命中的不是全局二级索引，或者全局二级索引是covering_index, 则直接在主表或者索引表上做scan即可
     if (router_index_id == main_table_id || scan_index_info->covering_index) {
         ret = fetcher->fetcher_store.run_not_set_state(state, fetcher->scan_index->region_infos, _children[0], 
-                client_conn->seq_id, client_conn->seq_id, pb::OP_SELECT, fetcher->global_backup_type);
+                client_conn->seq_id, client_conn->seq_id, pb::OP_SELECT);
     } else {
         ret = open_global_index(fetcher, state, scan_node, router_index_id, main_table_id);
     }
@@ -391,45 +391,6 @@ int SelectManagerNode::single_fetcher_store_open(FetcherInfo* fetcher, RuntimeSt
     return 0;
 }
 
-void SelectManagerNode::multi_fetcher_store_open(FetcherInfo* self_fetcher, FetcherInfo* other_fetcher,  
-        RuntimeState* state, ExecNode* exec_node) {
-    if (self_fetcher->dynamic_timeout_ms > 0) {
-        int64_t timeout_us = self_fetcher->dynamic_timeout_ms * 1000LL;
-        // 暂时以打散sleep时间的方式达到及时唤醒的目的，如果此方式存在唤醒不及时的问题，需要换成条件变量
-        TimeCost cost;
-        while (true) {
-            // 检查另一个fetcher是否已经完成
-            if (other_fetcher->status == FetcherInfo::S_SUCC) {
-                return;
-            } else if (other_fetcher->status == FetcherInfo::S_FAIL) {
-                break;
-            } else {
-                // do nothing
-            }
-            int64_t time_used = cost.get_time();
-            if (time_used > timeout_us) {
-                break;
-            }
-            if (timeout_us - time_used < 5000) {
-                bthread_usleep(timeout_us - time_used);
-            } else {
-                bthread_usleep(5000);
-            }
-        }
-    }
-
-    int ret = single_fetcher_store_open(self_fetcher, state, exec_node);
-    if (ret < 0) {
-        self_fetcher->status = FetcherInfo::S_FAIL;
-    } else {
-        self_fetcher->status = FetcherInfo::S_SUCC;
-        // 取消另一个请求
-        if (other_fetcher->status != FetcherInfo::S_SUCC) {
-            other_fetcher->fetcher_store.cancel_rpc();
-        }
-    }
-}
-
 int SelectManagerNode::fetcher_store_run(RuntimeState* state, ExecNode* exec_node) {
     RocksdbScanNode* scan_node = static_cast<RocksdbScanNode*>(exec_node);
     if (scan_node->has_merge_index()) {
@@ -437,10 +398,7 @@ int SelectManagerNode::fetcher_store_run(RuntimeState* state, ExecNode* exec_nod
     }
     FetcherStore* fetcher_store = nullptr;
     FetcherInfo main_fetcher;
-    FetcherInfo backup_fetcher;
     ScanIndexInfo* main_scan_index = scan_node->main_scan_index();
-    ScanIndexInfo* backup_scan_index = scan_node->backup_scan_index();
-    int64_t dynamic_timeout_ms = FetcherStore::get_dynamic_timeout_ms(exec_node, pb::OP_SELECT, state->sign);
     int ret = 0;
 
     if (main_scan_index == nullptr) {
@@ -468,46 +426,9 @@ int SelectManagerNode::fetcher_store_run(RuntimeState* state, ExecNode* exec_nod
             LOCAL_TRACE_ARROW_FILTER(&_vectorize_conditions, _limit);
         }
     }
-    if (backup_scan_index != nullptr && dynamic_timeout_ms > 0 && state->txn_id == 0) {
-        // 非事务情况下才进行全局二级索引降级，txn_id != 0 情况下state中会有修改，无法多个请求并发使用state
-        // 可以降级
-        main_fetcher.scan_index = main_scan_index;
-        main_fetcher.global_backup_type = GBT_MAIN;
-        backup_fetcher.scan_index = backup_scan_index;
-        backup_fetcher.global_backup_type = GBT_LEARNER;
-        backup_fetcher.dynamic_timeout_ms = dynamic_timeout_ms;
 
-        Bthread main_bth;
-        Bthread backup_bth;
-
-        auto main_func = [this, &main_fetcher, &backup_fetcher, state, scan_node]() {
-            multi_fetcher_store_open(&main_fetcher, &backup_fetcher, state, scan_node);
-        };
-        auto backup_func = [this, &main_fetcher, &backup_fetcher, state, scan_node]() {
-            multi_fetcher_store_open(&backup_fetcher, &main_fetcher, state, scan_node);
-        };
-
-        main_bth.run(main_func);
-        backup_bth.run(backup_func);
-
-        // 等待两个线程都结束
-        main_bth.join();
-        backup_bth.join();
-
-        if (main_fetcher.status == FetcherInfo::S_SUCC) {
-            fetcher_store = &main_fetcher.fetcher_store;
-        } else if (backup_fetcher.status == FetcherInfo::S_SUCC) {
-            fetcher_store = &backup_fetcher.fetcher_store;
-        } else {
-            state->error_code = main_fetcher.fetcher_store.error_code;
-            state->error_msg.str("");
-            state->error_msg << main_fetcher.fetcher_store.error_msg.str();
-            DB_WARNING("both router index fail, txn_id: %lu, log_id:%lu, main router index_id: %ld" 
-                "backup router index_id: %ld", state->txn_id, state->log_id(), 
-                main_fetcher.scan_index->router_index_id, backup_fetcher.scan_index->router_index_id);
-            return -1;
-        }
-    } else {
+    // 简化后直接使用 main_fetcher，无降级逻辑
+    {
         // 没有开启动态超时，不满足降级条件，只使用main router
         main_fetcher.scan_index = main_scan_index;
         fetcher_store = &main_fetcher.fetcher_store;
@@ -636,7 +557,7 @@ int SelectManagerNode::open_global_index(FetcherInfo* fetcher, RuntimeState* sta
         store_exec = _children[0]->children(0);
     }*/
     auto ret = fetcher->fetcher_store.run_not_set_state(state, fetcher->scan_index->region_infos, store_exec, 
-            client_conn->seq_id, client_conn->seq_id, pb::OP_SELECT, fetcher->global_backup_type);
+            client_conn->seq_id, client_conn->seq_id, pb::OP_SELECT);
     if (ret < 0) {
         DB_WARNING("select manager fetcher mnager node open fail, txn_id: %lu, log_id:%lu", 
                 state->txn_id, state->log_id());
@@ -674,7 +595,7 @@ int SelectManagerNode::open_global_index(FetcherInfo* fetcher, RuntimeState* sta
     fetcher->fetcher_store.update_state_info(state);
     // 查主表
     ret = fetcher->fetcher_store.run_not_set_state(state, fetcher->scan_index->region_infos, _children[0], 
-            client_conn->seq_id, client_conn->seq_id, pb::OP_SELECT, fetcher->global_backup_type);
+            client_conn->seq_id, client_conn->seq_id, pb::OP_SELECT);
     if (ret < 0) {
         DB_WARNING("select manager fetcher mnager node open fail, txn_id: %lu, log_id:%lu", 
                 state->txn_id, state->log_id());

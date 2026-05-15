@@ -234,13 +234,9 @@ int PlanRouter::scan_plan_router(ScanNode* scan_node,
             covering_index = false;
         }
 
-        // 非首个index只有两种情况需要router，其他情况continue
-        // 1. global learner
-        // 2. router_index_id == index_id
-        if (idx++ > 0 && scan_index_info.use_for != ScanIndexInfo::U_GLOBAL_LEARNER) {
-            if (scan_index_info.router_index_id != scan_index_info.index_id) {
-                continue;
-            }
+        // 非首个index只有在router_index_id == index_id时需要router
+        if (idx++ > 0 && scan_index_info.router_index_id != scan_index_info.index_id) {
+            continue;
         }
         if (skip_index_join_inner_table) {
             continue;

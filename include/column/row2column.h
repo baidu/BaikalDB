@@ -88,11 +88,14 @@ struct RaftLogCache {
         return txn_id_raft_log_map.empty();
     }
 
-    int64_t time() {
+    int64_t time(int64_t* txn_id) {
         int64_t t = 0;
         for (auto iter : txn_id_raft_log_map) {
             if (t < iter.second->begin_time.get_time()) {
                 t = iter.second->begin_time.get_time();
+                if (txn_id != nullptr) {
+                    *txn_id = iter.first;
+                }
             }
         }
 
@@ -154,9 +157,10 @@ public:
     virtual ~RaftLogReader() {
         int64_t time_cost = 0;
         if (!_raft_log_cache->txn_id_raft_log_map.empty()) {
-            time_cost = _raft_log_cache->time();
+            int64_t txn_id = 0;
+            time_cost = _raft_log_cache->time(&txn_id);
             if (time_cost > 15 * 60 * 1000 * 1000ULL) {
-                DB_COLUMN_FATAL("region_id: %ld, time_cost: %ld", _region_id, time_cost);
+                DB_COLUMN_FATAL("region_id: %ld, txn_id: %ld time_cost: %ld", _region_id, txn_id, time_cost);
             }
         }
         

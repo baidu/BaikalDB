@@ -582,7 +582,8 @@ public:
             if (field.default_expr_value.type != pb::NULL_TYPE) {
                 arrow_field_metadata = std::make_shared<arrow::KeyValueMetadata>(
                     std::vector<std::string>{"default_value"}, 
-                    std::vector<std::string>{field.default_expr_value.get_string()});
+                    // 时间类型，直接int转string作为默认值
+                    std::vector<std::string>{field.default_expr_value.get_int_string()});
             }
             std::shared_ptr<arrow::Field> arrow_field = construct_arrow_field(name, field.type, arrow_field_metadata);
             if (arrow_field == nullptr) {

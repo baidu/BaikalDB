@@ -54,11 +54,11 @@ public:
     TableKey(const MutTableKey& key);
 
     //TODO
-    void skip_table_prefix(int &pos) {
+    void skip_table_prefix(int &pos) const {
         pos += sizeof(int64_t);
     }
 
-    void skip_region_prefix(int &pos) {
+    void skip_region_prefix(int &pos) const {
         pos += sizeof(int64_t);
     }
 
@@ -122,6 +122,29 @@ public:
         return (*reinterpret_cast<uint8_t*>(c)) != 0;
     }
 
+    /**
+     * 检查pos位置字段的的null byte，每个字段一字节
+     * 0 stand for null, 1 stand for not null
+     * @param pos extract null flag pos
+     * @return if next field is null
+     */
+    bool check_is_null(int pos) const {
+        char* c = const_cast<char*>(_data.data_ + pos);
+        return (*reinterpret_cast<uint8_t*>(c)) == 0;
+    }
+
+    bool check_is_null_and_move_forward(int& pos) const {
+        char* c = const_cast<char*>(_data.data_ + pos);
+        pos += sizeof(char);
+        return (*reinterpret_cast<uint8_t*>(c)) == 0;
+    }
+
+    // 提取老的null flag, 格式为bitmap
+    uint8_t extract_null_flag(int pos) const {
+        char* c = const_cast<char*>(_data.data_ + pos);
+        return *reinterpret_cast<uint8_t*>(c);
+    }
+
     void extract_string(int pos, std::string& out) const {
         out.assign(_data.data_ + pos);
         return;
@@ -149,19 +172,19 @@ public:
         return _data;
     }
 
-    std::string decode_start_key_string(pb::PrimitiveType field_type, int& pos) const;
+    std::string decode_start_key_string(pb::PrimitiveType field_type, int& pos, bool nullable) const;
     std::string decode_start_key_string(const IndexInfo& index) const;
-    std::string decode_start_key_string(const std::vector<pb::PrimitiveType>& types, int32_t dimension) const;
+    std::string decode_start_key_string(const std::vector<pb::PrimitiveType>& types, int32_t dimension, bool nullable) const;
 
     int decode_field(Message* message,
             const Reflection* reflection,
             const FieldDescriptor* field, 
             const FieldInfo& field_info,
-            int& pos) const;
-    int decode_field_for_chunk(ExprValue* value, const FieldInfo& field_info, int& pos) const;
+            int& pos, bool nullable) const;
+    int decode_field_for_chunk(ExprValue* value, const FieldInfo& field_info, int& pos, bool nullable) const;
 
 
-    int skip_field(const FieldInfo& field_info, int& pos) const;
+    int skip_field(const FieldInfo& field_info, int& pos, bool nullable) const;
 
     // Dynamic Partition
     void get_partition_col_pos(

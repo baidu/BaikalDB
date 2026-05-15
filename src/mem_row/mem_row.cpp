@@ -63,7 +63,7 @@ std::string* MemRow::mutable_string(int32_t tuple_id, int32_t slot_id) {
     return (std::string*)&reflection->GetStringReference(*tuple, field, &tmp);
 }
 
-int MemRow::decode_key(int32_t tuple_id, IndexInfo& index, 
+int MemRow::decode_key(int32_t tuple_id, IndexInfo& index,
         std::vector<int32_t>& field_slot, const TableKey& key, int& pos) {
     if (index.type == pb::I_NONE) {
         DB_WARNING("unknown table index type: %ld", index.id);
@@ -77,15 +77,17 @@ int MemRow::decode_key(int32_t tuple_id, IndexInfo& index,
     uint8_t null_flag = 0;
     const Descriptor* descriptor = tuple->GetDescriptor();
     const Reflection* reflection = tuple->GetReflection();
-    if (index.type == pb::I_KEY || index.type == pb::I_UNIQ || index.type == pb::I_ROLLUP) {
-        null_flag = key.extract_u8(pos);
+    if ((index.type == pb::I_KEY || index.type == pb::I_UNIQ || index.type == pb::I_ROLLUP)
+            && index.storage_type != pb::ST_NULL_KEY) {
+        null_flag = key.extract_null_flag(pos);
         pos += sizeof(uint8_t);
     }
+    bool nullable_idx = index.storage_type == pb::ST_NULL_KEY;
     for (uint32_t idx = 0; idx < index.fields.size(); ++idx) {
         // DB_WARNING("null_flag: %ld, %u, %d, %d, %s", 
         //     index.id, null_flag, pos, index.fields[idx].can_null, 
         //     key.data().ToString(true).c_str());
-        if (((null_flag >> (7 - idx)) & 0x01) && index.fields[idx].can_null) {
+        if (((null_flag >> (7 - idx)) & 0x01) && index.fields[idx].can_null && !nullable_idx) {
             //DB_DEBUG("field is null: %d", idx);
             continue;
         }
@@ -93,7 +95,7 @@ int MemRow::decode_key(int32_t tuple_id, IndexInfo& index,
         //说明不需要解析
         //pos需要更新，容易出bug
         if (slot == 0) {
-            if (0 != key.skip_field(index.fields[idx], pos)) {
+            if (0 != key.skip_field(index.fields[idx], pos, nullable_idx)) {
                 DB_WARNING("skip index field error");
                 return -1;
             }
@@ -109,7 +111,7 @@ int MemRow::decode_key(int32_t tuple_id, IndexInfo& index,
             DB_WARNING("invalid field: %d slot: %d", index.fields[idx].id, slot);
             return -1;
         }
-        if (0 != key.decode_field(tuple, reflection, field, index.fields[idx], pos)) {
+        if (0 != key.decode_field(tuple, reflection, field, index.fields[idx], pos, nullable_idx)) {
             DB_WARNING("decode index field error");
             return -1;
         }
@@ -135,7 +137,7 @@ int MemRow::decode_primary_key(int32_t tuple_id, IndexInfo& index, std::vector<i
         //说明不需要解析
         //pos需要更新，容易出bug
         if (slot == 0) {
-            if (0 != key.skip_field(field_info, pos)) {
+            if (0 != key.skip_field(field_info, pos, false)) {
                 DB_WARNING("skip index field error");
                 return -1;
             }
@@ -151,7 +153,7 @@ int MemRow::decode_primary_key(int32_t tuple_id, IndexInfo& index, std::vector<i
             DB_WARNING("invalid field: %d slot: %d", field_info.id, slot);
             return -1;
         }
-        if (0 != key.decode_field(tuple, reflection, field, field_info, pos)) {
+        if (0 != key.decode_field(tuple, reflection, field, field_info, pos, false)) {
             DB_WARNING("decode index field error: field_id: %d, type: %d", 
                 field_info.id, field_info.type);
             return -1;

@@ -15,6 +15,8 @@
 #include "reverse_index.h"
 
 namespace baikaldb {
+DEFINE_int64(reverse_index_memory_used_alert, 100 * 1024 * 1024,
+        "threshold to print log when receive large reverse index scan request. Default 100MB");
 int MutilReverseIndex::search(
                        myrocksdb::Transaction* txn,
                        SmartIndex& index_info,
@@ -22,6 +24,7 @@ int MutilReverseIndex::search(
                        const std::vector<ReverseIndexBase*>& reverse_indexes,
                        const std::vector<std::string>& search_datas,
                        const std::vector<pb::MatchMode>& modes,
+                       uint64_t logid,
                        bool is_fast, bool bool_or) {
     uint32_t son_size = reverse_indexes.size();
     if (son_size == 0) {
@@ -38,7 +41,7 @@ int MutilReverseIndex::search(
     bool type_init = false;
     for (uint32_t i = 0; i < son_size; ++i) {
         reverse_indexes[i]->create_executor(txn, index_info, table_info, search_datas[i], modes[i],
-            std::vector<ExprNode*>(), is_fast);
+            std::vector<ExprNode*>(), logid, is_fast);
         _query_words += reverse_indexes[i]->get_query_words();
         _query_words += ";";
         _son_exe_vec[i] = reverse_indexes[i]->get_executor();
@@ -76,6 +79,7 @@ int MutilReverseIndex::search(
     SmartIndex& index_info,
     SmartTable& table_info,
     std::map<int64_t, ReverseIndexBase*>& reverse_index_map,
+    uint64_t logid,
     bool is_fast, const pb::FulltextIndex& fulltext_index_info) {
 
     _index_info = index_info;
@@ -86,7 +90,7 @@ int MutilReverseIndex::search(
     _query_words_field = get_field_info_by_name(_table_info->fields, "__querywords");
     _reverse_index_map = reverse_index_map;
     _reverse_indexes.reserve(5);
-    init_operator_executor(fulltext_index_info, _exe);
+    init_operator_executor(fulltext_index_info, _exe, logid);
     if (_query_words.size() > 0 && _query_words.back() == ';') {
         _query_words.pop_back();
     }
@@ -94,7 +98,7 @@ int MutilReverseIndex::search(
 }
 
 int MutilReverseIndex::init_operator_executor(
-    const pb::FulltextIndex& fulltext_index_info, OperatorBooleanExecutor*& exe) {
+    const pb::FulltextIndex& fulltext_index_info, OperatorBooleanExecutor*& exe, uint64_t logid) {
 
     if (fulltext_index_info.fulltext_node_type() == pb::FNT_AND) {
         exe = new AndBooleanExecutor(_type, nullptr);
@@ -102,12 +106,12 @@ int MutilReverseIndex::init_operator_executor(
         for (const auto& child : fulltext_index_info.nested_fulltext_indexes()) {
             if (child.fulltext_node_type() == pb::FNT_AND || child.fulltext_node_type() == pb::FNT_OR) {
                 OperatorBooleanExecutor* child_exe = nullptr;
-                if (init_operator_executor(child, child_exe) == 0 && child_exe != nullptr) {
+                if (init_operator_executor(child, child_exe, logid) == 0 && child_exe != nullptr) {
                     exe->add(child_exe);
                 }
             } else {
                 BooleanExecutor* child_exe = nullptr;
-                if (init_term_executor(child, child_exe) == 0 && child_exe != nullptr) {
+                if (init_term_executor(child, child_exe, logid) == 0 && child_exe != nullptr) {
                     exe->add(child_exe);
                 }
             }
@@ -119,12 +123,12 @@ int MutilReverseIndex::init_operator_executor(
 
             if (child.fulltext_node_type() == pb::FNT_AND || child.fulltext_node_type() == pb::FNT_OR) {
                 OperatorBooleanExecutor* child_exe = nullptr;
-                if (init_operator_executor(child, child_exe) == 0 && child_exe != nullptr) {
+                if (init_operator_executor(child, child_exe, logid) == 0 && child_exe != nullptr) {
                     exe->add(child_exe);
                 }
             } else {
                 BooleanExecutor* child_exe = nullptr;
-                if (init_term_executor(child, child_exe) == 0 && child_exe != nullptr) {
+                if (init_term_executor(child, child_exe, logid) == 0 && child_exe != nullptr) {
                     exe->add(child_exe);
                 }
             }
@@ -136,7 +140,7 @@ int MutilReverseIndex::init_operator_executor(
 }
 
 int MutilReverseIndex::init_term_executor(
-    const pb::FulltextIndex& fulltext_index_info, BooleanExecutor*& exe) {
+    const pb::FulltextIndex& fulltext_index_info, BooleanExecutor*& exe, uint64_t logid) {
 
     auto index_id = fulltext_index_info.possible_index().index_id();
     auto reverse_iter = static_cast<ReverseIndexBase*>(_reverse_index_map[index_id]);
@@ -162,7 +166,7 @@ int MutilReverseIndex::init_term_executor(
     }
     reverse_iter->create_executor(_txn, _index_info, _table_info, word,
         fulltext_index_info.possible_index().ranges(0).match_mode(),
-        std::vector<ExprNode*>(), _is_fast);
+        std::vector<ExprNode*>(), logid, _is_fast);
 
     _query_words += reverse_iter->get_query_words();
     _query_words += ";";

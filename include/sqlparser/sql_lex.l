@@ -89,7 +89,6 @@ FOR { return FOR; }
 FORCE { return FORCE; }
 FOREIGN { return FOREIGN; }
 FROM { return FROM; }
-FULL { return FULL; }
 FULLTEXT { return FULLTEXT; }
 GENERATED { return GENERATED; }
 GRANT { return GRANT; }
@@ -116,6 +115,7 @@ INT2 { return INT2; }
 INT3 { return INT3; }
 INT4 { return INT4; }
 INT8 { return INT8; }
+ARRAY { return ARRAY; }
 JOIN { return JOIN; }
 KEY { return KEY; }
 KEYS { return KEYS; }

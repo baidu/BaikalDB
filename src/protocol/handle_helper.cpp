@@ -1876,6 +1876,36 @@ bool HandleHelper::_handle_schema_conf(const SmartSocket& client, const std::vec
             return false;
         }
         schema_conf->set_cold_use_column_only(is_open);
+    } else if (key == "enable_compute_storage_decoupled") {
+        auto table = factory->get_table_info_ptr(table_id);
+        if (table == nullptr) {
+            DB_FATAL("table null table name: %s, table_id: %ld", full_name.c_str(), table_id);
+            client->state = STATE_ERROR;
+            return false;
+        }
+
+        bool has = false;
+        for (int64_t idx : table->indices) {
+            auto index = factory->get_index_info_ptr(idx);
+            if (index == nullptr) {
+                DB_FATAL("index null table name: %s, table_id: %ld, index_id: %ld", full_name.c_str(), table_id, idx);
+                client->state = STATE_ERROR;
+                return false;
+            }
+
+            if (index->type == pb::I_FULLTEXT || index->type == pb::I_VECTOR || index->type == pb::I_ROLLUP) {
+                has = true;
+                break;
+            }
+        }
+
+        if (has && is_open) {
+            DB_FATAL("table name: %s, table_id: %ld has fulltext or vector index", full_name.c_str(), table_id);
+            client->state = STATE_ERROR;
+            return false;
+        }
+
+        schema_conf->set_enable_compute_storage_decoupled(is_open);
     } else {
         DB_FATAL("param invalid");
         client->state = STATE_ERROR;

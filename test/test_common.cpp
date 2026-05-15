@@ -86,7 +86,7 @@ private:
 
 TEST(test_TimePeriodChecker, timechecker) {
     baikaldb::RocksWrapper*  _rocksdb = RocksWrapper::get_instance();
-    int ret = _rocksdb->init("./rocks_db");
+    int ret = _rocksdb->init("./rocks_db", nullptr);
     std::unique_ptr<SstFileWriter> writer(new SstFileWriter(_rocksdb->get_options(_rocksdb->get_data_handle())));
     std::string path1 = "./test_ingest1.sst";
     auto s = writer->open(path1);
@@ -113,6 +113,155 @@ TEST(test_TimePeriodChecker, timechecker) {
     EXPECT_EQ(false, tc3.now_in_interval_period(8));
     EXPECT_EQ(true, tc3.now_in_interval_period(18));
 }
+
+
+// TEST_F(RocksdbTEST, ingest_test) {
+//     baikaldb::RocksWrapper*  _rocksdb = RocksWrapper::get_instance();
+//     if (!_rocksdb) {
+//         DB_FATAL("create rocksdb handler failed");
+//         return;
+//     }
+//     int ret = _rocksdb->init("./rocks_db");
+//     if (ret != 0) {
+//         DB_FATAL("rocksdb init failed: code:%d", ret);
+//         return;
+//     }
+//     ON_SCOPE_EXIT([_rocksdb]() {
+//         _rocksdb->close();
+//     });
+//     DB_WARNING("RocksdbTEST case1");
+//     std::unique_ptr<SstFileWriter> writer(new SstFileWriter(_rocksdb->get_options(_rocksdb->get_data_handle())));
+//     std::unique_ptr<SstFileWriter> writer2(new SstFileWriter(_rocksdb->get_options(_rocksdb->get_data_handle())));
+//     std::string path1 = "./test_ingest1.sst";
+//     std::string path2 = "./test_ingest2.sst";
+//     auto s = writer->open(path1);
+//     if (!s.ok()) {
+//         DB_FATAL("open sst file path: %s failed, err: %s", path1.c_str(), s.ToString().c_str());
+//         return;
+//     }
+//     writer->put(rocksdb::Slice("1"), rocksdb::Slice("1"));
+//     writer->put(rocksdb::Slice("4"), rocksdb::Slice("4"));
+//     writer->put(rocksdb::Slice("4"), rocksdb::Slice("7"));
+//     writer->put(rocksdb::Slice("9"), rocksdb::Slice("9"));
+//     writer->finish();
+
+//     s = writer2->open(path2);
+//     if (!s.ok()) {
+//         DB_FATAL("open sst file path: %s failed, err: %s", path2.c_str(), s.ToString().c_str());
+//         return;
+//     }
+//     writer2->put(rocksdb::Slice("11"), rocksdb::Slice("11"));
+//     writer2->put(rocksdb::Slice("3"), rocksdb::Slice("3"));
+//     writer2->put(rocksdb::Slice("6"), rocksdb::Slice("6"));
+//     writer2->put(rocksdb::Slice("9"), rocksdb::Slice("9_2"));
+//     writer2->put(rocksdb::Slice("99"), rocksdb::Slice("99"));
+//     writer2->finish();
+
+//     const rocksdb::Snapshot* snapshot = nullptr;
+//     rocksdb::IngestExternalFileOptions ifo;
+//     ifo.move_files = true;
+//     ifo.write_global_seqno = false;
+//     ifo.allow_blocking_flush = false;
+//     rocksdb::ReadOptions read_options;
+//     if (!FLAGS_only_ingest_external) {
+//         s = _rocksdb->ingest_external_file(_rocksdb->get_data_handle(), {path1}, ifo);
+//         if (!s.ok()) {
+//             DB_WARNING("ingest fail: %s", path1.c_str());
+//         }
+        
+//         std::unique_ptr<rocksdb::Iterator> iter(_rocksdb->new_iterator(read_options, _rocksdb->get_data_handle()));
+//         int idx = 0;
+//         for (iter->SeekToFirst(); iter->Valid(); iter->Next()) {
+//             rocksdb::Slice key_slice(iter->key());
+//             rocksdb::Slice value_slice(iter->value());
+//             DB_WARNING("key: %s, value: %s", key_slice.ToString(false).c_str(), value_slice.ToString(false).c_str());
+//             idx++;
+//         }
+//         // ASSERT_EQ(idx, 4);
+
+//         s = _rocksdb->ingest_external_file(_rocksdb->get_data_handle(), {path2}, ifo);
+//         if (!s.ok()) {
+//             DB_WARNING("ingest fail: %s", path1.c_str());
+//         }
+//         std::unique_ptr<rocksdb::Iterator> iter2(_rocksdb->new_iterator(read_options, _rocksdb->get_data_handle()));
+//         idx = 0;
+//         for (iter2->SeekToFirst(); iter2->Valid(); iter2->Next()) {
+//             rocksdb::Slice key_slice(iter2->key());
+//             rocksdb::Slice value_slice(iter2->value());
+//             DB_WARNING("key: %s, value: %s", key_slice.ToString(false).c_str(), value_slice.ToString(false).c_str());
+//             idx++;
+//         }
+//         // ASSERT_EQ(idx, 8);
+//         _rocksdb->put(rocksdb::WriteOptions(), _rocksdb->get_data_handle(), rocksdb::Slice("5"), rocksdb::Slice("5"));
+//         _rocksdb->put(rocksdb::WriteOptions(), _rocksdb->get_data_handle(), rocksdb::Slice("8"), rocksdb::Slice("8"));
+//         for (int i = 0; i < 10; i++) {
+//             _rocksdb->put(rocksdb::WriteOptions(), _rocksdb->get_data_handle(), rocksdb::Slice(std::to_string(i)), rocksdb::Slice(std::to_string(i)));
+//         }
+//         snapshot = _rocksdb->get_snapshot();
+//         for (int i = 90; i < 110; i++) {
+//             _rocksdb->put(rocksdb::WriteOptions(), _rocksdb->get_data_handle(), rocksdb::Slice(std::to_string(i)), rocksdb::Slice(std::to_string(i)));
+//         }
+//         std::unique_ptr<rocksdb::Iterator> iter3(_rocksdb->new_iterator(read_options, _rocksdb->get_data_handle()));
+//         for (iter3->SeekToFirst(); iter3->Valid(); iter3->Next()) {
+//             rocksdb::Slice key_slice(iter3->key());
+//             rocksdb::Slice value_slice(iter3->value());
+//             DB_WARNING("key: %s, value: %s", key_slice.ToString(false).c_str(), value_slice.ToString(false).c_str());
+//         }
+//         // MutTableKey start_key;
+//         // MutTableKey end_key;
+//         // start_key.append_u64(0);
+//         // end_key.append_u64(UINT64_MAX);
+//         rocksdb::Slice start("0");
+//         rocksdb::Slice end("999999");
+//         rocksdb::CompactRangeOptions compact_options;
+//         compact_options.exclusive_manual_compaction = false;
+//         s = _rocksdb->compact_range(compact_options, _rocksdb->get_data_handle(), &start, &end);
+//         if (!s.ok()) {
+//             DB_WARNING("compact_range error: code=%d, msg=%s", 
+//                     s.code(), s.ToString().c_str());
+//         }
+//     }
+
+//     bthread_usleep(60 * 1000 * 1000LL);
+
+
+//     if (FLAGS_ingest_file_name != "") {
+//         s = _rocksdb->ingest_external_file(_rocksdb->get_data_handle(), {FLAGS_ingest_file_name}, ifo);
+//         if (!s.ok()) {
+//             DB_WARNING("ingest fail: %s error: code=%d, msg=%s", FLAGS_ingest_file_name.c_str(), s.code(), s.ToString().c_str());
+//         } else {
+//             DB_WARNING("ingest succ: %s", FLAGS_ingest_file_name.c_str());
+//         }
+//     }
+
+//     std::unique_ptr<rocksdb::Iterator> iter4(_rocksdb->new_iterator(read_options, _rocksdb->get_data_handle()));
+//     for (iter4->SeekToFirst(); iter4->Valid(); iter4->Next()) {
+//         rocksdb::Slice key_slice(iter4->key());
+//         rocksdb::Slice value_slice(iter4->value());
+//         DB_WARNING("key: %s, value: %s", key_slice.ToString(false).c_str(), value_slice.ToString(false).c_str());
+//     }
+//     if (snapshot) {
+//         _rocksdb->release_snapshot(snapshot);
+//     }
+//     rocksdb::Slice start("0");
+//     rocksdb::Slice end("999999");
+//     rocksdb::CompactRangeOptions compact_options;
+//     compact_options.exclusive_manual_compaction = false;
+//     s = _rocksdb->compact_range(compact_options, _rocksdb->get_data_handle(), &start, &end);
+//     if (!s.ok()) {
+//         DB_WARNING("compact_range error: code=%d, msg=%s", 
+//                 s.code(), s.ToString().c_str());
+//     }
+//     bthread_usleep(60 * 1000 * 1000LL);
+//     DB_WARNING("after compact range");
+//     iter4.reset(_rocksdb->new_iterator(read_options, _rocksdb->get_data_handle()));
+//     for (iter4->SeekToFirst(); iter4->Valid(); iter4->Next()) {
+//         rocksdb::Slice key_slice(iter4->key());
+//         rocksdb::Slice value_slice(iter4->value());
+//         DB_WARNING("key: %s, value: %s", key_slice.ToString(false).c_str(), value_slice.ToString(false).c_str());
+//     }
+
+// } // TEST_F
 
 TEST(test_channel, channel) {
     int64_t aa = 3600 * 1000 * 1000;
@@ -630,10 +779,10 @@ TEST(sst_ext_linker_test, sst_ext) {
     std::string name2 = name.substr(6, pos - 6);
     DB_WARNING("%s, %s", name.c_str(), name2.c_str());
     std::map<std::string, SstExtLinker::ExtFileInfo> map;
-    auto linker = SstExtLinker::get_instance();
-    int ret = linker->init(nullptr, "./");
+    auto linker = std::make_shared<SstExtLinker>("./", nullptr);
+    int ret = linker->init();
     ASSERT_EQ(ret, 0);
-    ret = linker->sst_link("afs://yinglong.afs.baidu.com:9902/abc/100_1_1_456.extsst", "001.sst");
+    ret = linker->sst_link("afs://yinglong.afs.baidu.com:9902/abc/100_1_1_456.extsst", "001.sst", 1);
     ASSERT_EQ(ret, 0);
     {
         SstExtLinker::ExtFileInfo info;
@@ -641,7 +790,7 @@ TEST(sst_ext_linker_test, sst_ext) {
         get_size_by_external_file_name(&info.size, nullptr, info.full_name);
         map["001.sst"] = info; 
     }
-    ret = linker->sst_link("afs://yinglong.afs.baidu.com:9902/abc/100_1_2_456.extsst", "002.sst");
+    ret = linker->sst_link("afs://yinglong.afs.baidu.com:9902/abc/100_1_2_456.extsst", "002.sst", 2);
     ASSERT_EQ(ret, 0);
     {
         SstExtLinker::ExtFileInfo info;
@@ -649,7 +798,7 @@ TEST(sst_ext_linker_test, sst_ext) {
     get_size_by_external_file_name(&info.size, nullptr, info.full_name);
         map["002.sst"] = info; 
     }
-    ret = linker->sst_link("afs://yinglong.afs.baidu.com:9902/abc/100_1_3_456.extsst", "003.sst");
+    ret = linker->sst_link("afs://yinglong.afs.baidu.com:9902/abc/100_1_3_456.extsst", "003.sst", 3);
     ASSERT_EQ(ret, 0);
     {
         SstExtLinker::ExtFileInfo info;
@@ -661,10 +810,10 @@ TEST(sst_ext_linker_test, sst_ext) {
     map["004.sst"] = map["002.sst"];
     map.erase("002.sst");
     ASSERT_EQ(ret, 0);
-    ret = linker->sst_delete("003.sst");
+    ret = linker->sst_delete("003.sst", false);
     map.erase("003.sst");
     ASSERT_EQ(ret, 0);
-    ret = linker->sst_link("afs://yinglong.afs.baidu.com:9902/abc/100_1_4_456.extsst", "005.sst");
+    ret = linker->sst_link("afs://yinglong.afs.baidu.com:9902/abc/100_1_4_456.extsst", "005.sst", 4);
     ASSERT_EQ(ret, 0);
     {
         SstExtLinker::ExtFileInfo info;

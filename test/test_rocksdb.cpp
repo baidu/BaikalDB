@@ -16,6 +16,7 @@
 #include "meta_rocksdb.h"
 #include <gflags/gflags.h>
 #include "sst_file_writer.h"
+#include "rocksdb_file_system_adaptor.h"
 DEFINE_bool(only_ingest_external, false, "enable log");
 DEFINE_string(ingest_file_name, "", "ingest file name");
 using namespace baikaldb;
@@ -54,6 +55,102 @@ void print_properties_info(baikaldb::RocksWrapper*  rocksdb) {
         DB_WARNING("TablePropertiesCollection[cf_name: %s] [props: %s]; ", item.first.c_str(), item.second->ToString("; ", ": ").c_str());
     }
 }   
+
+TEST_F(RocksdbTEST, internal_iterator) {
+    baikaldb::RocksWrapper*  _rocksdb = RocksWrapper::get_instance();
+    if (!_rocksdb) {
+        DB_FATAL("create rocksdb handler failed");
+        return;
+    }
+    int ret = _rocksdb->init("./rocks_db_internal_iterator", nullptr);
+    if (ret != 0) {
+        DB_FATAL("rocksdb init failed: code:%d", ret);
+        return;
+    }
+    // ON_SCOPE_EXIT([_rocksdb]() {
+    //     _rocksdb->close();
+    // });
+
+    DB_WARNING("RocksdbTEST internal_iterator");
+
+    MutTableKey key1;
+    key1.append_i64(1);
+    key1.append_i64(100);
+    key1.append_string("a");
+    _rocksdb->put(rocksdb::WriteOptions(), _rocksdb->get_data_handle(), key1.data(), "a");
+    MutTableKey key2;
+    key2.append_i64(2);
+    key2.append_i64(100);
+    key2.append_string("b");
+    _rocksdb->put(rocksdb::WriteOptions(), _rocksdb->get_data_handle(), key2.data(), "b");
+    
+    MutTableKey key3;
+    key3.append_i64(2);
+    key3.append_i64(100);
+    key3.append_string("c");
+    _rocksdb->put(rocksdb::WriteOptions(), _rocksdb->get_data_handle(), key3.data(), "c");
+    MutTableKey key4;
+    key4.append_i64(3);
+    key4.append_i64(100);
+    key4.append_string("d");
+    _rocksdb->put(rocksdb::WriteOptions(), _rocksdb->get_data_handle(), key4.data(), "d");
+    auto sp = RocksWrapper::get_instance()->get_snapshot();
+    MutTableKey key5;
+    key5.append_i64(2);
+    key5.append_i64(100);
+    key5.append_string("e");
+    _rocksdb->put(rocksdb::WriteOptions(), _rocksdb->get_data_handle(), key5.data(), "e");
+
+    std::string prefix;
+    std::string upper_bound;
+    MutTableKey key;
+    key.append_i64(2);
+    prefix = key.data();
+    key.append_u64(UINT64_MAX);
+    upper_bound = key.data();
+    rocksdb::Slice upper_bound_slice = upper_bound;
+
+    std::vector<std::string> remote_files;
+    remote_files.reserve(3);
+    remote_files.push_back("./test_ingest1.sst");
+    rocksdb::ReadOptions read_options;
+    
+    read_options.ignore_range_deletions = true;
+    read_options.snapshot = sp;
+    read_options.total_order_seek = true;
+    read_options.fill_cache = false;
+    read_options.iterate_upper_bound = &upper_bound_slice;
+    rocksdb::ColumnFamilyHandle* column_family = RocksWrapper::get_instance()->get_data_handle();
+
+    rocksdb::InternalKey target(key2.data(), rocksdb::kMaxSequenceNumber, rocksdb::kTypeValue);
+    // iter->Seek(target.Encode());
+    rocksdb::InternalKey ikey;
+    ikey.SetMinPossibleForUserKey(prefix);
+
+    auto txn_db = RocksWrapper::get_instance()->get_db();
+    auto seq_number = read_options.snapshot->GetSequenceNumber();
+    // auto internal_iter = txn_db->NewInternalIterator(read_options, seq_number, column_family);
+    // // internal_iter->SeekToFirst();
+    // internal_iter->Seek(ikey.Encode());
+    // while (internal_iter->Valid()) {
+    //     rocksdb::ParsedInternalKey ikey;
+    //     rocksdb::ParseInternalKey(internal_iter->key(), &ikey, true /* log_err_key */);
+    //     std::cout << ikey.user_key.ToString() << " => " << internal_iter->value().ToString() << "\n";
+    //     internal_iter->Next();
+    // }
+    // delete internal_iter;
+    DB_WARNING("seq_number: %lu", seq_number);
+    LocalIterator* iter = new LocalIterator(read_options, column_family, remote_files, 2);
+    iter->Seek(prefix);
+    while (iter->Valid()) {
+        std::cout << iter->key().ToString() << " => " << iter->value().ToString() << "\n";
+        iter->Next();
+    }
+    delete iter;
+    iter = nullptr;
+    _rocksdb->release_snapshot(sp);
+    _rocksdb->close();
+}
 
 TEST_F(RocksdbTEST, ingest_test7) {
     baikaldb::RocksWrapper*  _rocksdb = RocksWrapper::get_instance();

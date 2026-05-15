@@ -185,6 +185,14 @@ int AggFnCall::type_inferer(pb::TupleDescriptor* tuple_desc) {
             break;
         }
     }
+    if (_agg_type != COUNT && _agg_type != COUNT_STAR && _agg_type != MULTI_COUNT_DISTINCT) {
+        for (auto c : children()) {
+            if (is_array(c->col_type())) {
+                DB_WARNING("agg type:%d, child type:%d is array type", _agg_type, c->col_type());
+                return -1;
+            }
+        }
+    }
     return 0;
 }
 

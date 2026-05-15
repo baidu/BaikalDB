@@ -77,19 +77,22 @@ void DMLClosure::Run() {
         done->Run();
     }
     int64_t raft_cost = cost.get_time();
+    int64_t on_apply_cost = apply_cost.get_time();
     Store::get_instance()->raft_total_cost << raft_cost;
     if (raft_cost > FLAGS_print_time_us) {
-        DB_NOTICE("dml log_id:%lu, txn_id:%lu, type:%s, raft_total_cost:%ld, region_id: %ld, "
-                "applied_index:%ld, is_separate:%d num_prepared:%d remote_side:%s",
+        DB_NOTICE("dml log_id:%lu, txn_id:%lu, type:%s, raft_total_cost:%ld, on_apply_cost:%ld, region_id: %ld, "
+                "applied_index:%ld, is_separate:%d num_prepared:%d remote_side:%s, sign:%lu",
                     log_id, 
                     txn_id,
                     pb::OpType_Name(op_type).c_str(), 
                     raft_cost,
+                    on_apply_cost,
                     region_id, 
                     applied_index,
                     is_separate,
                     (region != nullptr)?region->num_prepared():0, 
-                    remote_side.c_str());
+                    remote_side.c_str(),
+                    sql_sign);
     }
     if (region != nullptr) {
         region->real_writing_decrease();

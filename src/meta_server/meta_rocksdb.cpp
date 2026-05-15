@@ -23,7 +23,7 @@ int MetaRocksdb::init() {
         DB_FATAL("create rocksdb handler failed");
         return -1;
     }
-    int ret = _rocksdb->init(FLAGS_db_path);
+    int ret = _rocksdb->init(FLAGS_db_path, nullptr);
     if (ret != 0) {
         DB_FATAL("rocksdb init failed: code:%d", ret);
         return -1;

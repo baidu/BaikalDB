@@ -34,6 +34,7 @@ enum ExprNodeType {
     REGEXP_PREDICATE = 28;
     MAXVALUE_LITERAL = 29;
     WINDOW_EXPR = 30;
+    ARRAY_LITERAL = 31;
 };
 
 message Function {
@@ -62,6 +63,12 @@ message DeriveExprNode {
     optional string field_name = 9;
     //PreparePlanner和PlanCache使用
     optional int32 placeholder_id = 10;
+
+    // 上面LITERAL改成repeated？改动量？
+    repeated int64 array_int_vals = 12;
+    repeated double array_double_vals = 13;
+    repeated bytes array_string_vals = 14;
+    repeated bool array_bool_vals = 15;
 };
 
 message ExprNode {

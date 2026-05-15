@@ -96,6 +96,7 @@ int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& field
     _fields      = fields;
     _field_slot  = field_slot;
     if (txn != nullptr) {
+        _use_ttl = txn->use_ttl();
         _use_normal_ttl = txn->use_normal_ttl();
         _read_ttl_timestamp_us = txn->read_ttl_timestamp_us();
         _online_ttl_base_expire_time_us = txn->online_ttl_base_expire_time_us();
@@ -318,6 +319,11 @@ int Iterator::open(const IndexRange& range, std::map<int32_t, FieldInfo*>& field
             _iter->Prev();
         }
     }
+    if (!_iter->Valid() && !_iter->status().ok()) {
+        DB_FATAL("Iterator error after Seek/SeekForPrev: %s, region:%ld, index:%ld", 
+                 _iter->status().ToString().c_str(), _region, index_id);
+        return -1;
+    }
     _valid = _iter->Valid();
     // for cstore, open iters for non-pk fields
     if (_is_cstore && _idx_type == pb::I_PRIMARY && _valid) {
@@ -368,11 +374,21 @@ int Iterator::open_columns(std::map<int32_t, FieldInfo*>& fields, SmartTransacti
         if (_forward) {
             TimeCost cost;
             iter->Seek(key.data());
+            if (!iter->Valid() && !iter->status().ok()) {
+                DB_FATAL("Column iterator Seek error: %s, region:%ld, field_id:%d",
+                         iter->status().ToString().c_str(), _region, field_id);
+                return -1;
+            }
             DB_DEBUG("region:%ld, field:%d, Seek cost:%ld, valid=%d",
                      _region, field_id, cost.get_time(), iter->Valid());
         } else {
         TimeCost cost;
             iter->SeekForPrev(key.data());
+            if (!iter->Valid() && !iter->status().ok()) {
+                DB_FATAL("Column iterator SeekForPrev error: %s, region:%ld, field_id:%d",
+                         iter->status().ToString().c_str(), _region, field_id);
+                return -1;
+            }
             DB_DEBUG("region:%ld, field:%d, SeekForPrev cost:%ld, valid=%d",
                      _region, field_id, cost.get_time(), iter->Valid());
         }
@@ -453,17 +469,23 @@ int TableIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std:
         return -1;
     }
     rocksdb::Slice value_slice;
-    if (_use_normal_ttl || _mode != KEY_ONLY) {
+    if (_use_ttl || _mode != KEY_ONLY) {
         value_slice = _iter->value();
     }
-    if (_use_normal_ttl) {
+    if (_use_ttl) {
         int64_t row_ttl_timestamp_us = ttl_decode(value_slice, _index_info, _online_ttl_base_expire_time_us);
-        if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
+        if (_use_normal_ttl && _read_ttl_timestamp_us > row_ttl_timestamp_us) {
             //expired
             if (_forward) {
                 _iter->Next();
             } else {
                 _iter->Prev();
+            }
+            if (!_iter->Valid() && !_iter->status().ok()) {
+                DB_WARNING("Iterator error after skipping expired row: %s, region:%ld", 
+                           _iter->status().ToString().c_str(), _region);
+                _valid = false;
+                return -1;
             }
             _valid = _valid && _iter->Valid();
             return -4;
@@ -513,6 +535,12 @@ int TableIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std:
     } else {
         _iter->Prev();
     }
+    if (!_iter->Valid() && !_iter->status().ok()) {
+        DB_WARNING("Iterator error in get_next_internal: %s, region:%ld", 
+                   _iter->status().ToString().c_str(), _region);
+        _valid = false;
+        return -1;
+    }
     _valid = _valid && _iter->Valid();
     
     //DB_WARNING("parse:%ld add_batch:%ld nexttime:%ld", parse, add_batch,next_time);
@@ -554,6 +582,11 @@ int TableIterator::get_column(int32_t tuple_id, const FieldInfo& field, const Fi
         int32_t cmp = 0;
         while (true) {
             if (!iter->Valid()) {
+                if (!iter->status().ok()) {
+                    DB_WARNING("Column iterator error: %s, region:%ld, field_id:%d",
+                               iter->status().ToString().c_str(), _region, field_id);
+                    return -1;
+                }
                 mem_row->set_value(tuple_id, slot_id, field.default_expr_value);
                 break;
             }
@@ -596,7 +629,33 @@ int TableIterator::get_column(int32_t tuple_id, const FieldInfo& field, const Fi
     return 0;
 }
 
-int IndexIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std::unique_ptr<MemRow>* mem_row, std::shared_ptr<Chunk> chunk) {
+// field_idxs 应当是排序好的
+bool IndexIterator::key_contains_null(const TableKey& key, const std::vector<int>& field_idxs) const {
+    int pos = 0;
+    key.skip_region_prefix(pos);
+    key.skip_table_prefix(pos);
+    int current_idx = 0;
+    for (const auto& field_idx: field_idxs) {
+        while (current_idx < field_idx) {
+            if (0 != key.skip_field(_index_info->fields[current_idx], pos, true)) {
+                DB_WARNING("broken nullable key, index_id: %ld", _index_info->id);
+                return true;
+            }
+            ++ current_idx;
+        }
+        if (pos + sizeof(uint8_t) > key.size()) {
+            DB_WARNING("broken nullable key, nullbyte of out key, index_id: %ld", _index_info->id);
+            return true;
+        }
+        if (key.check_is_null(pos)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int IndexIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std::unique_ptr<MemRow>* mem_row,
+        std::shared_ptr<Chunk> chunk, const std::vector<int>& check_null_field_idxs) {
     while (_valid) {
         rocksdb::Slice iter_key = _iter->key();
         if ((_forward && !_fits_right_bound(iter_key)) || (!_forward && !_fits_left_bound(iter_key))) {
@@ -606,17 +665,23 @@ int IndexIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std:
             return -1;
         }
         rocksdb::Slice iter_value;
-        if (_idx_type == pb::I_UNIQ || _use_normal_ttl) {
+        if (_idx_type == pb::I_UNIQ || _use_ttl) {
             iter_value = _iter->value();
         }
-        if (_use_normal_ttl) {
+        if (_use_ttl) {
             int64_t row_ttl_timestamp_us = ttl_decode(iter_value, _index_info, _online_ttl_base_expire_time_us);
-            if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
+            if (_use_normal_ttl && _read_ttl_timestamp_us > row_ttl_timestamp_us) {
                 //expired
                 if (_forward) {
                     _iter->Next();
                 } else {
                     _iter->Prev();
+                }
+                if (!_iter->Valid() && !_iter->status().ok()) {
+                    DB_WARNING("Index iterator error after skipping expired row: %s, region:%ld", 
+                               _iter->status().ToString().c_str(), _region);
+                    _valid = false;
+                    return -1;
                 }
                 _valid = _valid && _iter->Valid();
                 continue;
@@ -628,6 +693,12 @@ int IndexIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std:
             } else {
                 _iter->Prev();
             }
+            if (!_iter->Valid() && !_iter->status().ok()) {
+                DB_WARNING("Index iterator error after region filter: %s, region:%ld", 
+                           _iter->status().ToString().c_str(), _region);
+                _valid = false;
+                return -1;
+            }
             _valid = _valid && _iter->Valid();
             //DB_WARNING("get next, fits region filter, region_id: %ld, record: %s", 
             //    _region, record->debug_string().c_str());
@@ -636,6 +707,19 @@ int IndexIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std:
         //DB_WARNING("get next, in range, region_id: %ld, ke: %s",
         //    _region, _iter->key().ToString(true).c_str());
         TableKey key(iter_key, true);
+
+        if (!check_null_field_idxs.empty() && _index_info->storage_type == pb::ST_NULL_KEY) {
+            if (key_contains_null(key, check_null_field_idxs)) {
+                if (_forward) {
+                    _iter->Next();
+                } else {
+                    _iter->Prev();
+                }
+                _valid = _valid && _iter->Valid();
+                continue;
+            }
+        }
+
         //create a record and parse record and primary key
         //record.reset(TableRecord::new_record(_pk_table).get());
         int pos = 0;
@@ -710,6 +794,12 @@ int IndexIterator::get_next_internal(SmartRecord* record, int32_t tuple_id, std:
             _iter->Next();
         } else {
             _iter->Prev();
+        }
+        if (!_iter->Valid() && !_iter->status().ok()) {
+            DB_WARNING("Index iterator error in get_next_internal: %s, region:%ld", 
+                       _iter->status().ToString().c_str(), _region);
+            _valid = false;
+            return -1;
         }
         _valid = _valid && _iter->Valid();
         return 0;

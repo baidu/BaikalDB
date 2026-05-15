@@ -280,6 +280,7 @@ private:
     int _arrow_filter_batch_size = 1024;
     bool _vectorized_filtered = false; 
     std::shared_ptr<BthreadArrowExecutor> _arrow_io_executor;
+    std::vector<int> _not_null_field_idxs;       // 索引扫描后需要检查是否为null的列在key fields内的idx
 };
 
 class RocksdbVectorizedReader : public arrow::RecordBatchReader {

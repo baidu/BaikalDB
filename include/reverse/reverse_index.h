@@ -52,7 +52,8 @@ public:
                        SmartTable& table_info,
                        const std::string& search_data,
                        pb::MatchMode mode,
-                       std::vector<ExprNode*> conjuncts, 
+                       std::vector<ExprNode*> conjuncts,
+                       uint64_t logid,
                        bool is_fast = false) = 0;
     virtual bool valid() = 0;
     virtual void clear() = 0;
@@ -74,7 +75,8 @@ public:
                     SmartTable& table_info,
                     const std::string& search_data,
                     pb::MatchMode mode,
-                    std::vector<ExprNode*> conjuncts, 
+                    std::vector<ExprNode*> conjuncts,
+                    uint64_t logid,
     //                BooleanExecutorBase*& exe,
                     bool is_fast = false) = 0;
     virtual void set_second_level_length(int length) = 0;
@@ -227,7 +229,8 @@ public:
                        SmartTable& table_info,
                        const std::string& search_data,
                        pb::MatchMode mode,
-                       std::vector<ExprNode*> conjuncts, 
+                       std::vector<ExprNode*> conjuncts,
+                       uint64_t logid,
                        bool is_fast = false); 
     virtual bool valid() {
         auto schema_info = bthread_local_schema();
@@ -270,7 +273,8 @@ public:
                     SmartTable& table_info,
                     const std::string& search_data,
                     pb::MatchMode mode,
-                    std::vector<ExprNode*> conjuncts, 
+                    std::vector<ExprNode*> conjuncts,
+                    uint64_t logid,
         //            BooleanExecutorBase*& exe,
                     bool is_fast = false);
 
@@ -447,6 +451,7 @@ public:
             const std::vector<ReverseIndexBase*>& reverse_indexes,
             const std::vector<std::string>& search_datas,
             const std::vector<pb::MatchMode>& modes,
+            uint64_t logid,
             bool is_fast, bool bool_or); 
 
     int search(
@@ -454,11 +459,12 @@ public:
             SmartIndex& index_info,
             SmartTable& table_info,
             std::map<int64_t, ReverseIndexBase*>& reverse_index_map,
+            uint64_t logid,
             bool is_fast, const pb::FulltextIndex& fulltext_index_info);
 
-    int init_operator_executor(const pb::FulltextIndex& fulltext_index_info, OperatorBooleanExecutor*& exe);
+    int init_operator_executor(const pb::FulltextIndex& fulltext_index_info, OperatorBooleanExecutor*& exe, uint64_t logid);
 
-    int init_term_executor(const pb::FulltextIndex& fulltext_index_info, BooleanExecutor*& exe);
+    int init_term_executor(const pb::FulltextIndex& fulltext_index_info, BooleanExecutor*& exe, uint64_t logid);
 
     bool valid() {
         if (_exe != NULL) {

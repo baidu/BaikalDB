@@ -30,6 +30,7 @@ DEFINE_int64(afs_gc_delay_days, 30, "afs_gc_delay_days");
 DEFINE_int64(afs_gc_allow_dead_store_count, 3, "afs_gc_allow_dead_store_count");
 DEFINE_bool(afs_gc_enable, false, "Enable AFS garbage collection, default: false");
 DEFINE_bool(need_ext_fs_gc, false, "Need external filesystem garbage collection, default: false");
+DEFINE_bool(need_dsc_fs_gc, false, "Need external filesystem garbage collection, default: false");
 DEFINE_int64(compaction_sst_cache_max_block, 8192, "compaction_sst_cache_max_block");
 
 int get_size_by_external_file_name(uint64_t* size, uint64_t* lines, const std::string& external_file) {
@@ -49,15 +50,15 @@ int get_size_by_external_file_name(uint64_t* size, uint64_t* lines, const std::s
     }
     if (vec.back() == "extsst") {
         // olap sst: regionID_lines_size_time.extsst
-        if (vec.size() != 5) {
+        if (vec.size() < 5) {
             DB_FATAL("split %s failed", external_file.c_str());
             return -1;
         }
         if (size != nullptr) {
-            *size = boost::lexical_cast<uint64_t>(vec[2]);
+            *size = boost::lexical_cast<uint64_t>(vec[vec.size() - 3]);
         }
         if (lines != nullptr) {
-            *lines = boost::lexical_cast<uint64_t>(vec[1]);
+            *lines = boost::lexical_cast<uint64_t>(vec[vec.size() -4]);
         }
     } else if (vec.back() == "binlogsst" || vec.back() == "datasst") {
         // backup binlog sst: regionID_startTS_endTS_idx_now()_size_lines.(binlogsst/datasst)
@@ -89,6 +90,48 @@ int get_size_by_external_file_name(uint64_t* size, uint64_t* lines, const std::s
     }
     return 0;
 }
+
+int64_t get_raft_index_from_external_file(const std::string& external_file) {
+    std::vector<std::string> split_vec;
+    boost::split(split_vec, external_file, boost::is_any_of("/"));
+    if (split_vec.empty()) {
+        DB_FATAL("split %s failed", external_file.c_str());
+        return -1;
+    }
+
+    std::vector<std::string> vec;
+    vec.reserve(10);
+    boost::split(vec, split_vec.back(), boost::is_any_of("._"));
+    if (vec.empty()) {
+        DB_FATAL("split %s failed", external_file.c_str());
+        return -1;
+    }
+
+    for (int i = 0; i < (vec.size() / 2); ++i) {
+        if (vec[i * 2] == "raftindex") {
+            return boost::lexical_cast<int64_t>(vec[i * 2 + 1]);
+        }
+    }
+
+    return -1;
+}
+
+std::string make_cloud_file_name(const std::string& store_ip, 
+        int64_t region_id, int64_t raft_index, int64_t file_number, int64_t file_size, int64_t time) {
+    std::string file_name;
+    if (!store_ip.empty()) {
+        file_name += "storeip_" + store_ip + "_";
+    }
+
+    file_name += "regionid_" + std::to_string(region_id) + "_";
+    file_name += "raftindex_" + std::to_string(raft_index) + "_";
+    file_name += "filenumber_" + std::to_string(file_number) + "_";
+    file_name += std::to_string(file_size) + "_";
+    file_name += std::to_string(time) + ".extsst";
+    return file_name;
+
+}
+
 #if defined(BAIDU_INTERNAL)
 // uri,user,password,conf_file,root_path     多组afs ugi使用英文分号分割用户名密码等信息使用英文逗号分割
 int get_afs_infos(std::vector<AfsExtFileSystem::AfsUgi>& ugi_infos) {
@@ -224,7 +267,7 @@ bool AfsExtFileReader::close() {
     // 等待所有异步请求结束
     TimeCost cost;
     while (_read_count.load() > 0) {
-        bthread_usleep(100 * 1000);
+        usleep(100 * 1000);
         if (cost.get_time() > 10 * 1000 * 1000) {
             cost.reset();
             DB_FATAL("close file: %s, read count: %u", _afs_rw_infos[0].absolute_path.c_str(), _read_count.load());
@@ -547,14 +590,29 @@ int AfsExtFileSystem::init() {
     return 0;
 }
 
-std::vector<AfsRWInfo> AfsExtFileSystem::get_rw_infos_by_full_name(const std::string& full_name) {
-    std::string uri;
+std::string AfsExtFileSystem::get_user_path_by_full_name(const std::string& full_name) {
     std::string user_define_path;
     for (const AfsUgi& ugi_info : _ugi_infos) {
         auto uri_pos  = full_name.find(ugi_info.uri);
         auto path_pos = full_name.find(ugi_info.root_path + "/");
         if (uri_pos != std::string::npos && path_pos != std::string::npos) {
-            uri = ugi_info.uri;
+            user_define_path = full_name.substr(path_pos + ugi_info.root_path.size() + 1);
+        }
+    }
+
+    if (user_define_path.empty()) {
+        return full_name;
+    }
+
+    return user_define_path;
+}
+
+std::vector<AfsRWInfo> AfsExtFileSystem::get_rw_infos_by_full_name(const std::string& full_name) {
+    std::string user_define_path;
+    for (const AfsUgi& ugi_info : _ugi_infos) {
+        auto uri_pos  = full_name.find(ugi_info.uri);
+        auto path_pos = full_name.find(ugi_info.root_path + "/");
+        if (uri_pos != std::string::npos && path_pos != std::string::npos) {
             user_define_path = full_name.substr(path_pos + ugi_info.root_path.size() + 1);
         }
     }
@@ -563,7 +621,7 @@ std::vector<AfsRWInfo> AfsExtFileSystem::get_rw_infos_by_full_name(const std::st
 }
 
 std::vector<AfsRWInfo> AfsExtFileSystem::get_rw_infos(const std::string& user_define_path) {
-    std::lock_guard<bthread::Mutex> l(_lock);
+    std::lock_guard<std::mutex> l(_lock);
     std::vector<AfsRWInfo> afs_infos;
     if (user_define_path.empty()) {
         return afs_infos;
@@ -577,6 +635,7 @@ std::vector<AfsRWInfo> AfsExtFileSystem::get_rw_infos(const std::string& user_de
 
         AfsRWInfo info;
         info.uri = ugi_info.uri;
+        info.root_path = ugi_info.root_path;
         info.absolute_path = ugi_info.root_path + "/" + user_define_path;
         info.fs = ugi_info.afs;
         info.statis = _uri_afs_statics[ugi_info.uri];
@@ -613,7 +672,7 @@ std::string AfsExtFileSystem::make_full_name(const std::string& cluster, bool fo
 
     std::string full_name;
     {
-        std::lock_guard<bthread::Mutex> l(_lock);
+        std::lock_guard<std::mutex> l(_lock);
         if (_ugi_infos[pos].afs != nullptr) {
             full_name = _ugi_infos[pos].uri + _ugi_infos[pos].root_path + "/" + user_define_path;
         } else {
@@ -630,6 +689,7 @@ std::string AfsExtFileSystem::make_full_name(const std::string& cluster, bool fo
     DB_NOTICE("cluster: %s, force: %d, user_define_path: %s, full_name: %s", cluster.c_str(), force, user_define_path.c_str(), full_name.c_str());
     return full_name;
 }
+
 #ifdef ENABLE_OPEN_AFS_ASYNC
 void AfsExtFileSystem::AfsFileCtrl::action_finish(int64_t ret) {
     {
@@ -826,6 +886,30 @@ int AfsExtFileSystem::open_writer(const std::string& full_name, std::unique_ptr<
     return 0;
 }
 
+int AfsExtFileSystem::link(const std::string& old_path, const std::string& new_path) {
+    std::vector<AfsRWInfo> tmp_afs_infos = get_rw_infos_by_full_name(old_path);
+    std::vector<AfsRWInfo> afs_infos;
+    std::string new_user_path = get_user_path_by_full_name(new_path);
+    for (auto& info : tmp_afs_infos) {
+        std::string old_name = info.absolute_path;
+        std::string new_name = info.root_path + "/" + new_user_path;
+        int ret = info.fs->Link(new_name.c_str(), old_name.c_str());
+        if (ret != ds::kOk) {
+            DB_FATAL("link failed, old_path: %s, new_path: %s, error: %d", old_name.c_str(), new_name.c_str(), errno);
+            continue;
+        }
+        afs_infos.emplace_back(info);
+    }
+
+    if (afs_infos.empty()) {
+        DB_FATAL("link failed, old_path: %s, new_path: %s", old_path.c_str(), new_path.c_str());
+        return -1;
+    }
+
+    return 0;
+
+}
+
 int AfsExtFileSystem::delete_path(const std::string& full_name, bool recursive) {
     std::vector<AfsRWInfo> afs_infos = get_rw_infos_by_full_name(full_name);
     if (afs_infos.empty()) {
@@ -922,15 +1006,74 @@ int AfsExtFileSystem::readdir(const std::string& full_name, std::set<std::string
 }
 
 int ExtFileSystemGC::external_filesystem_gc() {
-    if (!FLAGS_need_ext_fs_gc) {
+    if (!FLAGS_need_ext_fs_gc && !FLAGS_need_dsc_fs_gc) {
         return 0;
     }
 
     static TimeCost cost;
     if (cost.get_time() > FLAGS_afs_gc_interval_s * 1000 * 1000LL) {
         cost.reset();
-        external_filesystem_gc_do();
+        if (FLAGS_need_ext_fs_gc) {
+            external_filesystem_gc_do();
+        }
+        if (FLAGS_need_dsc_fs_gc) {
+            instance_external_filesystem_gc();
+        }
     }
+    return 0;
+}
+
+int ExtFileSystemGC::instance_external_filesystem_gc() {
+    std::vector<AfsExtFileSystem::AfsUgi> ugi_infos;
+    int ret = get_afs_infos(ugi_infos);
+    if (ret < 0 || ugi_infos.empty()) {
+        DB_FATAL("get afs infos failed");
+        return -1;
+    }
+    static int64_t idx = 0;    
+    AfsExtFileSystem::AfsUgi& ugi = ugi_infos[idx++ % ugi_infos.size()];
+    std::shared_ptr<AfsExtFileSystem> ext_fs(new AfsExtFileSystem({ ugi }));
+
+    ret = ext_fs->init();
+    if (ret < 0) {
+        DB_FATAL("init external filesystem failed");
+        return -1;
+    }
+
+    std::string meta_path = "baikal_cloud/" + FLAGS_meta_server_bns;
+    std::string full_name = ext_fs->make_full_name("", false, meta_path);
+    if (full_name.empty()) {
+        DB_FATAL("local_file: %s make full path failed", meta_path.c_str());
+        return -1;
+    }
+
+    SchemaFactory* factory = SchemaFactory::get_instance();
+    std::unordered_map<std::string, InstanceDBStatus> instance_info_map;
+    ret = factory->get_all_instance_status(&instance_info_map);
+    if (ret < 0) {
+        return -1;
+    }
+
+    std::map<std::string, std::vector<std::string>> resource_tag_instance;
+    ret = get_resource_tag_instance(ext_fs, resource_tag_instance);
+    if (ret < 0) {
+        DB_FATAL("get resource tag instance failed");
+        return -1;
+    }
+
+    for (const auto& pair : resource_tag_instance) {
+        const std::string& resource_tag = pair.first;
+        for (const auto& store_addr : pair.second) {
+            if (instance_info_map.find(store_addr) == instance_info_map.end()) {
+                // store不存在，可能已经迁移
+                std::string instance_full_path = full_name + "/" + resource_tag + "/" + store_addr;
+                ext_fs->delete_path(instance_full_path, true);
+                DB_NOTICE("table path %s gc", instance_full_path.c_str());
+                break;
+            }
+        }
+    }
+
     return 0;
 }
 
@@ -1127,6 +1270,52 @@ int ExtFileSystemGC::table_gc(std::shared_ptr<ExtFileSystem> ext_fs, const std::
             partition_gc(ext_fs, vec[0], table_name, table_id, partitions, start_str);
             column_partition_gc(ext_fs, vec[0], table_name, table_id, start_str);
         }
+    }
+
+    return 0;
+}
+
+int ExtFileSystemGC::get_resource_tag_instance(std::shared_ptr<ExtFileSystem> ext_fs, std::map<std::string, std::vector<std::string>>& resource_tag_instance) {
+    // 获取目录 baikal_cloud/meta 下的子目录以及二级目录
+    // 目录格式为 baikal_cloud/meta/xxx/yyy
+    // 将 xxx 放在 resource_tag_instance 的 key，yyy 放在 value 的 vector 中
+    std::string meta_path = "baikal_cloud/" + FLAGS_meta_server_bns;
+    std::string full_name = ext_fs->make_full_name("", false, meta_path);
+    if (full_name.empty()) {
+        DB_FATAL("local_file: %s make full path failed", meta_path.c_str());
+        return -1;
+    }
+    if (ext_fs->path_exists(full_name) != 1) {
+        DB_WARNING("meta path %s not exist", full_name.c_str());
+        return -1;
+    }
+
+    // 获取一级子目录（resource_tag）
+    std::set<std::string> resource_tags;
+    int ret = ext_fs->readdir(full_name, resource_tags);
+    if (ret < 0) {
+        DB_FATAL("meta path %s readdir failed", full_name.c_str());
+        return -1;
+    }
+
+    // 遍历每个 resource_tag，获取二级目录（instance）
+    for (const std::string& resource_tag : resource_tags) {
+        std::string resource_tag_path = full_name + "/" + resource_tag;
+        std::set<std::string> instances;
+        ret = ext_fs->readdir(resource_tag_path, instances);
+        if (ret < 0) {
+            DB_FATAL("resource_tag path %s readdir failed", resource_tag_path.c_str());
+            return -1;
+        }
+
+        // 将 instance 添加到对应的 resource_tag 下
+        for (const std::string& instance : instances) {
+            if (instance.find("snapshot") != std::string::npos) {
+                continue;
+            }
+            resource_tag_instance[resource_tag].emplace_back(instance);
+        }
+        DB_NOTICE("resource_tag: %s, instance count: %zu", resource_tag.c_str(), instances.size());
     }
 
     return 0;
@@ -1341,7 +1530,7 @@ int CompactionExtFileSystem::external_send_request(pb::CompactionOpType op_type,
 
 std::string CompactionExtFileSystem::make_full_name(const std::string& cluster, bool force, const std::string& user_define_path) {
     return "";
-} 
+}
 
 int CompactionExtFileSystem::rename_file(const std::string& src_file_name, const std::string& dst_file_name) {
     DB_FATAL("rename_file not support src:%s, dst:%s", src_file_name.c_str(), dst_file_name.c_str());

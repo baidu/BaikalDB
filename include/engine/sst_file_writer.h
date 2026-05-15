@@ -33,6 +33,11 @@ public:
     rocksdb::Status put(const rocksdb::Slice& key, const rocksdb::Slice& value) {
         return _sst_writer->Put(key, value);
     }
+
+    rocksdb::Status del(const rocksdb::Slice& key) {
+        return _sst_writer->Delete(key);
+    }
+
     rocksdb::Status finish(rocksdb::ExternalSstFileInfo* file_info = nullptr) {
         return _sst_writer->Finish(file_info);
     }

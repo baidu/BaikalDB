@@ -552,22 +552,15 @@ void ExecNode::set_child_node_property_any_type() {
     }
 }
 
-void ExecNode::encode_exprs_key(std::vector<ExprNode*>& exprs, MemRow* row, MutTableKey& key) {
-    uint8_t null_flag = 0;
-    key.append_u8(null_flag);
+void ExecNode::encode_agg_exprs_key(std::vector<ExprNode*>& exprs, MemRow* row, MutTableKey& key) {
     for (uint32_t i = 0; i < exprs.size(); i++) {
         if (exprs[i] == nullptr) {
             DB_FATAL("exprs is nullptr");
             return;
         }
         ExprValue value = exprs[i]->get_value(row);
-        if (value.is_null()) {
-            null_flag |= (0x01 << (7 - i));
-            continue;
-        }
-        key.append_value(value);
+        key.append_value(value, true);
     }
-    key.replace_u8(null_flag, 0);
 }
 
 }

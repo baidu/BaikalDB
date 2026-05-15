@@ -132,6 +132,12 @@ int Backup::backup_datainfo_to_file(const std::string& path, int64_t& file_size)
         }
     }
 
+    if (!iter->status().ok()) {
+        DB_FATAL("Iterator error during backup datainfo: %s, region_id: %ld",
+                 iter->status().ToString().c_str(), _region_id);
+        return -1;
+    }
+
     if (row == 0) {
         DB_NOTICE("region[%ld] no data in datainfo.", _region_id);
         return -2;
@@ -176,6 +182,12 @@ int Backup::backup_metainfo_to_file(const std::string& path, int64_t& file_size)
         } else {
             ++row;
         }
+    }
+
+    if (!iter->status().ok()) {
+        DB_FATAL("Iterator error during backup metainfo: %s, region_id: %ld",
+                 iter->status().ToString().c_str(), _region_id);
+        return -1;
     }
 
     if (row == 0) {

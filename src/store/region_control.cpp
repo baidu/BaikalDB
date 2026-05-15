@@ -21,6 +21,7 @@
 #include "mut_table_key.h"
 #include "my_raft_log_storage.h"
 #include "closure.h"
+#include "log_entry_reader.h"
 #include "raft_control.h"
 
 namespace baikaldb {
@@ -260,48 +261,7 @@ int RegionControl::remove_meta(int64_t drop_region_id) {
 }
 
 int RegionControl::remove_log_entry(int64_t drop_region_id) {
-    TimeCost cost;
-    rocksdb::WriteOptions options;
-    MutTableKey start_key;
-    MutTableKey end_key;
-    start_key.append_i64(drop_region_id);
-
-    end_key.append_i64(drop_region_id);
-    end_key.append_u64(UINT64_MAX);
-    auto rocksdb = RocksWrapper::get_instance();
-    // sleep会，等待异步日志刷盘
-    bthread_usleep(1000 * 1000);
-    auto status = rocksdb->remove_range(options,
-                                    rocksdb->get_raft_log_handle(),
-                                    start_key.data(),
-                                    end_key.data(),
-                                    true);
-    if (!status.ok()) {
-        DB_WARNING("remove_range error: code=%d, msg=%s, region_id: %ld",
-            status.code(), status.ToString().c_str(), drop_region_id);
-        return -1;
-    }
-    DB_WARNING("remove raft log entry, region_id: %ld, cost: %ld", drop_region_id, cost.get_time());
-    MutTableKey log_data_key;
-    log_data_key.append_i64(drop_region_id).append_u8(MyRaftLogStorage::LOG_DATA_IDENTIFY).append_i64(1);
-    rocksdb::ReadOptions opt;
-    opt.prefix_same_as_start = true;
-    opt.total_order_seek = false;
-    opt.fill_cache = false;
-    std::unique_ptr<rocksdb::Iterator> iter(rocksdb->new_iterator(opt, rocksdb->get_raft_log_handle()));
-    iter->Seek(log_data_key.data());
-    RocksdbVars::get_instance()->raft_log_scan_times_count << 1;
-    if (iter->Valid()) {
-        int64_t log_index = TableKey(iter->key()).extract_i64(sizeof(int64_t) + 1);
-        rocksdb::Slice value(iter->value());
-        LogHead head(value);
-        value.remove_prefix(MyRaftLogStorage::LOG_HEAD_SIZE); 
-        pb::StoreReq req;
-        req.ParseFromArray(value.data(), value.size());
-        DB_WARNING("remove raft log entry, region_id: %ld, cost:%ld, log_index:%ld, type:%d, %s", 
-                drop_region_id, cost.get_time(), log_index, head.type, req.ShortDebugString().c_str());
-    }
-    return 0;
+    return LogEntryReader::get_instance()->remove_log_entry(drop_region_id);
 }
 
 //todo 测一下如果目录为空，删除返回值时啥

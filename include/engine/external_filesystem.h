@@ -17,10 +17,6 @@
 #include <streambuf>
 #include <string>
 #include <vector>
-#include "arrow/buffer.h"
-#include "arrow/io/file.h"
-#include "arrow/io/interfaces.h"
-#include "arrow/memory_pool.h"
 #ifdef BAIDU_INTERNAL
 #include "baidu/inf/afs-api/client/afs_filesystem.h"
 #include "baidu/inf/afs-api/common/afs_common.h"
@@ -33,15 +29,18 @@
 #include <brpc/server.h>
 #include <brpc/controller.h>
 #endif
-#include "common.h"
 #include <bthread/condition_variable.h>
 #include <bthread/mutex.h>
+#include "proto/store.interface.pb.h"
 #include "lru_cache.h"
 
 namespace baikaldb {
 DECLARE_int64(compaction_sst_cache_max_block);
 
 int get_size_by_external_file_name(uint64_t* size, uint64_t* lines, const std::string& external_file);
+int64_t get_raft_index_from_external_file(const std::string& external_file);
+std::string make_cloud_file_name(const std::string& store_ip, 
+        int64_t region_id, int64_t raft_index, int64_t file_number, int64_t file_size, int64_t time);
 struct AfsStatis {
     explicit AfsStatis(const std::string& cluster_name) : afs_cluster(cluster_name), 
         read_time_cost(afs_cluster + "_afs_read_time_cost", 60),
@@ -65,53 +64,6 @@ struct AfsStatis {
     bvar::Adder<int64_t>     read_fail_count;
     bvar::Adder<int64_t>     write_fail_count;
     bvar::Adder<int64_t>     reader_open_count;
-};
-
-class ExtFileReader {
-public:
-    virtual ~ExtFileReader() {}
-
-    virtual int64_t read(char* buf, uint32_t count, uint32_t offset, bool* eof) = 0;
-
-    virtual int64_t skip(uint32_t n, bool* eof) {
-        DB_FATAL("ExtFileReader::skip not implemented");
-        return -1;
-    }
-    // Close the descriptor of this file adaptor
-    virtual bool close() { return true; }
-
-    virtual std::string file_name() { return ""; }
-
-protected:
-
-    ExtFileReader() {}
-
-private:
-    DISALLOW_COPY_AND_ASSIGN(ExtFileReader);
-};
-
-class ExtFileWriter {
-public:
-    virtual ~ExtFileWriter() {}
-    // Return |data.size()| if successful, -1 otherwise.
-    virtual int64_t append(const char* buf, uint32_t count) = 0;
-
-    virtual int64_t tell() = 0;
-
-    // Sync data of the file to disk device
-    virtual bool sync() = 0;
-
-    // Close the descriptor of this file adaptor
-    virtual bool close() { return true; }
-
-    virtual std::string file_name() { return ""; }
-
-protected:
-
-    ExtFileWriter() {}
-
-private:
-    DISALLOW_COPY_AND_ASSIGN(ExtFileWriter);
 };
 
 class CompactionSstCache {
@@ -149,6 +101,7 @@ private:
 #if defined(BAIDU_INTERNAL)
 struct AfsRWInfo {
     std::string  uri;
+    std::string  root_path;
     std::string  absolute_path;
     afs::Reader* reader = nullptr;
     afs::Writer* writer = nullptr;
@@ -345,49 +298,6 @@ private:
     int64_t _offset;
 };
 
-class ExtFileSystem {
-public:
-    ExtFileSystem() {}
-    virtual ~ExtFileSystem() {}
-
-    virtual int init() = 0;
-    // cluster : 指定集群
-    // force   : 是否强制使用指定的cluster
-    virtual std::string make_full_name(const std::string& cluster, bool force, const std::string& user_define_path) = 0;
-    virtual int open_reader(const std::string& full_name, std::shared_ptr<ExtFileReader>* reader) = 0;
-    virtual int open_writer(const std::string& full_name, std::unique_ptr<ExtFileWriter>* writer) = 0;
-
-    // Deletes the given path, whether it's a file or a directory. If it's a directory,
-    // it's perfectly happy to delete all of the directory's contents. Passing true to 
-    // recursive deletes subdirectories and their contents as well.
-    // Returns true if successful, false otherwise. It is considered successful
-    // to attempt to delete a file that does not exist.
-    virtual int delete_path(const std::string& full_name, bool recursive) = 0;
-
-    // 创建文件，需要支持递归创建路径上不存在的目录
-    virtual int create(const std::string& full_name) = 0;
-
-    // Creates a directory. If create_parent_directories is true, parent directories
-    // will be created if not exist, otherwise, the create operation will fail.
-    // Returns 'true' on successful creation, or if the directory already exists. 
-    virtual int create_directory(const std::string& full_name, 
-                              bool create_parent_directories) {
-        // create接口支持递归创建path中不存在的目录，暂时不使用create_directory
-        DB_FATAL("not support");
-        return -1;
-    }
-
-    // virtual int file_size(const std::string& path, int64_t* size) = 0; 
-
-    // Returns -1:failed; 0: not exists; 1: exists
-    virtual int path_exists(const std::string& full_name) = 0;
-
-    virtual int readdir(const std::string& full_name, std::set<std::string>& sub_files) = 0;
-
-private:
-    DISALLOW_COPY_AND_ASSIGN(ExtFileSystem);
-};
-
 #if defined(BAIDU_INTERNAL)
 
 class AfsExtFileSystem : public ExtFileSystem {
@@ -441,11 +351,11 @@ struct OpenReaderInfo {
     virtual ~AfsExtFileSystem();
 
     virtual int init() override;
-
     std::string make_full_name(const std::string& cluster, bool force, const std::string& user_define_path) override;
     // path:  afs://andi.afs.baidu.com:9902/user/olap/xxx/xxxx
     virtual int open_reader(const std::string& full_name, std::shared_ptr<ExtFileReader>* reader) override;
     virtual int open_writer(const std::string& full_name, std::unique_ptr<ExtFileWriter>* writer) override;
+    virtual int link(const std::string& old_path, const std::string& new_path) override;
     virtual int delete_path(const std::string& full_name, bool recursive) override;
     virtual int create(const std::string& full_name) override;
     virtual int path_exists(const std::string& full_name) override;
@@ -454,9 +364,10 @@ struct OpenReaderInfo {
 private:
     std::shared_ptr<afs::AFSImpl> init(const std::string& uri, const std::string& user, 
                                             const std::string& password, const std::string& conf_file);
+    std::string get_user_path_by_full_name(const std::string& full_name);
     std::vector<AfsRWInfo> get_rw_infos_by_full_name(const std::string& full_name);
     std::vector<AfsRWInfo> get_rw_infos(const std::string& user_define_path);
-    bthread::Mutex _lock;
+    std::mutex _lock;
     // uri: afs://master_host:master_port
     std::map<std::string, std::shared_ptr<AfsStatis>> _uri_afs_statics;
     std::vector<AfsUgi> _ugi_infos;
@@ -468,6 +379,7 @@ class ExtFileSystemGC {
 public:
     static int external_filesystem_gc();
     static int external_filesystem_gc_do();
+    static int instance_external_filesystem_gc();
     static int get_all_partitions_from_store(std::map<int64_t, std::map<std::string, std::set<std::string>>>& table_id_name_partitions);
 private:
     static int table_gc(std::shared_ptr<ExtFileSystem> ext_fs, const std::map<int64_t, std::map<std::string, std::set<std::string>>>& table_id_name_partitions_map);
@@ -477,6 +389,7 @@ private:
             int64_t table_id, const std::string& start_str);
     static bool need_delete_partition(const std::string& partition, const std::string& start_str);
     static int check_partition(const std::string& partition, std::string* start_date, std::string* end_date);
+    static int get_resource_tag_instance(std::shared_ptr<ExtFileSystem> ext_fs, std::map<std::string, std::vector<std::string>>& resource_tag_instance);
 };
 #endif
 
@@ -502,7 +415,12 @@ public:
     virtual int init() override;
     virtual int open_reader(const std::string& full_name, std::shared_ptr<ExtFileReader>* reader) override;
     virtual int open_writer(const std::string& full_name, std::unique_ptr<ExtFileWriter>* writer) override;
+    virtual int link(const std::string& old_path, const std::string& new_path) override {
+        DB_FATAL("CompactionExtFileSystem not implement link, old_path: %s, new_path: %s", old_path.c_str(), new_path.c_str());
+        return -1;
+    }
     virtual int delete_path(const std::string& full_name, bool recursive) {
+        // 删除指定路径的文件或目录（暂未实现）
         DB_FATAL("CompactionExtFileSystem not implement delete_path, name: %s", full_name.c_str());
         return -1;
     }
@@ -516,7 +434,7 @@ public:
                                             const std::string& full_name, 
                                             bool recursive,
                                             pb::CompactionFileResponse& response);
-    bool is_sst(const std::string& full_name);
+    // bool is_sst(const std::string& full_name);
     int delete_remote_copy_file_path();
 private:
     std::string _address;

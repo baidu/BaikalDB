@@ -278,12 +278,6 @@ ErrorType OnRPCDone::fill_single_request(pb::StoreReq& single_req, pb::RegionInf
             scan_node = static_cast<ScanNode*>(scan_nodes[0]);
         }
 
-        // 需要对当前使用的router index id 加锁，可能由于存在全局二级索引backup，store_request在不同索引之间并发使用，需要区分当前处理的req属于哪个router index
-        if (scan_node != nullptr) {
-            bool use_global_backup = _fetcher_store->global_backup_type == GBT_LEARNER;
-            scan_node->set_index_useage_and_lock(use_global_backup);
-        }
-
         if (!_has_multi_plan && _op_type == pb::OP_SELECT) {
             if (_fetcher_store->shared_plan == nullptr) {
                 _fetcher_store->shared_plan = std::make_shared<pb::Plan>();
@@ -303,10 +297,6 @@ ErrorType OnRPCDone::fill_single_request(pb::StoreReq& single_req, pb::RegionInf
             single_req.set_allocated_plan(_fetcher_store->shared_plan.get());
         } else {
             ExecNode::create_pb_plan(old_region_id, single_req.mutable_plan(), _store_request);
-        }
-
-        if (scan_node != nullptr) {
-            scan_node->current_index_unlock();
         }
     }
 
@@ -337,11 +327,10 @@ void OnRPCDone::select_resource_insulate_read_addr(pb::RegionInfo& info,
     // 事务读也读leader
     if (info.learners_size() > 0 &&
             ((FLAGS_fetcher_learner_read && valid_addrs.size() > 0)
-            || _state->need_learner_backup()
-            || _fetcher_store->global_backup_type == GBT_LEARNER/*全局索引降级，强制访问learner*/)) {
+            || _state->need_learner_backup())) {
         // 指定了resource tag,没有可选learner, 在强制降级的情况下，忽略指定的resource tag
         if (valid_addrs.empty() 
-            && (_state->need_learner_backup() || _fetcher_store->global_backup_type == GBT_LEARNER)) {
+            && _state->need_learner_backup()) {
             select_valid_peers(info, "", info.learners(), valid_addrs);
         }
         if (valid_addrs.size() > 0) {
@@ -378,10 +367,6 @@ void OnRPCDone::select_resource_insulate_read_addr(pb::RegionInfo& info,
         FetcherStore::choose_other_if_dead(info, addr);
     }
 
-    // 存在全局索引降级的情况，强制访问主集群的情况下不要backup
-    if (_fetcher_store->global_backup_type == GBT_MAIN) {
-        _backup.clear();
-    }
 }
 
 void OnRPCDone::select_addr(pb::RegionInfo& info, 
@@ -410,8 +395,7 @@ void OnRPCDone::select_addr(pb::RegionInfo& info,
     }
 
     if (_op_type == pb::OP_SELECT && _state->txn_id == 0 && info.learners_size() > 0 && 
-        (FLAGS_fetcher_learner_read || _state->need_learner_backup()
-            || _fetcher_store->global_backup_type == GBT_LEARNER/*全局索引降级，强制访问learner*/)) {
+        (FLAGS_fetcher_learner_read || _state->need_learner_backup())) {
         std::vector<std::string> valid_learners;
         select_valid_peers(info, "", info.learners(), valid_learners);
         if (!valid_learners.empty()) {
@@ -453,8 +437,7 @@ void OnRPCDone::select_addr(pb::RegionInfo& info,
             FetcherStore::choose_opt_instance(info.region_id(), info.learners(), "", _backup, backup_status, nullptr);
             bool backup_can_access = (!_backup.empty()) && (backup_status == pb::NORMAL) && 
                                         _fetcher_store->peer_status.can_access(info.region_id(), _backup);
-            if (addr_status != pb::NORMAL && backup_can_access && 
-                    _fetcher_store->global_backup_type != GBT_MAIN/*全局索引降级，强制访问主集群不可以只访问learner*/) {
+            if (addr_status != pb::NORMAL && backup_can_access) {
                 addr = _backup;
                 _backup.clear();
                 _state->need_statistics = false;
@@ -479,10 +462,6 @@ void OnRPCDone::select_addr(pb::RegionInfo& info,
         FetcherStore::choose_other_if_dead(info, addr);
     }
 
-    // 存在全局索引降级的情况，强制访问主集群的情况下不要backup
-    if (_fetcher_store->global_backup_type == GBT_MAIN) {
-        _backup.clear();
-    }
 }
 
 ErrorType OnRPCDone::send_async() {
@@ -1707,18 +1686,6 @@ int64_t FetcherStore::get_dynamic_timeout_ms(ExecNode* store_request, pb::OpType
 
         std::vector<ExecNode*> scan_nodes;
         store_request->get_node(pb::SCAN_NODE, scan_nodes);
-        if (sql_info != nullptr && scan_nodes.size() == 1) {
-            ScanNode* scan_node = static_cast<ScanNode*>(scan_nodes[0]);
-            int64_t heap_top = sql_info->latency_heap_top();
-            if (scan_node->learner_use_diff_index() && heap_top > 0) {
-                DB_WARNING("dynamic_timeout_ms: %ld, heap_top: %ld", dynamic_timeout_ms, heap_top);
-                if (dynamic_timeout_ms <= 0 ) {
-                    dynamic_timeout_ms = heap_top;
-                } else {
-                    dynamic_timeout_ms = std::min(dynamic_timeout_ms, heap_top);
-                }
-            }
-        }
     }
 
     return dynamic_timeout_ms;
@@ -1797,8 +1764,7 @@ int FetcherStore::run_not_set_state(RuntimeState* state,
                     ExecNode* store_request,
                     int start_seq_id,
                     int current_seq_id,
-                    pb::OpType op_type, 
-                    GlobalBackupType backup_type) {
+                    pb::OpType op_type) {
     region_batch.clear();
     index_records.clear();
     start_key_sort.clear();
@@ -1815,7 +1781,6 @@ int FetcherStore::run_not_set_state(RuntimeState* state,
     db_handle_bytes = 0;
     client_conn = state->client_conn();
     region_count += region_infos.size();
-    global_backup_type = backup_type;
     arrow_schema.reset();
     region_vectorized_response.clear();
     received_arrow_data = false;

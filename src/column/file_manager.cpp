@@ -929,9 +929,9 @@ int ColumnFileManager::finish_major_compact(const std::vector<std::shared_ptr<Co
 
 void ColumnFileManager::finish_row2column(const std::vector<std::shared_ptr<ColumnFileInfo>>& new_files, int64_t max_version) {
     std::unique_lock<std::mutex> l(_mutex);
-    if (!_active_files.empty() || !_delete_files.empty() || _column_status != pb::CS_INVALID) {
+    if (!_active_files.empty() || _column_status != pb::CS_INVALID) {
         // 理论上不会走到  BUG
-        DB_COLUMN_FATAL("base compact should be done before");
+        DB_COLUMN_FATAL("region: %ld base compact should be done before", _region_id);
         for (auto & iter : _active_files) {
             const auto& file = iter.second;
             _delete_files[file->file_name] = file;
