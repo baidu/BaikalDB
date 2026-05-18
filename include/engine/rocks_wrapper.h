@@ -15,6 +15,7 @@
 #pragma once
  
 #include <string>
+#include "port/port.h"
 #include "rocksdb/db.h"
 #include "rocksdb/convenience.h"
 #include "rocksdb/slice.h"

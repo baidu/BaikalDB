@@ -369,6 +369,7 @@ SET(DEP_INC
         ${RE2_INCLUDE_DIR}
 
         ${ROCKSDB_INCLUDE_DIR}
+        ${ROCKSDB_INTERNAL_INCLUDE_DIR}
 
         ${BRPC_INCLUDE_DIR}
         ${BRAFT_INCLUDE_DIR}
@@ -450,6 +451,8 @@ add_definitions(
         -DBRPC_WITH_GLOG=1
         -DFASTFLOAT_ALLOWS_LEADING_PLUS 
         -DFASTFLOAT_SKIP_WHITE_SPACE
+        -DOS_LINUX
+        -DROCKSDB_PLATFORM_POSIX
 )
 
 file(GLOB ENGINE src/engine/*.cpp)

@@ -138,6 +138,7 @@ int Store::init_before_listen(std::vector<std::int64_t>& init_region_ids) {
     }
     boost::trim(FLAGS_resource_tag);
     _resource_tag = FLAGS_resource_tag;
+    std::shared_ptr<ExtFileSystem> ext_fs;
 
 #if defined(BAIDU_INTERNAL)
     // 初始化外部文件系统，用于olap
@@ -147,7 +148,7 @@ int Store::init_before_listen(std::vector<std::int64_t>& init_region_ids) {
         DB_FATAL("get afs infos failed");
         return -1;
     }
-    std::shared_ptr<ExtFileSystem> ext_fs(new AfsExtFileSystem(ugi_infos));
+    ext_fs = new AfsExtFileSystem(ugi_infos);
 
     ret = ext_fs->init();
     if (ret < 0) {

@@ -17,6 +17,7 @@ INCLUDE(ExternalProject)
 SET(ROCKSDB_SOURCES_DIR ${THIRD_PARTY_PATH}/rocksdb)
 SET(ROCKSDB_INSTALL_DIR ${THIRD_PARTY_PATH}/install/rocksdb)
 SET(ROCKSDB_INCLUDE_DIR "${ROCKSDB_INSTALL_DIR}/include" CACHE PATH "rocksdb include directory." FORCE)
+SET(ROCKSDB_INTERNAL_INCLUDE_DIR "${ROCKSDB_SOURCES_DIR}/src/extern_rocksdb" CACHE PATH "rocksdb internal include" FORCE)
 SET(ROCKSDB_LIBRARIES "${ROCKSDB_INSTALL_DIR}/lib64/librocksdb.a" CACHE FILEPATH "rocksdb library." FORCE)
 # For some reason, libraries are under either lib or lib64
 include(GNUInstallDirs)
@@ -66,7 +67,7 @@ ExternalProject_Add(
         -DCMAKE_POSITION_INDEPENDENT_CODE:BOOL=ON
         -DCMAKE_BUILD_TYPE:STRING=${THIRD_PARTY_BUILD_TYPE}
         BUILD_COMMAND make -j4
-        INSTALL_COMMAND ${CMAKE_COMMAND} -E echo "Installing RocksDB..." && make install && ${CMAKE_COMMAND} -E make_directory ${ROCKSDB_INSTALL_DIR}/include/db/compaction && ${CMAKE_COMMAND} -E echo "mkdir success" && ${CMAKE_COMMAND} -E copy_directory <SOURCE_DIR>/db/compaction ${ROCKSDB_INSTALL_DIR}/include/db/compaction
+        INSTALL_COMMAND ${CMAKE_COMMAND} -E echo "Installing RocksDB..." && make install
 )
 
 ADD_DEPENDENCIES(extern_rocksdb zlib snappy zstd lz4 gflags liburing)
