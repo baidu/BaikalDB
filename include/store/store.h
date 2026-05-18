@@ -200,6 +200,8 @@ public:
 
     void compact_region_by_sst_delete_keys_thread();
 
+    void remote_compaction_trigger_thread();
+
     void process_merge_request(int64_t table_id, int64_t region_id);
     //发送请求到metasever, 分配region_id 和 instance
     void process_split_request(int64_t table_id, int64_t region_id, bool tail_split, const std::string& split_key, int64_t key_term);
@@ -298,6 +300,8 @@ public:
         _compact_queue.stop();
         _transfer_leader_queue.stop();
         _shutdown = true;
+        _remote_compaction_trigger_bth.join();
+        DB_WARNING("remote compaction trigger bth join");
         _compact_region_by_total_sst_delete_keys.join();
         DB_WARNING("_compact_region_by_total_sst_delete_keys join");
         _heart_beat_bth.join();
@@ -504,6 +508,8 @@ private:
     Bthread _region_peer_delay_bth;
 
     Bthread _compact_region_by_total_sst_delete_keys;
+
+    Bthread _remote_compaction_trigger_bth;
 
     std::atomic<int32_t> _split_num;    
     bool _shutdown = false;

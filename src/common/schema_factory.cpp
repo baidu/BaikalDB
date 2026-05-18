@@ -453,6 +453,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
     std::unordered_set<int64_t> last_indics;
 
     SmartTable tbl_info_ptr = std::make_shared<TableInfo>();
+    std::set<uint64_t> old_blacklist;
     if (table_info_mapping.count(table_id) == 0) {
         if (nullptr == (tbl_info_ptr->file_proto = new (std::nothrow)FileDescriptorProto)) {
             DB_FATAL("create FileDescriptorProto failed");
@@ -480,6 +481,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         tbl_info.has_rollup_index = false;
         tbl_info.rollup_indexs.clear();
         tbl_info.has_index_write_only_or_write_local = false;
+        old_blacklist = std::move(tbl_info.sign_blacklist);
         tbl_info.sign_blacklist.clear();
         tbl_info.sign_forcelearner.clear();
         tbl_info.sign_rolling.clear();
@@ -544,6 +546,16 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
                 DB_DEBUG("sign_num: %lu, sign_str: %s", sign_num, sign_str.c_str());
             }
         }
+        std::set<uint64_t> add_signs;
+        std::set<uint64_t> remove_signs;
+        std::set_difference(old_blacklist.begin(), old_blacklist.end(),
+                            tbl_info.sign_blacklist.begin(), tbl_info.sign_blacklist.end(),
+                            std::inserter(remove_signs, remove_signs.begin()));
+        std::set_difference(tbl_info.sign_blacklist.begin(), tbl_info.sign_blacklist.end(),
+                            old_blacklist.begin(), old_blacklist.end(),
+                            std::inserter(add_signs, add_signs.begin()));
+        update_blacklist(table_id, add_signs, remove_signs);
+
         if (tbl_info.schema_conf.has_sign_forcelearner() && tbl_info.schema_conf.sign_forcelearner() != "") {
             DB_DEBUG("sign_forcelearner: %s", tbl_info.schema_conf.sign_forcelearner().c_str());
             std::vector<std::string> vec;
@@ -681,7 +693,15 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         }
         field_proto->set_type((FieldDescriptorProto::Type)proto_type);
         field_proto->set_number(field.field_id());
-        field_proto->set_label(FieldDescriptorProto::LABEL_OPTIONAL);
+        if (!is_array(field.mysql_type())) {
+            field_proto->set_label(FieldDescriptorProto::LABEL_OPTIONAL);
+        } else {
+            field_proto->set_label(FieldDescriptorProto::LABEL_REPEATED);
+            if (field.mysql_type() != pb::ARRAY_STRING) {
+                field_proto->mutable_options()->set_packed(true);
+            }
+            tbl_info.has_array_column = true;
+        }
         new_fields_sign << field.field_id() << ":";
         new_fields_sign << proto_type << ";";
 
@@ -715,7 +735,8 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
             field_info.default_expr_value.cast_to(field_info.type);
         }
         if (field_info.type == pb::STRING || field_info.type == pb::HLL
-            || field_info.type == pb::BITMAP || field_info.type == pb::TDIGEST || field_info.type == pb::JSON) {
+            || field_info.type == pb::BITMAP || field_info.type == pb::TDIGEST || field_info.type == pb::JSON
+            || is_array(field_info.type)) {
             field_info.size = -1;
         } else {
             field_info.size = get_num_size(field_info.type);
@@ -735,9 +756,10 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
     }
 
     if (table.has_ttl_duration()) {
-        // 只有第一次设置ttl info允许修改ttl field
-        if (table.has_ttl_field() && !table.ttl_field().field_name().empty()
-                && tbl_info.ttl_info.ttl_duration_s <= 0 && tbl_info.ttl_info.ttl_field == nullptr) {
+        // ttl field 为空时可以重置ttl field, 方便普通ttl转field ttl
+        if (tbl_info.ttl_info.ttl_field == nullptr
+                && table.has_ttl_field()
+                && !table.ttl_field().field_name().empty()) {
             std::string ttl_field_name = table.ttl_field().field_name();
             auto iter = std::find_if(tbl_info.fields.begin(), tbl_info.fields.end(),
                        [ttl_field_name](const FieldInfo& field_info) {return field_info.short_name == ttl_field_name;});
@@ -1090,8 +1112,8 @@ int SchemaFactory::update_index(TableInfo& table_info, const pb::IndexInfo& inde
     //用于构建 std::vector<std::pair<int,int> > pk_pos;
     std::unordered_map<int32_t, int32_t> id_map;
 
-    idx_info.has_nullable = false;
-    if (idx_info.type == pb::I_KEY || idx_info.type == pb::I_UNIQ) {
+    idx_info.has_nullable = idx_info.storage_type == pb::ST_NULL_KEY;
+    if ((idx_info.type == pb::I_KEY || idx_info.type == pb::I_UNIQ) && idx_info.storage_type != pb::ST_NULL_KEY) {
         idx_info.length = 1; //nullflag
     } else {
         idx_info.length = 0;
@@ -2506,7 +2528,7 @@ void SchemaFactory::get_cost_switch_open(std::vector<std::string>& database_tabl
     return;
 }
 
-void SchemaFactory::get_schema_conf_open(const std::string& conf_name, std::vector<std::string>& database_table) {
+void SchemaFactory::get_schema_conf_open(const std::string& conf_name, std::vector<std::string>& database_table, std::set<int64_t>& table_ids) {
         DoubleBufferedTable::ScopedPtr table_ptr;
     if (_double_buffer_table.Read(&table_ptr) != 0) {
         DB_WARNING("read double_buffer_table error.");
@@ -2540,6 +2562,12 @@ void SchemaFactory::get_schema_conf_open(const std::string& conf_name, std::vect
             database_table.emplace_back(table.second->namespace_ + "." + table.second->name + "." + pb::BackupTable_Name(static_cast<pb::BackupTable>(value)));
         } else if (reflection->GetBool(pb_conf, field)) {
             database_table.emplace_back(table.second->namespace_ + "." + table.second->name);
+            table_ids.insert(table.first);
+            if (conf_name == "enable_compute_storage_decoupled") {
+                for (auto idx : table.second->indices) {
+                    table_ids.insert(idx);
+                }
+            }
         }
     }
 
@@ -3912,6 +3940,37 @@ bool SchemaFactory::table_suitable_for_broadcast_join(int64_t table_id) {
         return true;
     }
     return false;
+}
+
+void SchemaFactory::update_blacklist(int64_t table_id, const std::set<uint64_t>& adds, const std::set<uint64_t>& removes) {
+    if (adds.size() == 0 && removes.size() == 0) {
+        return;
+    }
+    auto update = [table_id, adds, removes] (std::map<uint64_t, std::set<uint64_t>>& blacklist_map) {
+        for (uint64_t add: adds) {
+            blacklist_map[add].insert(table_id);
+        }
+        for (uint64_t remove: removes) {
+            if (blacklist_map.count(remove) == 0) {
+                continue;
+            }
+            blacklist_map[remove].erase(table_id);
+            if (blacklist_map[remove].size() == 0) {
+                blacklist_map.erase(remove);
+            }
+        }
+        return 1;
+    };
+    _blacklist.Modify(update);
+}
+
+bool SchemaFactory::is_sign_in_blacklist(uint64_t sign) {
+    DoubleBufferedBlacklist::ScopedPtr blacklist_ptr;
+    if (_blacklist.Read(&blacklist_ptr)) {
+        DB_WARNING("DoubleBufferedBlacklist read scoped ptr error.");
+        return false;
+    }
+    return blacklist_ptr->count(sign) > 0;
 }
 }//namespace
 

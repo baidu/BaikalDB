@@ -160,6 +160,7 @@ typedef std::shared_ptr<UniqueIdContext> SmartUniqueIdCtx;
 // IGNORE_INDEX 可以在索引选择时屏蔽某些索引 IGNORE_INDEX(index_name1,index_name2) indexname之间不要有空格
 // NO_IGNORE 会在索引选择是忽视ignore标记
 // IGNORE_BLACKLIST 允许被加黑的sql 进行explain
+// PREFER_EQ 最后命中的字段不是eq 或者in 会被视为命中半个（权重0.5）
 struct ExplainHint {
     enum HintType {
         NO_FORCE,
@@ -169,6 +170,7 @@ struct ExplainHint {
         WITHOUT_CBO,
         IGNORE_INDEX,
         KEEP_VIRTUAL,
+        PREFER_EQ
     };
 
     explicit ExplainHint(std::string format) {
@@ -187,6 +189,8 @@ struct ExplainHint {
                 set_flag<NO_IGNORE>();
             } else if (boost::iequals(hint, "KEEP_VIRTUAL")) {
                 set_flag<KEEP_VIRTUAL>();
+            } else if (boost::iequals(hint, "PREFER_EQ")) {
+                set_flag<PREFER_EQ>();
             } else if (boost::istarts_with(hint, "IGNORE_INDEX")) {
                 set_flag<IGNORE_INDEX>();
                 // 提取index names
@@ -450,7 +454,6 @@ public:
     std::set<int64_t> index_ids;
     // 用于索引推荐
     std::map<int32_t, int> field_range_type;
-    std::set<uint64_t> sign_blacklist;
     std::set<uint64_t> sign_forcelearner;
     std::set<uint64_t> sign_rolling;
     std::map<uint64_t, std::map<int64_t, std::set<std::string>>> sign_forceindex; // sign => <table_id, index_name_set>

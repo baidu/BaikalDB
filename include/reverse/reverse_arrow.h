@@ -78,6 +78,13 @@ public:
         return ret.ok();
     }
 
+    int64_t ByteSizeLong() const {
+        return _buffer.size()
+            + _keys_ptr != nullptr ? _keys_ptr->total_values_length() : 0
+            + _flags_ptr != nullptr ? _flags_ptr->length() * sizeof(uint8_t) : 0
+            + _weights_ptr != nullptr ? _weights_ptr->length() * sizeof(double) : 0;
+    }
+
     //不拷贝，data生命周期必须比该类长
     bool ParseFromArray(const char* data, size_t size) {
         arrow::io::BufferReader buf_reader((unsigned char*)data, size);

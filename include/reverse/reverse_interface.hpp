@@ -291,6 +291,9 @@ int NewSchema<List>::create_executor(myrocksdb::Transaction* txn, const std::str
             case pb::S_ES_STANDARD:
                 ret = Tokenizer::get_instance()->es_standard(or_item, term_map, charset);
                 break;
+            case pb::S_SPLIT_PUNCT_SPACE:
+                ret = Tokenizer::get_instance()->split_punct_space(or_item, term_map, charset);
+                break;
 #if defined(BAIDU_INTERNAL) && !defined(__aarch64__)
             case pb::S_WORDRANK: 
                 ret = Tokenizer::get_instance()->wordrank(or_item, term_map, charset);

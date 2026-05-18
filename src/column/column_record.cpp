@@ -70,7 +70,7 @@ std::string ColumnRecord::encode_row_key(std::shared_ptr<arrow::RecordBatch> rec
         if (column_idx == 0 && value.is_numberic() && field.lower_short_name == "userid") {
             userid = value.get_numberic<int64_t>();
         }
-        key.append_value(value);
+        key.append_value(value, false);
     }
     return key.data();
 }

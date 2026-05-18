@@ -89,6 +89,10 @@ int UpdateManagerNode::init_update_info(UpdateNode* update_node) {
                 break;
             }
         }
+        // 向量索引缓存标量数据, 改标量也涉及向量索引
+        if (info.type == pb::I_VECTOR) {
+            has_id = true;
+        }
         if (has_id) {
             if (info.type == pb::I_PRIMARY) {
                 _affect_primary = true;

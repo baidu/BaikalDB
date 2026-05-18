@@ -47,6 +47,9 @@ int segment(
         case pb::S_ES_STANDARD:
             ret = Tokenizer::get_instance()->es_standard(word, term_map, charset);
             break;
+        case pb::S_SPLIT_PUNCT_SPACE:
+            ret = Tokenizer::get_instance()->split_punct_space(word, term_map, charset);
+            break;
 #if defined(BAIDU_INTERNAL) && !defined(__aarch64__)
         case pb::S_WORDRANK:
             ret = Tokenizer::get_instance()->wordrank(word, term_map, charset);

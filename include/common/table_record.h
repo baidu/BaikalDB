@@ -148,6 +148,8 @@ public:
 
     int get_reverse_word(IndexInfo& index_info, std::string& word);
 
+    int get_float_vector(IndexInfo& index_info, std::vector<float>& vectors);
+
     int encode(std::string& out) {
         if (_message->SerializeToString(&out)) {
             return 0;
@@ -209,6 +211,7 @@ public:
     // these two funcs are only used for encode/decode pk fields after secondary index
     int encode_primary_key(IndexInfo& index, MutTableKey& key, int field_cnt);
     int decode_primary_key(IndexInfo& index, const TableKey& key, int& pos);
+
     int encode_value_for_rollup(IndexInfo& index, const std::vector<FieldInfo>& total_fields, 
                     const std::vector<FieldInfo>& fields_need_sum,
                     bool is_delete = false);

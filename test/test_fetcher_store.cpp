@@ -426,52 +426,6 @@ TEST_F(FetcherStoreTest, test_resource_perfer_read) {
     }
 }
 
-TEST_F(FetcherStoreTest, test_GBT_LEARNER_read) {
-    set_all_instance_normal();
-    auto schema_factory = baikaldb::SchemaFactory::get_instance();
-    pb::RegionInfo region;
-    region.set_region_id(1);
-    region.set_leader("127.0.0.1:pap-bd1");
-    region.add_peers("127.0.0.1:pap-bd1");
-    region.add_peers("127.0.0.1:pap-bd2");
-    region.add_peers("127.0.0.1:pap-bj1");
-    region.add_peers("127.0.0.1:watt-bj1");
-    region.add_peers("127.0.0.1:offline-bd1");
-    region.add_learners("127.0.0.1:offline-bd2");
-    FLAGS_fetcher_follower_read = true;
-    FLAGS_fetcher_learner_read = true;
-    FLAGS_insulate_fetcher_resource_tag = "";
-    {
-        FetcherStore fetcher_store;
-        RuntimeState state;
-        ExecNode store_request;
-        OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
-        fetcher_store.global_backup_type = GBT_LEARNER;
-        done.select_addr();
-        ASSERT_TRUE("127.0.0.1:offline-bd2" == done._addr);
-        done._response_ptr->set_errcode(pb::LEARNER_NOT_READY);
-        done.handle_response(done._addr);
-        done.retry_times_inc();
-        done.select_addr();
-        ASSERT_TRUE("127.0.0.1:offline-bd2" != done._addr);
-    }
-    {
-        FLAGS_insulate_fetcher_resource_tag = "watt";
-        FetcherStore fetcher_store;
-        RuntimeState state;
-        ExecNode store_request;
-        OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
-        fetcher_store.global_backup_type = GBT_LEARNER;
-        done.select_addr();
-        ASSERT_TRUE("127.0.0.1:offline-bd2" == done._addr);
-        done._response_ptr->set_errcode(pb::LEARNER_NOT_READY);
-        done.handle_response(done._addr);
-        done.retry_times_inc();
-        done.select_addr();
-        ASSERT_TRUE("127.0.0.1:offline-bd2" != done._addr);
-    }
-}
-
 TEST_F(FetcherStoreTest, test_retry_later_choose_other_peer_read1) {
     auto schema_factory = baikaldb::SchemaFactory::get_instance();
     pb::RegionInfo region;

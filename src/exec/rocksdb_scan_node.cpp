@@ -49,6 +49,11 @@ int RocksdbScanNode::choose_index(RuntimeState* state) {
     if (pos_index.has_range_key_sorted()) {
         _range_key_sorted = pos_index.range_key_sorted();
     }
+    if (0 != pos_index.not_null_fields().size()) {
+        for (auto it: pos_index.not_null_fields()) {
+            _not_null_field_idxs.emplace_back(it);
+        }
+    }
 
     _index_id = pos_index.index_id();
     _index_info = _factory->get_index_info_ptr(_index_id);
@@ -689,7 +694,7 @@ int RocksdbScanNode::open(RuntimeState* state) {
 
             if (_storage_type == pb::ST_PROTOBUF_OR_FORMAT1 || _storage_type == pb::ST_ARROW) {
                 _m_index.search(txn->get_txn(), _pri_info, _table_info,
-                    reverse_index_map, !FLAGS_reverse_seek_first_level, 
+                    reverse_index_map, state->log_id(), !FLAGS_reverse_seek_first_level,
                     _pb_node.derive_node().scan_node().fulltext_index());
                 // DB_FATAL("fulltext: %s", _pb_node.derive_node().scan_node().fulltext_index().DebugString().c_str());
             } else {
@@ -706,7 +711,7 @@ int RocksdbScanNode::open(RuntimeState* state) {
 
             if (_storage_type == pb::ST_PROTOBUF_OR_FORMAT1 || _storage_type == pb::ST_ARROW) {
                 _m_index.search(txn->get_txn(), _pri_info, _table_info, 
-                    _reverse_indexes, _query_words, _match_modes, !FLAGS_reverse_seek_first_level, !_bool_and);
+                    _reverse_indexes, _query_words, _match_modes, state->log_id(), !FLAGS_reverse_seek_first_level, !_bool_and);
             } else {
                 DB_FATAL("fulltext storage type error");
                 return -1;
@@ -723,7 +728,7 @@ int RocksdbScanNode::open(RuntimeState* state) {
         //DB_NOTICE("word:%s", str_to_hex(word).c_str());
         // seek性能太差了，倒排索引都不做seek
         ret = _reverse_index->search(txn->get_txn(), _pri_info, _table_info, 
-                _query_words[0], _match_modes[0], _scan_conjuncts, !FLAGS_reverse_seek_first_level);
+                _query_words[0], _match_modes[0], _scan_conjuncts, state->log_id(), !FLAGS_reverse_seek_first_level);
         if (ret < 0) {
             return ret;
         }
@@ -1257,13 +1262,12 @@ int RocksdbScanNode::index_ddl_work(RuntimeState* state, MemRow* row) {
         if (record->is_null(field)) {
             return 0;
         }
-        std::string word;
-        ret = record->get_reverse_word(*_ddl_index_info, word);
+        std::vector<float> word;
+        ret = record->get_float_vector(*_ddl_index_info, word);
         if (ret < 0) {
             DB_WARNING_STATE(state, "index_info to word fail for index_id: %ld", index_id);
             return ret;
         }
-        //DB_NOTICE("word:%s", str_to_hex(word).c_str());
         ret = vector_index_map[index_id]->insert_vector(txn, word, pk_key.data(), record);
         if (ret < 0) {
             DB_WARNING_STATE(state, "vector_index fail insert, index_id: %ld", index_id);
@@ -1794,13 +1798,13 @@ int RocksdbScanNode::get_next_by_index_seek(RuntimeState* state, RowBatch* batch
         } else {
             if (use_record) {
                 // 要反查主表
-                ret = _index_iter->get_next(record);
+                ret = _index_iter->get_next(record, _not_null_field_idxs);
             } else if (!use_chunk) {
                 // 索引完全覆盖, 使用memrow
-                ret = _index_iter->get_next(_tuple_id, row);
+                ret = _index_iter->get_next(_tuple_id, row, _not_null_field_idxs);
             } else {
                 // 索引完全覆盖, 使用chunk
-                ret = _index_iter->get_next_for_chunk(_tuple_id, index_data_chunk);
+                ret = _index_iter->get_next_for_chunk(_tuple_id, index_data_chunk, _not_null_field_idxs);
             }
             //DB_DEBUG("rocksdb_scan region_%ld record[%s]", _region_id, record->to_string().c_str());
             if (ret < 0) {
@@ -1927,7 +1931,6 @@ void RocksdbScanNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
     auto scan_pb = pb_node->mutable_derive_node()->mutable_scan_node();
     scan_pb->clear_use_indexes();
     scan_pb->clear_indexes();
-    scan_pb->clear_learner_index();
 
     for (auto& scan_index_info : _scan_indexs) {
         if (_is_explain) {
@@ -1938,24 +1941,12 @@ void RocksdbScanNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
 
         // 记录index_id供store qos使用
         scan_pb->add_use_indexes(scan_index_info.index_id);
-        if ((_current_global_backup && scan_index_info.use_for != ScanIndexInfo::U_GLOBAL_LEARNER) || 
-            (!_current_global_backup && scan_index_info.use_for == ScanIndexInfo::U_GLOBAL_LEARNER)) {
-            continue;
-        } 
-
+        
         if (scan_index_info.index_id == scan_index_info.router_index_id 
                 && scan_index_info.region_primary.count(region_id) > 0) {
-            if (scan_index_info.use_for == ScanIndexInfo::U_LOCAL_LEARNER) {
-                scan_pb->set_learner_index(scan_index_info.region_primary[region_id]);
-            } else {
-                scan_pb->add_indexes(scan_index_info.region_primary[region_id]);
-            }
+            scan_pb->add_indexes(scan_index_info.region_primary[region_id]);
         } else {
-            if (scan_index_info.use_for == ScanIndexInfo::U_LOCAL_LEARNER) {
-                scan_pb->set_learner_index(scan_index_info.raw_index);
-            } else {
-                scan_pb->add_indexes(scan_index_info.raw_index);
-            }
+            scan_pb->add_indexes(scan_index_info.raw_index);
         }
     }
 }

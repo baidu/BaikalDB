@@ -151,6 +151,9 @@ int DualScanNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
     }
     int ret = 0;
     do {
+        if (batch->is_full()) {
+            return 0;
+        }
         RowBatch derived_batch;
         ret = _sub_query_node->get_next(_sub_query_runtime_state, &derived_batch, eos);
         if (ret < 0) {

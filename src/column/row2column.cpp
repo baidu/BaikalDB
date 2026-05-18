@@ -1,5 +1,7 @@
 #include "row2column.h"
 
+#include "log_entry_reader.h"
+
 namespace baikaldb {
 DEFINE_int32(column_minor_compact_read_raft_rows, 1000000, "column_minor_compact_read_raft_rows(100w)"); 
 ExprValue Row2ColumnReader::get_default_value(const FieldInfo& field) {
@@ -168,6 +170,12 @@ arrow::Status RocksdbBaseReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* o
         _is_finish = true;
     }
 
+    if (!_iter->status().ok()) {
+        DB_FATAL("Iterator error during row2column read: %s, region_id: %ld",
+                 _iter->status().ToString().c_str(), _options.region_id);
+        return arrow::Status::IOError("Iterator error");
+    }
+
     if (_column_record->size() == 0) {
         out->reset();
         DB_NOTICE("read base rocksdb is finish, region_id: %ld, need_index[%ld, %ld], "
@@ -195,38 +203,9 @@ int RaftLogReader::init() {
         return -1;
     }
     TimeCost cost;
-    MutTableKey log_data_key;
-    log_data_key.append_i64(_options.region_id).append_u8(MyRaftLogStorage::LOG_DATA_IDENTIFY).append_i64(_options.start_index);
-    MutTableKey prefix;
-    MutTableKey end;
-    prefix.append_i64(_options.region_id).append_u8(MyRaftLogStorage::LOG_DATA_IDENTIFY);
-    end.append_i64(_options.region_id).append_u8(MyRaftLogStorage::LOG_DATA_IDENTIFY).append_i64(_options.end_index + 1);
-    rocksdb::ReadOptions options;
-    rocksdb::Slice upper_bound_slice = end.data();
-    options.iterate_upper_bound = &upper_bound_slice;
-    options.prefix_same_as_start = true;
-    options.total_order_seek = false;
-    options.fill_cache = false;
-    auto iter_ptr = RocksWrapper::get_instance()->new_iterator(options, RocksWrapper::RAFT_LOG_CF);
-    if (iter_ptr == nullptr) {
-        return -1;
-    }
-    std::unique_ptr<rocksdb::Iterator> iter(iter_ptr);
-    iter->Seek(log_data_key.data());
-    RocksdbVars::get_instance()->raft_log_scan_times_count << 1;
-    for (; iter->Valid(); iter->Next()) {
-        if (!iter->key().starts_with(prefix.data())) {
-            DB_WARNING("read end info, region_id: %ld, key:%s", 
-                _options.region_id, iter->key().ToString(true).c_str());
-            return -1;
-        }
-        int64_t log_index = TableKey(iter->key()).extract_i64(sizeof(int64_t) + 1);
-        if (log_index > _options.end_index) {
-            DB_WARNING("region_id:%ld, log_index:%ld, end_log_index:%ld", 
-                _options.region_id, log_index, _options.end_index);
-            break;
-        }
 
+    auto process_single_log = [this] (const rocksdb::Slice& key, const rocksdb::Slice& value, bool& need_break) {
+        int64_t log_index = TableKey(key).extract_i64(sizeof(int64_t) + 1);
         if (_first_index == -1) {
             _first_index = log_index;
         }
@@ -235,14 +214,14 @@ int RaftLogReader::init() {
             _last_index = log_index;
         }
 
-        rocksdb::Slice value_slice(iter->value());
+        rocksdb::Slice value_slice(value);
         LogHead head(value_slice);
-        value_slice.remove_prefix(MyRaftLogStorage::LOG_HEAD_SIZE); 
+        value_slice.remove_prefix(MyRaftLogStorage::LOG_HEAD_SIZE);
         if (head.type != braft::ENTRY_TYPE_DATA) {
             ++_skip_count;
-            DB_WARNING("log entry is not data, region_id: %ld head.type: %d, raft index: %ld", 
+            DB_WARNING("log entry is not data, region_id: %ld head.type: %d, raft index: %ld",
                 _options.region_id, head.type, log_index);
-            continue;
+            return 0;
         }
 
         pb::StoreReq request;
@@ -263,11 +242,11 @@ int RaftLogReader::init() {
                 ++_skip_count;
                 DB_WARNING("region_id: %ld, column skip raft log index: %ld", _options.region_id, log_index);
                 // 找到说明已经这个点被跳过
-                continue;
+                return 0;
             }
             if (txn_id != 0) {
                 insert(txn_id, log_index, request);
-                continue;
+                return 0;
             } else {
                 insert(txn_id, log_index, request);
                 commit(txn_id, log_index);
@@ -276,28 +255,28 @@ int RaftLogReader::init() {
             if (optimize_1pc) {
                 commit(txn_id, log_index);
             } else {
-                continue;
+                return 0;
             }
         } else if (request.op_type() == pb::OP_COMMIT) {
             commit(txn_id, log_index);
         } else if (request.op_type() == pb::OP_ROLLBACK) {
             rollback(txn_id, log_index);
-            continue;
+            return 0;
         } else if (request.op_type() == pb::OP_PARTIAL_ROLLBACK) {
             // TODO: 暂时不处理partial rollback
             DB_COLUMN_FATAL("column read raft log is partial rollback, region_id: %ld", _options.region_id);
-            continue;
+            return 0;
         } else {
-            DB_WARNING("column read raft log is not kv batch, region_id: %ld, op_type: %s", 
+            DB_WARNING("column read raft log is not kv batch, region_id: %ld, op_type: %s",
                 _options.region_id, pb::OpType_Name(request.op_type()).c_str());
-            continue;
+            return 0;
         }
 
         std::map<int64_t, pb::StoreReq> log_index_req_map;
-        ret = get(txn_id, log_index_req_map);
+        int ret = get(txn_id, log_index_req_map);
         if (ret < 0) {
             DB_COLUMN_FATAL("get raft log fail, region_id: %ld", _options.region_id);
-            return -1;
+            return ret;
         }
         for (const auto& iter : log_index_req_map) {
             int idx = 0;
@@ -339,9 +318,18 @@ int RaftLogReader::init() {
             }
             _batchs.push_back(out);
             if (_total_row_nums >= FLAGS_column_minor_compact_read_raft_rows) {
-                break;
+                need_break = true;
+                return 0;
             }
         }
+        return 0;
+    };
+
+    RocksdbVars::get_instance()->raft_log_raftLogReader_count << 1;
+    ret = LogEntryReader::get_instance()->process_logs(_options.region_id, _options.start_index, _options.end_index, process_single_log);
+    if (ret != 0) {
+        DB_WARNING("Init raftLogReader failed, region_id: %ld", _options.region_id);
+        return ret;
     }
 
     if (_column_record->size() > 0) {
@@ -370,62 +358,33 @@ int RaftLogReader::init() {
 }
 
 int RaftLogReader::get_raft_log(int64_t start_index, int64_t end_index, uint64_t txn_id, std::map<int64_t, pb::StoreReq>& pre_reqs) {
-    TimeCost cost;
-    MutTableKey log_data_key;
-    log_data_key.append_i64(_options.region_id).append_u8(MyRaftLogStorage::LOG_DATA_IDENTIFY).append_i64(start_index);
-    MutTableKey prefix;
-    MutTableKey end;
-    prefix.append_i64(_options.region_id).append_u8(MyRaftLogStorage::LOG_DATA_IDENTIFY);
-    end.append_i64(_options.region_id).append_u8(MyRaftLogStorage::LOG_DATA_IDENTIFY).append_i64(end_index + 1);
-    rocksdb::ReadOptions options;
-    rocksdb::Slice upper_bound_slice = end.data();
-    options.iterate_upper_bound = &upper_bound_slice;
-    options.prefix_same_as_start = true;
-    options.total_order_seek = false;
-    options.fill_cache = false;
-    auto iter_ptr = RocksWrapper::get_instance()->new_iterator(options, RocksWrapper::RAFT_LOG_CF);
-    if (iter_ptr == nullptr) {
-        return -1;
-    }
-    std::unique_ptr<rocksdb::Iterator> iter(iter_ptr);
-    iter->Seek(log_data_key.data());
-    RocksdbVars::get_instance()->raft_log_scan_times_count << 1;
-    for (; iter->Valid(); iter->Next()) {
-        if (!iter->key().starts_with(prefix.data())) {
-            DB_WARNING("read end info, region_id: %ld, key:%s", 
-                _options.region_id, iter->key().ToString(true).c_str());
-            return -1;
-        }
-        int64_t log_index = TableKey(iter->key()).extract_i64(sizeof(int64_t) + 1);
-        if (log_index > end_index) {
-            DB_WARNING("region_id:%ld, log_index:%ld, end_log_index:%ld", 
-                _options.region_id, log_index, end_index);
-            break;
-        }
-
-        rocksdb::Slice value_slice(iter->value());
+    int64_t region_id = _options.region_id;
+    auto decode_log_entries = [&](const rocksdb::Slice& key, const rocksdb::Slice& value, bool& need_break) {
+        int64_t log_index = TableKey(key).extract_i64(sizeof(int64_t) + 1);
+        rocksdb::Slice value_slice(value);
         LogHead head(value_slice);
-        value_slice.remove_prefix(MyRaftLogStorage::LOG_HEAD_SIZE); 
+        value_slice.remove_prefix(MyRaftLogStorage::LOG_HEAD_SIZE);
         if (head.type != braft::ENTRY_TYPE_DATA) {
-            DB_WARNING("log entry is not data, region_id: %ld head.type: %d, raft index: %ld", 
-                _options.region_id, head.type, log_index);
-            continue;
+            DB_WARNING("log entry is not data, region_id: %ld head.type: %d, raft index: %ld",
+                region_id, head.type, log_index);
+            return 0;
         }
 
         pb::StoreReq request;
         if (!request.ParseFromArray(value_slice.data(), value_slice.size())) {
-            DB_FATAL("Fail to parse request fail, region_id: %ld", _options.region_id);
+            DB_FATAL("Fail to parse request fail, region_id: %ld", region_id);
             return -1;
         }
 
         if (request.txn_infos_size() > 0 && txn_id == request.txn_infos(0).txn_id() && request.op_type() == pb::OP_KV_BATCH) {
             pre_reqs[log_index].Swap(&request);
-            DB_NOTICE("find pre request, region_id: %ld, log_index: %ld, txn_id: %lu", 
-                _options.region_id, log_index, txn_id);
+            DB_NOTICE("find pre request, region_id: %ld, log_index: %ld, txn_id: %lu",
+                region_id, log_index, txn_id);
         }
-    }
-
-    return 0;
+        return 0;
+    };
+    RocksdbVars::get_instance()->raft_log_raftLogReader_count << 1;
+    return LogEntryReader::get_instance()->process_logs(region_id, start_index, end_index, decode_log_entries);
 }
 
 arrow::Status RaftLogReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* out) {
@@ -521,7 +480,7 @@ int RaftLogReader::get(int64_t txn_id, std::map<int64_t, pb::StoreReq>& log_inde
     if (begin_index < 0) {
         DB_COLUMN_FATAL("read begin index failed, region_id: %ld, txn_id: %ld, begin_index: %ld", 
             _region_id, txn_id, begin_index);
-        return -1;
+        return -2;
     }
 
     if (begin_index < txn_begin_index) {

@@ -27,7 +27,7 @@ using namespace range;
 
 DEFINE_bool(use_index_merge, false, "if use index merge in index select");
 
-int get_field_hit_type_weight(RangeType &ty) {
+int get_field_hit_type_weight(const RangeType &ty) {
     if (ty == EQ || ty == LIKE_EQ) {
         return 10;
     }
@@ -36,6 +36,9 @@ int get_field_hit_type_weight(RangeType &ty) {
     }
     if (ty == RANGE || ty == LIKE_PREFIX) {
         return 5;
+    }
+    if (ty == IS_NULL) {
+        return 4;
     }
     return 0;
 }
@@ -525,6 +528,26 @@ void IndexSelector::hit_field_range(ExprNode* expr,
             return hit_match_against_field_range(expr, field_range_map, fulltext_index_node, table_id);
         }
     }
+
+    if (expr->children_size() < 1) {
+        return;
+    }
+    SlotRef* slot_ref = static_cast<SlotRef*>(expr->children(0));
+    int32_t field_id = slot_ref->field_id();
+    pb::PrimitiveType col_type = expr->children(0)->col_type();
+
+    if (expr->node_type() == pb::IS_NULL_PREDICATE) {
+        // TODO: IS_NULL_PREDICATE和其他条件冲突，应该恒为False
+        if (get_field_hit_type_weight(field_range_map[field_id].type) > get_field_hit_type_weight(IS_NULL)) {
+            return;
+        }
+        field_range_map[field_id] = FieldRange();
+        field_range_map[field_id].conditions.clear();
+        field_range_map[field_id].conditions.insert(expr);
+        field_range_map[field_id].type = IS_NULL;
+        return;
+    }
+
     if (expr->children_size() < 2) {
         return;
     }
@@ -533,10 +556,9 @@ void IndexSelector::hit_field_range(ExprNode* expr,
     } else if (!expr->children(0)->is_slot_ref()) {
         return;
     }
+
     std::vector<ExprValue> values;
-    SlotRef* slot_ref = static_cast<SlotRef*>(expr->children(0));
-    int32_t field_id = slot_ref->field_id();
-    pb::PrimitiveType col_type = expr->children(0)->col_type();
+    values.reserve(expr->children_size());
     for (uint32_t i = 1; i < expr->children_size(); i++) {
         if (!expr->children(i)->is_constant()) {
             return;

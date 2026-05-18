@@ -39,13 +39,6 @@ DEFINE_bool(leader_merge_in_raft, false, "Enable leader merge in raft, default: 
  */
 // value 出参，会remove prefix
 int64_t ttl_decode(rocksdb::Slice& value, const IndexInfo* const index_info, int64_t base_expire_time_us) {
-    if (base_expire_time_us == 0) {
-        // 非online TTL
-        int64_t time = decode_first_8bytes2int64(value);
-        value.remove_prefix(sizeof(uint64_t));
-        return  time;
-    }
-
     if (value.size() < sizeof(uint64_t)) {
         DB_DEBUG("value size < 8, index id: %ld, name: %s, ttl time: %ld", 
             index_info->id, pb::IndexType_Name(index_info->type).c_str(), base_expire_time_us);
@@ -58,79 +51,9 @@ int64_t ttl_decode(rocksdb::Slice& value, const IndexInfo* const index_info, int
         DB_DEBUG("invalid timestamp, index id: %ld, name: %s, ttl time: %ld, data size: %lu, invalid time: %ld", 
             index_info->id, pb::IndexType_Name(index_info->type).c_str(), base_expire_time_us, value.size(), time);
         return base_expire_time_us;
-    } 
-
-    //时间戳有效，需要验证编码是否匹配
-    if (index_info->type == pb::I_KEY) {        
-        if (value.size() == sizeof(uint64_t)) {
-            value.remove_prefix(sizeof(uint64_t));
-            DB_DEBUG("has prefix timestamp index id: %ld, name: %s, ttl time: %ld", 
-                index_info->id, pb::IndexType_Name(index_info->type).c_str(), time);
-        } else {
-            // 报警
-            DB_WARNING("ttl_decode fail, value size != 8, index id: %ld, name: %s, ttl time: %ld", 
-                index_info->id, pb::IndexType_Name(index_info->type).c_str(), time);
-        }
-        return time;
-    } else if (index_info->type == pb::I_PRIMARY) {
-        TupleRecord tuple_record(value);
-        if (tuple_record.verification_fields(index_info->max_field_id) != 0) {
-            DB_DEBUG("has prefix timestamp index id: %ld, name: %s, ttl time: %ld, value size: %lu", 
-                index_info->id, pb::IndexType_Name(index_info->type).c_str(), time, value.size());
-            value.remove_prefix(sizeof(uint64_t));
-        } else {  
-            // 报警
-            DB_WARNING("ttl_decode fail, index id: %ld, name: %s, ttl time: %ld, value size: %lu, base_expire_time_us: %ld, value: %s", 
-                    index_info->id, pb::IndexType_Name(index_info->type).c_str(), time, value.size(), base_expire_time_us, value.ToString(true).c_str());          
-            // 使用临时Slice删除8字节前缀然后再次解析确认
-            rocksdb::Slice tmp_slice_value(value);
-            tmp_slice_value.remove_prefix(sizeof(uint64_t));
-            TupleRecord tmp_tuple_record(tmp_slice_value);
-            if (tmp_tuple_record.verification_fields(index_info->max_field_id) != 0) {
-                // 去掉前缀后解析不通过，则说明该数据确实没有时间前缀
-                DB_WARNING("has no prefix timestamp index id: %ld, name: %s, ttl time: %ld, value size: %lu", 
-                    index_info->id, pb::IndexType_Name(index_info->type).c_str(), time, value.size());
-                return base_expire_time_us;
-            } else {
-                // 去掉前缀解析通过则认为时间前缀是合法的，通过报警提示跟进为什么有无前缀都能解析通过
-                value.remove_prefix(sizeof(uint64_t));
-            }
-        }
-        return time;
-    } else if (index_info->type == pb::I_UNIQ) {
-        value.remove_prefix(sizeof(uint64_t));
-        int pos = 0;
-        bool succ = true;
-        TableKey key(value);
-        for (auto& field_info : index_info->pk_fields) {
-            if (0 != key.skip_field(field_info, pos)) {
-                DB_WARNING("decode index field error: field_id: %d, type: %d", 
-                    field_info.id, field_info.type);
-                succ = false; 
-                break;
-            }
-            if (pos > key.size()) {
-                succ = false;
-                break;
-            }
-        }
-
-        // 不能严格验证 TODO
-        if (succ && pos == value.size()) {
-            DB_DEBUG("has prefix timestamp index id: %ld, name: %s, ttl time: %ld, pos: %d, value size: %lu", 
-                index_info->id, pb::IndexType_Name(index_info->type).c_str(), time, pos, value.size());
-        } else {
-            DB_WARNING("ttl_decode fail, index id: %ld, name: %s, ttl time: %ld, pos: %d, value size: %lu", 
-                index_info->id, pb::IndexType_Name(index_info->type).c_str(), time, pos, value.size());
-        }
-
-        return time;
-    } else {
-        // 报警
-        DB_WARNING("ttl_decode fail, index id: %ld, name: %s, ttl time: %ld, value size: %lu", 
-            index_info->id, pb::IndexType_Name(index_info->type).c_str(), time, value.size());
-        return time;
     }
+    value.remove_prefix(sizeof(uint64_t));
+    return time;
 }
 
 int Transaction::begin(const Transaction::TxnOptions& txn_opt) {
@@ -186,9 +109,9 @@ int Transaction::begin(const rocksdb::TransactionOptions& txn_opt) {
 
     _txn = new myrocksdb::Transaction(txn, _use_cold_db, _cold_data_cf);
     if (_pool != nullptr) {
+        _use_ttl = _pool->use_ttl();
         _use_normal_ttl = _pool->use_normal_ttl();
         _online_ttl_base_expire_time_us = _pool->online_ttl_base_expire_time_us();
-        DB_DEBUG();
     }
     last_active_time = butil::gettimeofday_us();
     begin_time = last_active_time;
@@ -368,13 +291,18 @@ bool Transaction::fits_region_range(rocksdb::Slice key, rocksdb::Slice value,
                 key.remove_prefix(index_info.length);
             } else {
                 // todo, index_info为变长或有Null字段
+                bool nullable_idx = index_info.storage_type == pb::ST_NULL_KEY;
                 TableKey table_key(key);
-                uint8_t null_flag = table_key.extract_u8(0);
-                int pos = 1;
+                uint8_t null_flag = nullable_idx ? 0 : table_key.extract_null_flag(0);
+                int pos = nullable_idx ? 0 : 1;
                 for (uint32_t idx = 0; idx < index_info.fields.size(); ++idx) {
                     //flagbit为1且can_null为true同时成立，该字段才真正不存储
-                    if (((null_flag >> (7 - idx)) & 0x01) 
-                            && index_info.fields[idx].can_null) {
+                    if (nullable_idx) {
+                        if (table_key.check_is_null_and_move_forward(pos)) {
+                            // 为空
+                            continue;
+                        }
+                    } else if (((null_flag >> (7 - idx)) & 0x01) && index_info.fields[idx].can_null) {
                         continue;
                     }
                     if (index_info.fields[idx].type == pb::STRING) {
@@ -748,15 +676,17 @@ int Transaction::get_update_primary(
         DB_DEBUG("lock ok and key exist");
         if (mode == GET_ONLY || mode == GET_LOCK) {
             rocksdb::Slice value_slice(pin_slice);
-            if (_use_normal_ttl && _read_ttl_timestamp_us > 0) {
+            if (_use_ttl) {
                 int64_t row_ttl_timestamp_us = ttl_decode(value_slice, &pk_index, _online_ttl_base_expire_time_us);
-                if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
-                    DB_DEBUG("expired _read_ttl_timestamp_us:%ld row_ttl_timestamp_us:%ld",
-                            _read_ttl_timestamp_us, row_ttl_timestamp_us);
-                    //expired
-                    return -4;
+                if (_use_normal_ttl) {
+                    if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
+                        DB_DEBUG("expired _read_ttl_timestamp_us:%ld row_ttl_timestamp_us:%ld",
+                                _read_ttl_timestamp_us, row_ttl_timestamp_us);
+                        //expired
+                        return -4;
+                    }
+                    ttl_ts = row_ttl_timestamp_us;
                 }
-                ttl_ts = row_ttl_timestamp_us;
             }
             //TimeCost cost;
             if (!is_cstore()) {
@@ -848,9 +778,9 @@ int Transaction::multiget_primary(
         if (statuses[i].ok()) {
             rocksdb::Slice value_slice(values[i]);
             read_disk_size += rocksdb_keys[i].size() + values[i].size();
-            if (_use_normal_ttl && _read_ttl_timestamp_us > 0) {
+            if (_use_ttl) {
                 int64_t row_ttl_timestamp_us = ttl_decode(value_slice, &pk_index, _online_ttl_base_expire_time_us);
-                if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
+                if (_use_normal_ttl && _read_ttl_timestamp_us > row_ttl_timestamp_us) {
                     DB_DEBUG("expired _read_ttl_timestamp_us:%ld row_ttl_timestamp_us:%ld",
                             _read_ttl_timestamp_us, row_ttl_timestamp_us);
                     //expired
@@ -1176,9 +1106,9 @@ int Transaction::multiget_secondary(
         if (statuses[i].ok()) {
             rocksdb::Slice value_slice(values[i]);
             read_disk_size += rocksdb_keys[i].size() + values[i].size();
-            if (_use_normal_ttl && _read_ttl_timestamp_us > 0) {
+            if (_use_ttl) {
                 int64_t row_ttl_timestamp_us = ttl_decode(value_slice, &index, _online_ttl_base_expire_time_us);
-                if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
+                if (_use_normal_ttl && _read_ttl_timestamp_us > row_ttl_timestamp_us) {
                     //expired
                     continue;
                 }
@@ -1322,9 +1252,9 @@ int Transaction::get_update_secondary(
 
     rocksdb::Slice value(pin_slice);
     read_disk_size = _key.size() + value.size();
-    if (_use_normal_ttl && _read_ttl_timestamp_us > 0) {
+    if (_use_ttl) {
         int64_t row_ttl_timestamp_us = ttl_decode(value, &index, _online_ttl_base_expire_time_us);
-        if (_read_ttl_timestamp_us > row_ttl_timestamp_us) {
+        if (_use_normal_ttl && _read_ttl_timestamp_us > row_ttl_timestamp_us) {
             //expired
             return -4;
         }
@@ -1465,7 +1395,7 @@ rocksdb::Status Transaction::prepare() {
     return res;
 }
 
-rocksdb::Status Transaction::commit() {
+rocksdb::Status Transaction::commit(int64_t region_id, int64_t raft_index) {
     BAIDU_SCOPED_LOCK(_txn_mutex);
     last_active_time = butil::gettimeofday_us();
     if (_is_rolledback) {
@@ -1480,6 +1410,18 @@ rocksdb::Status Transaction::commit() {
         DB_FATAL("TransactionError: commit a un-prepare txn: %lu", _txn_id);
         return rocksdb::Status::Aborted("commit a un-prepare txn");
     }
+    if (FLAGS_enable_compute_storage_decoupled_mode) {
+        if (region_id != 0) {
+            int64_t index = raft_index == 0 ? rocksdb_sst_invalid_raft_index : raft_index;
+            // 将raft index写入，key为region_id + 0
+            MutTableKey apply_index_key;
+            apply_index_key.append_i64(region_id).append_i64(0);
+            MutTableKey apply_index_value;
+            apply_index_value.append_i64(index);
+            put_kv_without_lock(apply_index_key.data(), apply_index_value.data(), 0);
+        }
+    }
+
     auto res = _txn->Commit();
     if (res.ok()) {
         _is_finished = true;

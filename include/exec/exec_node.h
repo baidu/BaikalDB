@@ -493,7 +493,7 @@ public:
         return 0;
     }
 
-    static void encode_exprs_key(std::vector<ExprNode*>& exprs, MemRow* row, MutTableKey& key);
+    static void encode_agg_exprs_key(std::vector<ExprNode*>& exprs, MemRow* row, MutTableKey& key);
 
 protected:
     bool _has_optimized = false;

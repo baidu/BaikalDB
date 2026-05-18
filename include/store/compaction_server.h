@@ -23,6 +23,10 @@ public:
                    const pb::RemoteCompactionRequest* request,
                    pb::RemoteCompactionResponse* response,
                    google::protobuf::Closure* done);
+    virtual void get_remote_files(google::protobuf::RpcController* controller,
+                   const pb::GetRemoteFilesRequest* request,
+                   pb::GetRemoteFilesResponse* response,
+                   google::protobuf::Closure* done);
     void set_options_override(const std::string& cf_name, 
                     const pb::RocksdbGFLAGS& rocksdb_gflags,
                     rocksdb::CompactionServiceOptionsOverride& options_override);

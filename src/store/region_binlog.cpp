@@ -1159,6 +1159,12 @@ int BinlogReadMgr::seek(std::map<int64_t, std::string>& start_binlog_map) {
         }
     }
 
+    if (!rocksdb_iter->status().ok()) {
+        DB_FATAL("Iterator error during seek binlog: %s, region_id: %ld",
+                 rocksdb_iter->status().ToString().c_str(), _region_id);
+        return -1;
+    }
+
     if (map_iter != start_binlog_map.end() || failed) {
         DB_FATAL("seek failed: %d, region_id: %ld", failed, _region_id);
         return -1;
@@ -2103,7 +2109,7 @@ void Region::query_offline_binlog_info(pb::StoreRes* response) {
     _rocksdb->get_cold_live_files(&metadata);
     // sstLinker元信息
     std::map<std::string, SstExtLinker::ExtFileInfo> sst_ext_map;
-    SstExtLinker::get_instance()->sst_ext_map(sst_ext_map);
+    get_cold_sst_ext_linker()->sst_ext_map(sst_ext_map);
 
     // check
     OfflineSSTInfo info;
@@ -2552,7 +2558,7 @@ int Region::write_offline_binlog_data() {
                                              _offline_binlog_task.backup_task_start_ts,
                                              _offline_binlog_task.backup_task_end_ts);
     ScopeGuard auto_decrease([this, &data_sst_writer, &binlog_sst_writer]() {
-        auto fs = SstExtLinker::get_instance()->get_exteranl_filesystem();
+        auto fs = RocksWrapper::get_instance()->get_exteranl_filesystem();
         if (fs == nullptr) {
             return;
         }
@@ -2622,6 +2628,12 @@ int Region::write_offline_binlog_data() {
         }
     }
 
+    if (!data_iter->status().ok()) {
+        DB_FATAL("Iterator error during offline binlog backup: %s, region_id: %ld",
+                 data_iter->status().ToString().c_str(), _region_id);
+        return -1;
+    }
+
     ret = binlog_reader.get_prewrite_binlog(0, start_binlog_map, batch_finish, true);
     if (ret < 0) {
         return -1;
@@ -2681,7 +2693,7 @@ void Region::do_backup_binlog() {
         return;
     }
     ScopeGuard auto_decrease([this]() {
-        auto fs = SstExtLinker::get_instance()->get_exteranl_filesystem();
+        auto fs = RocksWrapper::get_instance()->get_exteranl_filesystem();
         if (fs == nullptr) {
             return;
         }
@@ -2788,7 +2800,11 @@ void Region::delete_remote_expired_file() {
     std::string path = "offline_binlog/" + FLAGS_meta_server_bns + "/" + std::to_string(_table_id) + "/";
     std::unordered_map<std::string, int64_t> ttl_remote_files;
     std::set<std::string> list_remote_files; 
-    std::shared_ptr<ExtFileSystem> fs = SstExtLinker::get_instance()->get_exteranl_filesystem();
+    std::shared_ptr<ExtFileSystem> fs = RocksWrapper::get_instance()->get_exteranl_filesystem();
+    if (fs == nullptr) {
+        DB_WARNING("ext fs is nullptr");
+        return;
+    }
     std::string full_name = fs->make_full_name("", false, path);
     if (full_name.empty()) {
         DB_FATAL("local_file: %s make full path failed", path.c_str());

@@ -26,10 +26,193 @@
 #include <openssl/md5.h>
 #include <iomanip>
 #include <cstring>
+#include "rocks_wrapper.h"
 namespace baikaldb {
+DECLARE_string(meta_server_bns);
 static bvar::Adder<int64_t> g_external_sst_count("external_afs_sst_count");
 static bvar::Adder<int64_t> g_external_sst_size_bytes("external_sst_size_bytes");
 const std::string SstExtLinker::SST_EXT_MAP_FILE_PREFIX = "sst_ext_map";
+
+bool is_sst(const std::string& full_name, std::string& short_name) {
+    // 先用/分割，拿到最后一个文件名
+    std::vector<std::string> path_vec;
+    boost::split(path_vec, full_name, boost::is_any_of("/"));
+    if (path_vec.empty()) {
+        DB_WARNING("Invalid file name: %s", full_name.c_str());
+        return false;
+    }
+    const std::string& file_name = path_vec.back();
+
+    // 用.分割文件名，格式必须为 xxxx.sst（恰好两部分）
+    std::vector<std::string> split_vec;
+    boost::split(split_vec, file_name, boost::is_any_of("."));
+    if (split_vec.size() != 2 || split_vec[1] != "sst") {
+        return false;
+    }
+
+    // 判断xxxx部分是否为纯数字
+    const std::string& num_part = split_vec[0];
+    if (num_part.empty()) {
+        return false;
+    }
+    for (char c : num_part) {
+        if (!std::isdigit(c)) {
+            return false;
+        }
+    }
+
+    short_name = file_name;
+    return true;
+}
+bool is_sst(const std::string& full_name) {
+    std::string short_name;
+    return is_sst(full_name, short_name);
+}
+
+bool is_extsst(const std::string& full_name) {
+    std::vector<std::string> split_vec;
+    boost::split(split_vec, full_name, boost::is_any_of("."));
+    if (split_vec.size() > 0 
+            && (split_vec.back() == "extsst" 
+                    || split_vec.back() == "binlogsst" 
+                    || split_vec.back() == "datasst")) {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+std::shared_ptr<SstExtLinker> get_sst_ext_linker() {
+    auto fs = RocksWrapper::get_instance()->get_rocksdb_filesystem();
+    if (fs == nullptr) {
+        return nullptr;
+    }
+
+    if (std::string(fs->Name()) != "DSCRocksdbFileSystemWrapper") {
+        DB_FATAL("filesystem is not DSCRocksdbFileSystemWrapper: %s", fs->Name());
+        return nullptr;
+    }
+
+    auto ext_fs = std::static_pointer_cast<DSCRocksdbFileSystemWrapper>(fs);
+    if (ext_fs == nullptr) {
+        DB_FATAL("filesystem is not DSCRocksdbFileSystemWrapper: %s", fs->Name());
+        return nullptr;
+    }
+
+    return ext_fs->get_linker();
+}
+
+std::shared_ptr<SstExtLinker> get_cold_sst_ext_linker() {
+    auto fs = RocksWrapper::get_instance()->get_cold_rocksdb_filesystem();
+    if (fs == nullptr) {
+        return nullptr;
+    }
+
+    if (std::string(fs->Name()) != "ExtRocksdbFileSystemWrapper") {
+        DB_FATAL("filesystem is not ExtRocksdbFileSystemWrapper: %s", fs->Name());
+        return nullptr;
+    }
+
+    auto ext_fs = std::static_pointer_cast<RocksdbFileSystemWrapper>(fs);
+    if (ext_fs == nullptr) {
+        DB_FATAL("filesystem is not ExtRocksdbFileSystemWrapper: %s", fs->Name());
+        return nullptr;
+    }
+
+    return ext_fs->get_linker();
+}
+
+int copy_file(const std::string& local_file, const std::string& user_define_path, std::string& external_file, uint64_t size) {
+    TimeCost cost;
+    std::shared_ptr<ExtFileSystem> fs = RocksWrapper::get_instance()->get_exteranl_filesystem();
+    if (fs == nullptr) {
+        DB_WARNING("ext fs is nullptr");
+        return -1;
+    }
+    external_file = fs->make_full_name("", false, user_define_path);
+    if (external_file.empty()) {
+        DB_FATAL("local_file: %s make full path failed", local_file.c_str());
+        return -1;
+    }
+    int ret = fs->path_exists(external_file);
+    if (ret < 0) {
+        DB_FATAL("path_exists: %s failed", external_file.c_str());
+        return -1;
+    } else if (ret == 1) {
+        DB_WARNING("path: %s exists", external_file.c_str());
+        return -1;
+    }
+
+    ret = fs->create(external_file);
+    if (ret < 0) {
+        DB_FATAL("create external_file: %s failed", external_file.c_str());
+        return -1;
+    }
+
+    ScopeGuard auto_decrease([&fs, &external_file]() {
+        DB_WARNING("delete external_file: %s", external_file.c_str());
+        fs->delete_path(external_file, false);
+    });
+
+    std::unique_ptr<ExtFileWriter> writer;
+    ret = fs->open_writer(external_file, &writer);
+    if (ret < 0) {
+        DB_WARNING("open writer: %s filed", external_file.c_str());
+        return -1;
+    }
+
+    butil::File f(butil::FilePath{local_file}, butil::File::FLAG_OPEN | butil::File::FLAG_READ);
+    if (!f.IsValid()) {
+        DB_WARNING("file[%s] is not valid.", local_file.c_str());
+        return -1;
+    }
+    int64_t length = f.GetLength();
+    if (length < 0 || length != size) {
+        DB_FATAL("sst: %s get length failed, len: %ld vs %lu", local_file.c_str(), length, size);
+        return -1;
+    }
+    int64_t read_ret = 0;
+    int64_t write_ret = 0;
+    int64_t read_offset = 0;
+    const static int BUF_SIZE {4 * 1024 * 1024LL};
+    std::unique_ptr<char[]> buf(new char[BUF_SIZE]);
+    do {
+        read_ret = f.Read(read_offset, buf.get(), BUF_SIZE);
+        if (read_ret < 0) {
+            DB_WARNING("read file[%s] error.", local_file.c_str());
+            return -1;
+        } 
+        if (read_ret != 0) {
+            write_ret = writer->append(buf.get(), read_ret);
+            if (write_ret != read_ret) {
+                DB_FATAL("append external_file: %s failed, offset: %ld, read_ret: %ld, write_ret: %ld", 
+                    external_file.c_str(), read_offset, read_ret, write_ret);
+                return -1;
+            }
+        }
+        read_offset += read_ret;
+    } while (read_ret == BUF_SIZE);
+
+    int64_t write_size = writer->tell();
+    if (write_size != length) {
+        DB_FATAL("sst_file: %s external_file: %s diff size %ld vs %ld", local_file.c_str(), external_file.c_str(), size, write_size);
+        return -1;
+    }
+
+    if (!writer->sync()) {
+        DB_FATAL("external file: %s sync failed", external_file.c_str());
+        return -1;
+    }
+
+    if (!writer->close()) {
+        DB_FATAL("external file: %s close failed", external_file.c_str());
+        return -1;
+    }
+
+    auto_decrease.release();
+    DB_NOTICE("copy %s to %s size: %ld, cost: %ld", local_file.c_str(), external_file.c_str(), size, cost.get_time());
+    return 0;
+}
  
 rocksdb::IOStatus ExtRandomAccessFile::Read(uint64_t offset, size_t n, const rocksdb::IOOptions& options,
                     rocksdb::Slice* result, char* scratch, rocksdb::IODebugContext* dbg) const {
@@ -60,7 +243,6 @@ rocksdb::IOStatus ExtRandomAccessFile::Read(uint64_t offset, size_t n, const roc
     *result = rocksdb::Slice(scratch, (r < 0) ? 0 : n - left);
     return s;
 }
-
 
 rocksdb::IOStatus ExtSequentialFile::Read(size_t n, const rocksdb::IOOptions& options,
                     rocksdb::Slice* result, char* scratch, rocksdb::IODebugContext* dbg) {
@@ -116,9 +298,7 @@ rocksdb::IOStatus ExtSequentialFile::Skip(uint64_t n) {
     return status;
 }
 
-int SstExtLinker::init(const std::shared_ptr<ExtFileSystem>& ext_fs, const std::string& rocksdb_path) {
-    _ext_fs = ext_fs; 
-    _rocksdb_path = rocksdb_path;
+int SstExtLinker::init() {
     int ret = load_file();
     if (ret < 0) {
         DB_FATAL("load file: %s failed", SST_EXT_MAP_FILE_PREFIX.c_str());
@@ -128,7 +308,7 @@ int SstExtLinker::init(const std::shared_ptr<ExtFileSystem>& ext_fs, const std::
 }
 
 int SstExtLinker::sst_size(const std::string& short_name, uint64_t* size) {
-    std::lock_guard<bthread::Mutex> l(_lock);
+    std::lock_guard<std::mutex> l(_lock);
     auto iter = _sst_ext_map.find(short_name);
     if (iter != _sst_ext_map.end()) {
         *size = iter->second.size;
@@ -151,7 +331,7 @@ int SstExtLinker::extsst_size(const std::string& ext_file, uint64_t* size) {
 }
 
 int SstExtLinker::sst_modify_time(const std::string& short_name, uint64_t* modify_time) {
-    std::lock_guard<bthread::Mutex> l(_lock);
+    std::lock_guard<std::mutex> l(_lock);
     auto iter = _sst_ext_map.find(short_name);
     if (iter != _sst_ext_map.end()) {
         *modify_time = iter->second.modify_time;
@@ -164,7 +344,7 @@ int SstExtLinker::sst_modify_time(const std::string& short_name, uint64_t* modif
 int SstExtLinker::list_external_full_name(const std::set<std::string>& sst_relative_filename, 
                                     std::set<std::string>& external_files) {
     external_files.clear();
-    std::lock_guard<bthread::Mutex> l(_lock);
+    std::lock_guard<std::mutex> l(_lock);
     for (const std::string& sst : sst_relative_filename) {
         auto iter = _sst_ext_map.find(sst);
         if (iter == _sst_ext_map.end()) {
@@ -179,7 +359,7 @@ int SstExtLinker::list_external_full_name(const std::set<std::string>& sst_relat
 
 int SstExtLinker::sst_files(std::vector<std::string>& files) {
     files.clear();
-    std::lock_guard<bthread::Mutex> l(_lock);
+    std::lock_guard<std::mutex> l(_lock);
     for (const auto& info : _sst_ext_map) {
         files.emplace_back(info.first);
     }
@@ -189,7 +369,7 @@ int SstExtLinker::sst_files(std::vector<std::string>& files) {
 
 // -1：失败；0：不存在；1：存在
 int SstExtLinker::sst_exists(const std::string& short_name) {
-    std::lock_guard<bthread::Mutex> l(_lock);
+    std::lock_guard<std::mutex> l(_lock);
     auto iter = _sst_ext_map.find(short_name);
     if (iter != _sst_ext_map.end()) {
         return 1;
@@ -197,8 +377,8 @@ int SstExtLinker::sst_exists(const std::string& short_name) {
     return 0;
 }
 
-int SstExtLinker::sst_delete(const std::string& short_name) {
-    std::lock_guard<bthread::Mutex> l(_lock);
+int SstExtLinker::sst_delete(const std::string& short_name, bool delete_remote) {
+    std::lock_guard<std::mutex> l(_lock);
     auto iter = _sst_ext_map.find(short_name);
     if (iter == _sst_ext_map.end()) {
         DB_FATAL("cant find short_name: %s", short_name.c_str());
@@ -206,6 +386,14 @@ int SstExtLinker::sst_delete(const std::string& short_name) {
     }
 
     ExtFileInfo delete_info = iter->second;
+    if (delete_remote && _ext_fs != nullptr) {
+        int ret = _ext_fs->delete_path(delete_info.full_name, false);
+        if (ret < 0) {
+            DB_FATAL("delete file: %s failed", delete_info.full_name.c_str());
+        }
+        DB_NOTICE("delete file: %s", delete_info.full_name.c_str());
+    }
+
     _sst_ext_map.erase(short_name);
     std::string record = "delete\t" + short_name + "\n";
     int ret = append_file(record);
@@ -225,7 +413,7 @@ int SstExtLinker::sst_delete(const std::string& short_name) {
 }
 
 int SstExtLinker::sst_rename(const std::string& src_short_name, const std::string& dst_short_name) {
-    std::lock_guard<bthread::Mutex> l(_lock);
+    std::lock_guard<std::mutex> l(_lock);
     auto src_iter = _sst_ext_map.find(src_short_name);
     auto dst_iter = _sst_ext_map.find(dst_short_name);
     if (src_iter == _sst_ext_map.end() || dst_iter != _sst_ext_map.end()) {
@@ -256,14 +444,8 @@ int SstExtLinker::sst_rename(const std::string& src_short_name, const std::strin
     return 0;
 }
 
-int SstExtLinker::sst_link(const std::string& ext_src_name, const std::string& dst_short_name) {
-    uint64_t ext_file_size = 0;
-    int ret = get_size_by_external_file_name(&ext_file_size, nullptr, ext_src_name);
-    if (ret != 0) {
-        DB_FATAL("get file: %s size failed", ext_src_name.c_str());
-        return -1;
-    }
-    std::lock_guard<bthread::Mutex> l(_lock);
+int SstExtLinker::sst_link(const std::string& ext_src_name, const std::string& dst_short_name, uint64_t ext_file_size) {
+    std::lock_guard<std::mutex> l(_lock);
     ExtFileInfo info;
     info.full_name = ext_src_name;
     info.size = ext_file_size;
@@ -278,7 +460,7 @@ int SstExtLinker::sst_link(const std::string& ext_src_name, const std::string& d
     _sst_ext_map[dst_short_name] = info;
     std::string record = "link\t" + dst_short_name + "\t" + ext_src_name + "\t" + std::to_string(info.size) + "\t" 
                         + std::to_string(info.modify_time) + "\n";
-    ret = append_file(record);
+    int ret = append_file(record);
     if (ret < 0) {
         // 回滚map
         _sst_ext_map.erase(dst_short_name);
@@ -314,7 +496,7 @@ int SstExtLinker::new_sst_random_access_file(const std::string& short_name,
                             std::unique_ptr<rocksdb::FSRandomAccessFile>* result) {
     std::string ext_file_name;
     {
-        std::lock_guard<bthread::Mutex> l(_lock);
+        std::lock_guard<std::mutex> l(_lock);
         auto iter = _sst_ext_map.find(short_name);
         if (iter == _sst_ext_map.end()) {
             DB_FATAL("cant find short_name: %s", short_name.c_str());
@@ -331,6 +513,12 @@ int SstExtLinker::new_sst_random_access_file(const std::string& short_name,
     }
 
     DB_NOTICE("sst file: %s, ext file: %s", short_name.c_str(), ext_file_name.c_str());
+    return 0;
+}
+
+int SstExtLinker::new_sst_write_able_file(const std::string& shot_name, std::unique_ptr<rocksdb::FSWritableFile>* result) {
+    result->reset();
+    TimeCost cos_time;
     return 0;
 }
 

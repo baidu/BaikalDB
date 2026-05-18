@@ -38,6 +38,8 @@ struct DMLClosure : public braft::Closure {
     int64_t txn_num_increase_rows = 0;
     int64_t applied_index = 0;
     uint64_t log_id = 0;
+    uint64_t sql_sign = 0;
+    TimeCost apply_cost;  // 从on_apply开始到closure执行完成的时间
 };
 
 struct BinlogClosure : public braft::Closure {
@@ -160,8 +162,8 @@ struct SnapshotClosure : public braft::Closure {
         }
         // 遇到部分请求报has no applied logs since last snapshot
         // 不调用on_snapshot_save导致不更新_snapshot_time_cost等信息
-        if (region != nullptr) {
-            if (real_do_snapshot && status().ok()) {
+        if (region != nullptr && real_do_snapshot) {
+            if (status().ok()) {
                 // snapshot后，trundate掉之前的删除操作记录
                 region->vector_truncate_del();
             }

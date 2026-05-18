@@ -41,17 +41,13 @@ std::string TableRecord::get_index_value(IndexInfo& index) {
 
 int TableRecord::get_reverse_word(IndexInfo& index_info, std::string& word) {
     //int ret = 0;
-    if (index_info.type == pb::I_FULLTEXT && index_info.fields.size() != 1) {
+    if (index_info.type != pb::I_FULLTEXT) {
         return -1;
     }
-    if (index_info.type == pb::I_VECTOR && index_info.fields.size() != 1 && index_info.fields.size() != 2) {
+    if (index_info.fields.size() != 1) {
         return -1;
     }
     int field_idx = 0;
-    // 向量隔离索引场景
-    if (index_info.type == pb::I_VECTOR && index_info.fields.size() > 1) {
-        field_idx = 1;
-    }
     auto field = get_field_by_idx(index_info.fields[field_idx].pb_idx);
     //DB_WARNING("index_info:%d id:%d", index_info.fields[0].type, index_info.fields[0].id);
     if (index_info.fields[field_idx].type == pb::STRING) {
@@ -70,6 +66,38 @@ int TableRecord::get_reverse_word(IndexInfo& index_info, std::string& word) {
     return 0;
 }
 
+int TableRecord::get_float_vector(IndexInfo& index_info, std::vector<float>& vectors) {
+    if (index_info.type != pb::I_VECTOR) {
+        return -1;
+    }
+    if (index_info.fields.size() != 1 && index_info.fields.size() != 2) {
+        return -1;
+    }
+    int field_idx = 0;
+    // 向量隔离索引场景
+    if (index_info.fields.size() > 1) {
+        field_idx = 1;
+    }
+    auto field = get_field_by_idx(index_info.fields[field_idx].pb_idx);
+    if (is_array(index_info.fields[field_idx].type)) {
+        ExprValue field_value = get_value(field);
+        field_value.cast_to(pb::ARRAY_FLOAT);
+        ArrayValue<float>* array_val = field_value.get_array<float>();
+        if (array_val != nullptr) {
+            vectors.swap(array_val->data);
+        }
+    } else if (index_info.fields[field_idx].type == pb::STRING) {
+        std::string word;
+        if (get_string(field, word) != 0) {
+            return -1;
+        }
+        from_chars_to_float_vec(word, vectors);
+    } else {
+        from_chars_to_float_vec(get_value(field).get_string(), vectors);
+    }
+    return 0;
+}
+
 void TableRecord::clear_field(const FieldDescriptor* field) {
     const Reflection* _reflection = _message->GetReflection();
     if (field != nullptr) {
@@ -80,7 +108,7 @@ void TableRecord::clear_field(const FieldDescriptor* field) {
 int TableRecord::encode_field(const Reflection* _reflection,
         const FieldDescriptor* field, 
         const FieldInfo& field_info,
-        MutTableKey& key, 
+        MutTableKey& key,
         bool clear, bool like_prefix) {
     switch (field_info.type) {
         case pb::INT8: {
@@ -160,11 +188,12 @@ int TableRecord::encode_key(IndexInfo& index, MutTableKey& key, int field_cnt, b
         DB_WARNING("unknown table index type: %ld", index.id);
         return -1;
     }
-    if (index.type == pb::I_KEY || index.type == pb::I_UNIQ || index.type == pb::I_ROLLUP) {
-        key.append_u8(null_flag);
+    if ((index.type == pb::I_KEY || index.type == pb::I_UNIQ || index.type == pb::I_ROLLUP)
+            && index.storage_type != pb::ST_NULL_KEY) {
+        key.append_null_flag(null_flag);
     }
     uint32_t col_cnt = (field_cnt == -1)? index.fields.size() : field_cnt;
-    if (col_cnt > index.fields.size() || (index.has_nullable && col_cnt > 8)) {
+    if (col_cnt > index.fields.size() || (index.has_nullable && index.storage_type != pb::ST_NULL_KEY && col_cnt > 8)) {
         DB_WARNING("field_cnt out of bound: %ld, %d, %lu", 
             index.id, col_cnt, index.fields.size());
         return -1;
@@ -186,16 +215,19 @@ int TableRecord::encode_key(IndexInfo& index, MutTableKey& key, int field_cnt, b
             }
             res = encode_field(_reflection, field, info, key, clear, last_field_like_prefix);
         } else if (index.type == pb::I_KEY || index.type == pb::I_UNIQ || index.type == pb::I_ROLLUP) {
-            if (!_reflection->HasField(*_message, field)) {
+            if (!_reflection->HasField(*_message, field) && info.can_null) {
                 // this field is null
                 //DB_DEBUG("missing index field: %u, set null-flag", idx);
-                if (!info.can_null) {
-                    //DB_WARNING("encode not_null field");
-                    res = encode_field(_reflection, field, info, key, clear, last_field_like_prefix);
+                if (index.storage_type == pb::ST_NULL_KEY) {
+                    key.append_null_byte(true);
                 } else {
                     null_flag |= (0x01 << (7 - idx));
                 }
             } else {
+                if (index.storage_type == pb::ST_NULL_KEY) {
+                    // 先写flag
+                    key.append_null_byte(false);
+                }
                 res = encode_field(_reflection, field, info, key, clear, last_field_like_prefix);
             }
         } else {
@@ -207,8 +239,9 @@ int TableRecord::encode_key(IndexInfo& index, MutTableKey& key, int field_cnt, b
             return -1;
         }
     }
-    if (index.type == pb::I_KEY || index.type == pb::I_UNIQ) {
-        key.replace_u8(null_flag, pos);
+    if ((index.type == pb::I_KEY || index.type == pb::I_UNIQ)
+            && index.storage_type != pb::ST_NULL_KEY) {
+        key.replace_null_flag(null_flag, pos);
     }
     key.set_full((index.type == pb::I_PRIMARY || index.type == pb::I_UNIQ)
         && col_cnt == index.fields.size());
@@ -237,6 +270,9 @@ int TableRecord::encode_primary_key(IndexInfo& index, MutTableKey& key, int fiel
             DB_WARNING("missing pk field: %d", field->number());
             return -2;
         }
+        // if (index.storage_type == pb::ST_NULL_KEY) {
+        //     key.append_null_byte(false); // 为了简化数据模型，pk前也写nullbyte，永远为false
+        // }
         res = encode_field(_reflection, field, info, key, false, false);
         if (0 != res) {
             DB_WARNING("encode index field error: %u, %d", idx, res);
@@ -312,10 +348,12 @@ int TableRecord::decode_key(IndexInfo& index, const TableKey& key, int& pos) {
     }
     uint8_t null_flag = 0;
     const Reflection* _reflection = _message->GetReflection();
-    if (index.type == pb::I_KEY || index.type == pb::I_UNIQ || index.type == pb::I_ROLLUP) {
-        null_flag = key.extract_u8(pos);
+    if ((index.type == pb::I_KEY || index.type == pb::I_UNIQ || index.type == pb::I_ROLLUP)
+            && index.storage_type != pb::ST_NULL_KEY) {
+        null_flag = key.extract_null_flag(pos);
         pos += sizeof(uint8_t);
     }
+    bool nullable_idx = index.storage_type == pb::ST_NULL_KEY;
     for (uint32_t idx = 0; idx < index.fields.size(); ++idx) {
         const FieldDescriptor* field = get_field_by_idx(index.fields[idx].pb_idx);
         if (field == nullptr) {
@@ -325,11 +363,11 @@ int TableRecord::decode_key(IndexInfo& index, const TableKey& key, int& pos) {
         // DB_WARNING("null_flag: %ld, %u, %d, %d, %s", 
         //     index.id, null_flag, pos, index.fields[idx].can_null, 
         //     key.data().ToString(true).c_str());
-        if (((null_flag >> (7 - idx)) & 0x01) && index.fields[idx].can_null) {
+        if (((null_flag >> (7 - idx)) & 0x01) && index.fields[idx].can_null && !nullable_idx) {
             //DB_DEBUG("field is null: %d", idx);
             continue;
         }
-        if (0 != key.decode_field(_message, _reflection, field, index.fields[idx], pos)) {
+        if (0 != key.decode_field(_message, _reflection, field, index.fields[idx], pos, nullable_idx)) {
             DB_WARNING("decode index field error");
             return -1;
         }
@@ -349,7 +387,7 @@ int TableRecord::decode_primary_key(IndexInfo& index, const TableKey& key, int& 
             DB_WARNING("invalid field: %d", field_info.id);
             return -1;
         }
-        if (0 != key.decode_field(_message, _reflection, field, field_info, pos)) {
+        if (0 != key.decode_field(_message, _reflection, field, field_info, pos, false)) {
             DB_WARNING("decode index field error: field_id: %d, type: %d", 
                 field_info.id, field_info.type);
             return -1;

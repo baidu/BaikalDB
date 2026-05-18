@@ -39,6 +39,11 @@ enum MysqlType : uint8_t {
     MYSQL_TYPE_NEWDATE, 
     MYSQL_TYPE_VARCHAR,
     MYSQL_TYPE_BIT,
+    MYSQL_TYPE_ARRAY_BOOL   = 237,
+    MYSQL_TYPE_ARRAY_INT64  = 238,
+    MYSQL_TYPE_ARRAY_FLOAT  = 239,
+    MYSQL_TYPE_ARRAY_DOUBLE = 240,
+    MYSQL_TYPE_ARRAY_STRING = 241,
     MYSQL_TYPE_TDIGEST = 242,
     MYSQL_TYPE_BITMAP = 243,
     MYSQL_TYPE_HLL = 244,
@@ -405,15 +410,21 @@ inline std::string to_mysql_type_string(pb::PrimitiveType type) {
         case pb::BITMAP:
         case pb::TDIGEST:
             return "binary";
-	case pb::JSON:
-	    return "json";
+        case pb::JSON:
+            return "json";
+        case pb::ARRAY_BOOL:
+        case pb::ARRAY_INT64:
+        case pb::ARRAY_UINT64:
+        case pb::ARRAY_FLOAT:
+        case pb::ARRAY_DOUBLE:
+        case pb::ARRAY_STRING:
+            return "array";
         default:
             return "text";
     }
 }
 
-inline std::string to_mysql_type_full_string(pb::PrimitiveType type,
-        int32_t float_total_len = -1, int32_t float_precision_len = -1) {
+inline std::string to_mysql_type_full_string(pb::PrimitiveType type, int32_t float_total_len = -1, int32_t float_precision_len = -1) {
     switch (type) {
         case pb::BOOL:
             return "tinyint(3)";
@@ -462,8 +473,34 @@ inline std::string to_mysql_type_full_string(pb::PrimitiveType type,
             return "BITMAP";
         case pb::TDIGEST:
             return "TDIGEST";
+        case pb::ARRAY_BOOL:
+            return "ARRAY<BOOLEAN>";
+        case pb::ARRAY_INT64:
+            return "ARRAY<BIGINT>";
+        case pb::ARRAY_UINT64:
+            return "ARRAY<BIGINT UNSIGNED>";
+        case pb::ARRAY_FLOAT:
+            return "ARRAY<FLOAT>";
+        case pb::ARRAY_DOUBLE:
+            return "ARRAY<DOUBLE>";
+        case pb::ARRAY_STRING:
+            return "ARRAY<VARCHAR(1024)>";
         default:
             return "";
+    }
+}
+
+inline bool is_array(pb::PrimitiveType type) {
+    switch (type) {
+        case pb::ARRAY_BOOL:
+        case pb::ARRAY_INT64:
+        case pb::ARRAY_UINT64:
+        case pb::ARRAY_FLOAT:
+        case pb::ARRAY_DOUBLE:
+        case pb::ARRAY_STRING:
+            return true;
+        default:
+            return false;
     }
 }
 
@@ -484,6 +521,9 @@ inline bool is_compatible_type(pb::PrimitiveType src_type, pb::PrimitiveType tar
         return true;
     }
     if (target_type == pb::STRING) {
+        return true;
+    }
+    if (src_type == pb::STRING && is_array(target_type)) {
         return true;
     }
     int src_size = get_num_size(src_type);

@@ -240,7 +240,8 @@ enum LiteralType {
     LT_NULL,
     LT_PLACE_HOLDER,
     LT_HEX,
-    LT_MAXVALUE
+    LT_MAXVALUE,
+    LT_ARRAY
 };
 
 struct LiteralExpr : public ExprNode {
@@ -255,6 +256,8 @@ struct LiteralExpr : public ExprNode {
 
     mutable LiteralType placeholder_literal_type = LT_INT;
     mutable int placeholder_id = -1; // PreparePlanner和PlanCache复用该字段
+
+    int32_t array_type_mask = 0;
 
     LiteralExpr() {
         expr_type = ET_LITETAL;
@@ -395,6 +398,38 @@ struct LiteralExpr : public ExprNode {
         LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
         lit->literal_type = LT_MAXVALUE;
         return lit;
+    }
+
+    static LiteralExpr* make_array(butil::Arena& arena) {
+        LiteralExpr* lit = new(arena.allocate(sizeof(LiteralExpr))) LiteralExpr();
+        lit->literal_type = LT_ARRAY;
+        return lit;
+    }
+
+    std::string array_to_string() const {
+        std::string ret = "[";
+        for (int i = 0; i < children.size(); i++) {
+            if (i != 0) {
+                ret += ", ";
+            }
+            ret += children[i]->to_string();
+        }
+        ret += "]";
+        return ret;
+    }
+
+    template <typename T> 
+    T get_numberic() {
+        switch (literal_type) {
+            case LT_BOOL:
+                return _u.bool_val;
+            case LT_INT:
+                return _u.int64_val;
+            case LT_DOUBLE:
+                return _u.double_val;
+            default:
+                return 0;
+        }
     }
 };
 

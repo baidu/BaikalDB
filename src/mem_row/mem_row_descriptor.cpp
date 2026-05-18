@@ -54,7 +54,15 @@ int32_t MemRowDescriptor::init(std::vector<pb::TupleDescriptor>& tuple_desc) {
             }
             field->set_type((FieldDescriptorProto::Type)pb_type);
             field->set_number(slot_id);
-            field->set_label(FieldDescriptorProto::LABEL_OPTIONAL);
+            if (!is_array(slot.slot_type())) {
+                field->set_label(FieldDescriptorProto::LABEL_OPTIONAL);
+            } else {
+                field->set_label(FieldDescriptorProto::LABEL_REPEATED);
+                // 设置 packed 选项
+                if (slot.slot_type() != pb::ARRAY_STRING) {
+                    field->mutable_options()->set_packed(true);
+                }
+            }
         }
     }
     const google::protobuf::FileDescriptor *memrow_desc = _pool.BuildFile(*_proto);

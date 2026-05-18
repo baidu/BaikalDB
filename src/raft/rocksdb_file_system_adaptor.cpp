@@ -20,7 +20,10 @@
 #include "log_entry_reader.h"
 
 namespace baikaldb {
+DECLARE_string(meta_server_bns);
+DECLARE_string(resource_tag);
 DEFINE_int64(snapshot_timeout_min, 10, "snapshot_timeout_min : 10min");
+DEFINE_bool(snapshot_use_remote_file, false, "snapshot_use_remote_file");
 bool inline is_snapshot_data_file(const std::string& path) {
     butil::StringPiece sp(path);
     if (sp.ends_with(SNAPSHOT_DATA_FILE_WITH_SLASH)) {
@@ -34,6 +37,122 @@ bool inline is_snapshot_meta_file(const std::string& path) {
         return true;
     }
     return false;
+}
+
+int LocalIterator::get_l6_remote_files(int64_t region_id, const std::vector<std::string>& peers_installing_snapshot, 
+        std::vector<std::string>& remote_files) {
+    if (!FLAGS_snapshot_use_remote_file) {
+        return -1;
+    }
+    auto rocksdb = RocksWrapper::get_instance();
+    std::vector<rocksdb::LiveFileMetaData> metadatas;
+    metadatas.reserve(10240);
+    rocksdb->get_db()->GetLiveFilesMetaData(&metadatas);
+    std::vector<rocksdb::LiveFileMetaData> region_l6_metadatas;
+    region_l6_metadatas.reserve(3);
+    std::string file_has_raft_index;
+    for (const auto& meta : metadatas) {
+        if (meta.column_family_name != RocksWrapper::DATA_CF) {
+            continue;
+        }
+
+        if (meta.level == 0) {
+            continue;
+        }
+
+        TableKey smallestkey(meta.smallestkey);
+        TableKey largestkey(meta.largestkey);
+        int64_t smallest_region_id = smallestkey.extract_i64(0);
+        int64_t smallest_table_id  = smallestkey.extract_i64(sizeof(int64_t));
+        int64_t largest_region_id  = largestkey.extract_i64(0);
+        int64_t largest_table_id   = largestkey.extract_i64(sizeof(int64_t));
+        if (smallest_region_id != largest_region_id) {
+            // 没有完成region partition
+            DB_WARNING("smallest_region_id: %ld largest_region_id: %ld not partition", smallest_region_id, largest_region_id);
+            return -1;
+        }
+
+        if (smallest_region_id == region_id && meta.level == 6) {
+            print_metadata_info(meta);
+            region_l6_metadatas.emplace_back(meta);
+            if (smallest_table_id == 0) {
+                file_has_raft_index = meta.directory + "/" + meta.relative_filename;
+            }
+        }
+    }
+
+    if (region_l6_metadatas.empty() || file_has_raft_index.empty()) {
+        DB_WARNING("region_id: %ld not find l6 file", region_id);
+        return -1;
+    }
+
+    auto ext_fs = rocksdb->get_exteranl_filesystem();
+    if (ext_fs == nullptr) {
+        DB_WARNING("ext fs is nullptr");
+        return -1;
+    }
+
+    std::shared_ptr<SstExtLinker> linker = get_sst_ext_linker();
+    if (linker == nullptr) {
+        DB_WARNING("linker is nullptr");
+        return -1;
+    }
+
+    std::vector<std::string> external_files;
+    external_files.reserve(region_l6_metadatas.size());
+    ScopeGuard auto_decrease([&ext_fs, &external_files]() {
+        for (const auto& external_file : external_files) {
+            DB_WARNING("delete external_file: %s", external_file.c_str());
+            ext_fs->delete_path(external_file, false);
+        }
+    });
+
+    int64_t raft_index = rocksdb->get_file_raft_index(file_has_raft_index, region_id);
+    if (raft_index <= 0) {
+        DB_WARNING("local raft index: %ld <= 0, region_id: %ld", raft_index, region_id);
+        return -1;
+    }
+
+    std::string instance_dir;
+    if (peers_installing_snapshot.size() == 1) {
+        instance_dir = peers_installing_snapshot[0];
+    } else {
+        instance_dir = "tmp_snapshot";
+    }
+
+    uint32_t now = (uint32_t)time(nullptr);
+    for (const auto& meta : region_l6_metadatas) {
+        SstExtLinker::ExtFileInfo ext_file_info;
+        int ret = linker->get_ext_file_info(meta.relative_filename, ext_file_info);
+        if (ret < 0) {
+            // 没有外部文件，直接返回空文件列表，对端会进行local compaction
+            DB_WARNING("get ext file info failed, region_id: %ld file: %s", region_id, meta.relative_filename.c_str());
+            return -1;
+        }
+
+        std::string full_src_path = ext_file_info.full_name;
+        std::string file_name = make_cloud_file_name(get_store_ip_port(), region_id, raft_index, meta.file_number, meta.size, now);
+        std::string dst_path = "baikal_cloud/" + FLAGS_meta_server_bns + "/" + FLAGS_resource_tag + "/" + instance_dir + "/" + file_name;
+        std::string full_dst_path = ext_fs->make_full_name("", false, dst_path);
+        if (full_dst_path.empty()) {
+            DB_FATAL("make full path failed, region_id: %ld file: %s dst_path: %s", region_id, meta.relative_filename.c_str(), dst_path.c_str());
+            return -1;
+        }
+        
+        ret = ext_fs->link(full_src_path, full_dst_path);
+        if (ret < 0) {
+            DB_FATAL("link file failed, region_id: %ld file: %s src_path: %s dst_path: %s", 
+                region_id, meta.relative_filename.c_str(), full_src_path.c_str(), full_dst_path.c_str());
+            return -1;
+        }
+
+        external_files.emplace_back(full_dst_path);
+        DB_WARNING("link file success, region_id: %ld file: %s src_path: %s dst_path: %s", 
+            region_id, meta.relative_filename.c_str(), full_src_path.c_str(), full_dst_path.c_str());
+    }
+    auto_decrease.release();
+    remote_files = std::move(external_files);
+    return 0;
 }
 
 bool PosixDirReader::is_valid() const {
@@ -95,7 +214,7 @@ void RocksdbReaderAdaptor::context_reset() {
         read_options.fill_cache = false;
         read_options.iterate_upper_bound = &iter_context->upper_bound_slice;
         rocksdb::ColumnFamilyHandle* column_family = RocksWrapper::get_instance()->get_data_handle();
-        iter_context->iter.reset(RocksWrapper::get_instance()->new_iterator(read_options, column_family));
+        iter_context->iter.reset(new LocalIterator(read_options, column_family));
         iter_context->iter->Seek(iter_context->prefix);
         iter_context->sc->data_context = iter_context;
     } else {        
@@ -106,7 +225,7 @@ void RocksdbReaderAdaptor::context_reset() {
         read_options.fill_cache = false;
         read_options.iterate_upper_bound = &iter_context->upper_bound_slice;
         rocksdb::ColumnFamilyHandle* column_family = RocksWrapper::get_instance()->get_meta_info_handle();
-        iter_context->iter.reset(RocksWrapper::get_instance()->new_iterator(read_options, column_family));
+        iter_context->iter.reset(new LocalIterator(read_options, column_family));
         iter_context->iter->Seek(iter_context->prefix);
         iter_context->sc->meta_context = iter_context;
     }
@@ -180,6 +299,11 @@ ssize_t RocksdbReaderAdaptor::read(butil::IOPortal* portal, off_t offset, size_t
     while (count < size) {
         // upper bound
         if (!_context->iter->Valid()) {
+            if (!_context->iter->status().ok()) {
+                DB_FATAL("Iterator error during snapshot read: %s, region_id: %ld",
+                         _context->iter->status().ToString().c_str(), _region_id);
+                return -1;
+            }
             _context->done = true;
             //portal->append((void*)iter_context->offset, sizeof(size_t));
             DB_WARNING("region_id: %ld snapshot read over, total size: %ld", _region_id, _context->offset);
@@ -405,6 +529,36 @@ bool SstWriterAdaptor::finish_sst() {
                         path.c_str(), _region_id);
         }
     }
+
+    if (!_remote_files.empty()) {
+        std::string directory;
+        size_t pos = path.find_last_of('/');
+        if (pos != std::string::npos) {
+            directory = path.substr(0, pos);
+        } else {
+            DB_FATAL("delete sst file path: %s failed, region_id: %ld", 
+                        path.c_str(), _region_id);
+            return false;
+        }
+
+        std::string snapshot_file = directory + "/" + SNAPSHOT_REMOTE_FILE;
+        try {
+            std::ofstream ofs(snapshot_file, std::ofstream::app);
+            if (!ofs.is_open()) {
+                DB_FATAL("open file %s failed", snapshot_file.c_str());
+                return -1;
+            }
+
+            ofs << _remote_files;
+            ofs.close();
+        } catch (const std::exception& e) {
+            DB_FATAL("region_id: %ld, append file: %s failed", _region_id, snapshot_file.c_str());
+            return -1;
+        }
+
+        DB_WARNING("write remote files to %s, region_id: %ld, value: %s", snapshot_file.c_str(), _region_id, _remote_files.c_str());
+    }
+
     return true;
 }
 /*
@@ -491,9 +645,29 @@ int SstWriterAdaptor::iobuf_to_sst(butil::IOBuf data) {
                         TableKey(value).extract_i64(0));
             }
         }
+
+        bool is_delete = false;
+        if (!_is_meta) {
+            if (key.size() >= sizeof(int64_t)) {
+                TableKey table_key(key);
+                int64_t magic = table_key.extract_i64(0);
+                if (magic == rocksdb_internal_del_key_magic) {
+                    key.remove_prefix(sizeof(int64_t));
+                    is_delete = true;
+                } else if (magic == rocksdb_remote_file_key_magic) {
+                    _remote_files = std::string(value.data(), value.size());
+                    DB_WARNING("remote file: %s", _remote_files.c_str());
+                    continue;
+                }
+            }
+        }
         _count++;
-        
-        auto s = _writer->put(key, value);
+        rocksdb::Status s;
+        if (is_delete) {
+            s = _writer->del(key);
+        } else {
+            s = _writer->put(key, value);
+        }
         if (!s.ok()) {            
             DB_FATAL("write sst file failed, err: %s, region_id: %ld", 
                         s.ToString().c_str(), _region_id);
@@ -622,6 +796,22 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_writer_adaptor(const std::str
     return writer;
 }
 
+std::vector<std::string> get_installing_snapshot_peers(const braft::NodeStatus& status) {
+    std::vector<std::string> peers_installing_snapshot;
+    peers_installing_snapshot.reserve(3);
+    for (const auto& [peer, status] : status.stable_followers) {
+        if (status.installing_snapshot) {
+            peers_installing_snapshot.push_back(butil::endpoint2str(peer.addr).c_str());
+        }
+    }
+    for (const auto& [peer, status] : status.unstable_followers) {
+        if (status.installing_snapshot) {
+            peers_installing_snapshot.push_back(butil::endpoint2str(peer.addr).c_str());
+        }
+    }
+    return peers_installing_snapshot;
+}
+
 braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::string& path, int oflag,
                                      const ::google::protobuf::Message* file_meta,
                                      butil::File::Error* e) {
@@ -681,12 +871,23 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
             read_options.fill_cache = false;
             read_options.iterate_upper_bound = &iter_context->upper_bound_slice;
             rocksdb::ColumnFamilyHandle* column_family = RocksWrapper::get_instance()->get_data_handle();
-            iter_context->iter.reset(RocksWrapper::get_instance()->new_iterator(read_options, column_family));
-            iter_context->iter->Seek(prefix);
-            braft::NodeStatus status;
 
+            braft::NodeStatus status;
             auto region = Store::get_instance()->get_region(_region_id);
+            if (region == nullptr) {
+                return nullptr;
+            }
             region->get_node_status(&status);
+
+            std::vector<std::string> remote_files;
+            remote_files.reserve(3);
+            int ret = LocalIterator::get_l6_remote_files(_region_id, get_installing_snapshot_peers(status), remote_files);
+            if (ret != 0) {
+                remote_files.clear();
+            }
+
+            iter_context->iter.reset(new LocalIterator(read_options, column_family, remote_files, _region_id));
+            iter_context->iter->Seek(prefix);
             int64_t peer_next_index = 0;
             // 通过peer状态和data_index判断是否需要复制数据
             // addpeer在unstable里，peer_next_index=0就会走复制流程
@@ -727,7 +928,7 @@ braft::FileAdaptor* RocksdbFileSystemAdaptor::open_reader_adaptor(const std::str
             read_options.fill_cache = false;
             read_options.iterate_upper_bound = &iter_context->upper_bound_slice;
             rocksdb::ColumnFamilyHandle* column_family = RocksWrapper::get_instance()->get_meta_info_handle();
-            iter_context->iter.reset(RocksWrapper::get_instance()->new_iterator(read_options, column_family));
+            iter_context->iter.reset(new LocalIterator(read_options, column_family));
             iter_context->iter->Seek(prefix);
             sc->meta_context = iter_context;
             snapshot_index = parse_snapshot_index_from_path(path, true);

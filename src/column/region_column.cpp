@@ -20,7 +20,6 @@
 #include "parquet_writer.h"
 #include "row2column.h"
 #include "rocks_wrapper.h"
-#include "rocksdb_filesystem.h"
 #include "vectorize_helpper.h"
 
 namespace baikaldb {
@@ -326,11 +325,12 @@ bool Region::use_userid_statis(bool is_eq, const google::protobuf::RepeatedPtrFi
         ExprValue left_value;
         ExprValue right_value;
         int pos = 0;
-        if (0 != left_key.decode_field_for_chunk(&left_value, field_info, pos)) {
+        // 主键才能到这
+        if (0 != left_key.decode_field_for_chunk(&left_value, field_info, pos, false)) {
             return false;
         }
         pos = 0;
-        if (0 != right_key.decode_field_for_chunk(&right_value, field_info, pos)) {
+        if (0 != right_key.decode_field_for_chunk(&right_value, field_info, pos, false)) {
             return false;
         }
         if (!left_value.is_numberic() || !right_value.is_numberic()) {
@@ -499,6 +499,10 @@ int Region::column_minor_compact() {
     auto raftlog_reader = std::make_shared<RaftLogReader>(raftlog_options);
     int ret = raftlog_reader->init();
     if (ret < 0) {
+        if (ret == -2) {
+            DB_WARNING("region_id: %ld, raftlog reader read empty", _region_id);
+            _column_mgr.remove_column_data(pb::CS_INVALID, 0);
+        }
         DB_COLUMN_FATAL("region_id: %ld, init raftlog reader failed", _region_id);
         return -1;
     }
@@ -577,6 +581,7 @@ int Region::column_minor_compact() {
 void Region::column_flush() {
     if (!FLAGS_enable_column_engine) {
         if (_column_mgr.column_status() != pb::CS_INVALID) {
+            DB_WARNING("region_id: %ld, table has drop column, remove_column_data", _region_id);
             _column_mgr.remove_column_data(pb::CS_INVALID, 0);
         }
         return;
@@ -601,9 +606,11 @@ void Region::column_flush() {
         // 列存关闭，清理column_file
         if (_column_mgr.column_status() == pb::CS_COLD) {
             if (FLAGS_column_cold_parquet_clear) {
+                DB_WARNING("region_id: %ld, column_cold_parquet_clear is true, remove_column_data", _region_id);
                 _column_mgr.remove_column_data(pb::CS_INVALID, 0);
             }
         } else {
+            DB_WARNING("region_id: %ld, column_cold_parquet_clear is false, remove_column_data", _region_id);
             _column_mgr.remove_column_data(pb::CS_INVALID, 0);
         }
         return;
@@ -930,7 +937,11 @@ void Region::column_flush_to_cold() {
 
     if (failed) {
         // 失败后，需要把之前拷贝到afs的文件删除
-        auto fs = SstExtLinker::get_instance()->get_exteranl_filesystem();
+        auto fs = RocksWrapper::get_instance()->get_exteranl_filesystem();
+        if (fs == nullptr) {
+            DB_FATAL("ext fs is nullptr");
+            return;
+        }
         for (const auto& file : new_column_files) {
             DB_WARNING("delete external_file: %s", file->afs_full_name.c_str());
             fs->delete_path(file->afs_full_name, false);

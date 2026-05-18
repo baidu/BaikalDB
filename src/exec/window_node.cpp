@@ -267,8 +267,8 @@ int WindowNode::split_into_partitions(RowBatch* batch, bool& is_first_partition_
     // 判断当前RowBatch的第一个分区是否和上一个RowBatch的最后一个分区属于相同的分区
     MutTableKey first_key;
     MutTableKey last_key;
-    encode_exprs_key(_partition_exprs, batch->get_row(0).get(), first_key);
-    encode_exprs_key(_partition_exprs, batch->get_row(num_rows - 1).get(), last_key);
+    encode_agg_exprs_key(_partition_exprs, batch->get_row(0).get(), first_key);
+    encode_agg_exprs_key(_partition_exprs, batch->get_row(num_rows - 1).get(), last_key);
     if (_last_partition_key.size() == 0) {
         is_first_partition_belong_to_prev = false;
     } else {
@@ -290,7 +290,7 @@ int WindowNode::split_into_partitions(RowBatch* batch, bool& is_first_partition_
     last_key = first_key;
     for (int i = 1; i < num_rows; ++i) {
         MutTableKey cur_key;
-        encode_exprs_key(_partition_exprs, batch->get_row(i).get(), cur_key);
+        encode_agg_exprs_key(_partition_exprs, batch->get_row(i).get(), cur_key);
         if (cur_key.data() != last_key.data()) {
             _partition_offset_vec.emplace_back(i);
             last_key = cur_key;

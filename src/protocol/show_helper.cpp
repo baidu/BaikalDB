@@ -2571,6 +2571,7 @@ bool ShowHelper::_show_schema_conf(const SmartSocket& client, const std::vector<
 
     std::unordered_set<std::string> allowed_conf = {"need_merge",
                                                     "storage_compute_separate",
+                                                    "enable_compute_storage_decoupled",
                                                     "select_index_by_cost",
                                                     "pk_prefix_balance",
                                                     "backup_table",
@@ -2592,7 +2593,8 @@ bool ShowHelper::_show_schema_conf(const SmartSocket& client, const std::vector<
     }
 
     std::vector<std::string> database_table;
-    factory->get_schema_conf_open(split_vec[2], database_table);
+    std::set<int64_t> table_ids;
+    factory->get_schema_conf_open(split_vec[2], database_table, table_ids);
     DB_WARNING("show schema_conf: %s", split_vec[2].c_str());
     std::vector< std::vector<std::string> > rows;
     rows.reserve(10);
@@ -3733,6 +3735,8 @@ bool ShowHelper::_show_ddl_work(const SmartSocket& client, const std::vector<std
             row.emplace_back("Done : " + std::to_string(work_done_count));
             row.emplace_back("Fail : " + std::to_string(work_fail_count));
             row.emplace_back("Error : " + std::to_string(work_error_count));
+            int total = work_idle_count + work_doing_count + work_done_count + work_fail_count + work_error_count;
+            row.emplace_back("Total : " + std::to_string(total));
             rows.emplace_back(row);
         }
     } else if (show_column_ddl) {
@@ -4405,7 +4409,7 @@ bool ShowHelper::_show_charset(const SmartSocket& client, const std::vector<std:
 }
 
 bool ShowHelper::_show_index(const SmartSocket& client, const std::vector<std::string>& split_vec) {
-    // not-support yet: [WHERE expr]
+    // where 只支持 = 判断
     SchemaFactory* factory = SchemaFactory::get_instance();
     if (client == nullptr || client->user_info == nullptr || factory == nullptr) {
         DB_FATAL("param invalid");
@@ -4431,24 +4435,64 @@ bool ShowHelper::_show_index(const SmartSocket& client, const std::vector<std::s
 
     std::string db = client->current_db;
     std::string table;
-    if (split_vec.size() == 4) {
+    // where_key_name: non-empty when WHERE Key_name = 'xxx' is specified
+    std::string where_key_name;
+    // Supported syntax:
+    //   SHOW {INDEX|INDEXES|KEYS} FROM tbl [FROM db] [WHERE expr]
+    // Parse from split_vec[3] onward using an index pointer for flexibility.
+    if (split_vec.size() < 4) {
+        client->state = STATE_ERROR;
+        return false;
+    }
+    // split_vec[3]: db.table or just table
+    {
         std::string db_table = split_vec[3];
         std::string::size_type position = db_table.find_first_of('.');
         if (position == std::string::npos) {
-            // `table_name`
             table = remove_quote(db_table.c_str(), '`');
         } else {
-            // `db_name`.`table_name`
             db = remove_quote(db_table.substr(0, position).c_str(), '`');
             table = remove_quote(db_table.substr(position + 1,
                     db_table.length() - position - 1).c_str(), '`');
         }
-    } else if (split_vec.size() == 6) {
-        db = remove_quote(split_vec[5].c_str(), '`');
-        table = remove_quote(split_vec[3].c_str(), '`');
-    } else {
-        client->state = STATE_ERROR;
-        return false;
+    }
+    size_t idx = 4;
+    // Optional: FROM db
+    if (idx < split_vec.size() && boost::iequals(split_vec[idx], "FROM")) {
+        ++idx;
+        if (idx >= split_vec.size()) {
+            client->state = STATE_ERROR;
+            return false;
+        }
+        db = remove_quote(split_vec[idx].c_str(), '`');
+        ++idx;
+    }
+    // Optional: WHERE expr (only Key_name = 'value' supported)
+    if (idx < split_vec.size()) {
+        if (!boost::iequals(split_vec[idx], "WHERE")) {
+            client->state = STATE_ERROR;
+            return false;
+        }
+        ++idx;
+        // Concatenate all remaining tokens and split by '=' to get lhs/rhs
+        std::string where_clause;
+        for (size_t i = idx; i < split_vec.size(); ++i) {
+            where_clause += split_vec[i];
+        }
+        std::string::size_type eq_pos = where_clause.find('=');
+        if (eq_pos == std::string::npos) {
+            client->state = STATE_ERROR;
+            return false;
+        }
+        std::string lhs = where_clause.substr(0, eq_pos);
+        std::string rhs = where_clause.substr(eq_pos + 1);
+        boost::trim(lhs);
+        boost::trim(rhs);
+        if (!boost::iequals(lhs, "Key_name")) {
+            client->state = STATE_ERROR;
+            return false;
+        }
+        where_key_name = remove_quote(rhs.c_str(), '\'');
     }
     std::string namespace_ = client->user_info->namespace_;
     if (db == "information_schema") {
@@ -4461,14 +4505,9 @@ bool ShowHelper::_show_index(const SmartSocket& client, const std::vector<std::s
         return false;
     }
     TableInfo info = factory->get_table_info(table_id);
-    std::map<int32_t, IndexInfo> field_index;
-    for (auto& index_id : info.indices) {
-        IndexInfo index_info = factory->get_index_info(index_id);
-    }
     // Make rows.
     std::vector<std::vector<std::string> > rows;
     rows.reserve(info.indices.size());
-    uint32_t index_idx = 0;
     for (auto& index_id : info.indices) {
         IndexInfo index_info = factory->get_index_info(index_id);
         if (index_info.index_hint_status == pb::IHS_DISABLE && index_info.state == pb::IS_DELETE_LOCAL) {
@@ -4477,10 +4516,14 @@ bool ShowHelper::_show_index(const SmartSocket& client, const std::vector<std::s
         bool non_unique = index_info.type != pb::I_PRIMARY && index_info.type != pb::I_UNIQ;
         std::string key_name = "PRIMARY";
         if (index_info.type != pb::I_PRIMARY) {
-            std::vector<std::string> split_vec;
-            boost::split(split_vec, index_info.name,
+            std::vector<std::string> idx_parts;
+            boost::split(idx_parts, index_info.name,
                          boost::is_any_of("."), boost::token_compress_on);
-            key_name = split_vec[split_vec.size() - 1];
+            key_name = idx_parts[idx_parts.size() - 1];
+        }
+        // Apply WHERE Key_name filter if specified
+        if (!where_key_name.empty() && key_name != where_key_name) {
+            continue;
         }
         for (size_t i = 0; i < index_info.fields.size(); ++i) {
             rows.push_back({table, std::to_string(non_unique), key_name, std::to_string(i),

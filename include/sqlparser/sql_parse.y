@@ -131,7 +131,6 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     FORCE
     FOREIGN
     FROM
-    FULL
     FULLTEXT
     GENERATED
     GRANT
@@ -201,7 +200,6 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     RENAME
     REPLACE
     ROWS
-    MERGE
     RESTRICT
     REVOKE
     RIGHT
@@ -463,6 +461,7 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     NTH_VALUE
     RESPECT
     NULLS
+    ARRAY
 
     /* The following tokens belong to builtin functions. */
     ADDDATE
@@ -610,11 +609,13 @@ extern int sql_error(YYLTYPE* yylloc, yyscan_t yyscanner, SqlParser* parser, con
     BlobType 
     TextType 
     DateAndTimeType 
+    ArrayType
     FieldOpt 
     FieldOpts 
     FloatOpt 
     Precision 
     StringList 
+    SignedLiteralList
     TableOption 
     TableOptionList 
     CreateTableOptionListOpt
@@ -1171,13 +1172,10 @@ ColumnName:
     ;
 
 IndexColumnField:
-    ColumnName {
+    ColumnName Order {
         $$ = $1;
     }
-    | ColumnName '(' INTEGER_LIT ')' {
-        $$ = $1;
-    }
-    | IndexColumnField Order {
+    | ColumnName '(' INTEGER_LIT ')' Order {
         $$ = $1;
     }
     ;
@@ -1950,38 +1948,6 @@ SelectField:
         SelectField* select_field = new_node(SelectField);
         select_field->expr = $3;
         select_field->as_name = $5;
-        $$ = select_field;
-    }
-    | ColumnName JS_OP STRING_LIT {
-        SelectField* select_field = new_node(SelectField);
-        FuncExpr* fun = new_node(FuncExpr);
-        fun->fn_name = "json_extract1";
-        fun->children.push_back($1, parser->arena);
-        fun->children.push_back($3, parser->arena);
-        select_field->expr = fun;
-        parser::String t1, t2;
-        t1 = "->\"";
-        t2 = "\"";
-        select_field->org_name = ((ColumnName*) $1)->name;
-        select_field->org_name.append("->\"", parser->arena);
-        select_field->org_name.append(((LiteralExpr*)$3)->_u.str_val.c_str(), parser->arena);
-        select_field->org_name.append("\"", parser->arena);
-        $$ = select_field;
-    }
-    | ColumnName JS_OP1 STRING_LIT {
-        SelectField* select_field = new_node(SelectField);
-        FuncExpr* fun = new_node(FuncExpr);
-        fun->fn_name = "json_extract";
-        fun->children.push_back($1, parser->arena);
-        fun->children.push_back($3, parser->arena);
-        select_field->expr = fun;
-        parser::String t1, t2;
-        t1 = "->\"";
-        t2 = "\"";
-        select_field->org_name = ((ColumnName*) $1)->name;
-        select_field->org_name.append("->\"", parser->arena);
-        select_field->org_name.append(((LiteralExpr*)$3)->_u.str_val.c_str(), parser->arena);
-        select_field->org_name.append("\"", parser->arena);
         $$ = select_field;
     }
     ;
@@ -3259,6 +3225,12 @@ Literal:
     | _UTF8MB4 STRING_LIT {
         $$ = $2;
     }
+    | '[' ']' {
+        $$ = LiteralExpr::make_array(parser->arena);
+    }
+    | '[' SignedLiteralList ']' {
+        $$ = (ExprNode*)$2;
+    }
     ;
 
 SimpleExpr:
@@ -3341,6 +3313,20 @@ SimpleExpr:
         $$ = fun;
     }
     | WindowFuncCall {
+    }
+    | ColumnName JS_OP STRING_LIT {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "json_extract1";
+        fun->children.push_back($1, parser->arena);
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
+    }
+    | ColumnName JS_OP1 STRING_LIT {
+        FuncExpr* fun = new_node(FuncExpr);
+        fun->fn_name = "json_extract";
+        fun->children.push_back($1, parser->arena);
+        fun->children.push_back($3, parser->arena);
+        $$ = fun;
     }
     ;
 
@@ -4401,6 +4387,10 @@ Type:
     {
         $$ = $1;
     }
+    | ArrayType
+    {
+        $$ = $1;
+    }
     ;
 
 NumericType:
@@ -4825,6 +4815,52 @@ DateAndTimeType:
     }
     ;
 
+ArrayType:
+    ARRAY LT_OP BooleanType GT_OP
+    {
+        FieldType* field_type = new_node(FieldType);
+        field_type->type = MYSQL_TYPE_ARRAY_BOOL;
+        $$ = field_type;
+    }
+    | ARRAY LT_OP IntegerType FieldOpts GT_OP
+    {
+        FieldType* field_type = new_node(FieldType);
+        Node* list_node = $4;
+        if ((MysqlType)$3 == MYSQL_TYPE_LONGLONG) {
+            field_type->type = MYSQL_TYPE_ARRAY_INT64;
+        } else {
+            sql_error(&@3, yyscanner, parser, "Invalid type for array.");
+            return -1;
+        }
+        for (int idx = 0; idx < list_node->children.size(); ++idx) {
+            TypeOption* type_opt = (TypeOption*)(list_node->children[idx]);
+            if (type_opt->is_unsigned) {
+                field_type->flag |= MYSQL_FIELD_FLAG_UNSIGNED;
+            }
+        }
+        $$ = field_type;
+    } 
+    | ARRAY LT_OP FloatingPointType GT_OP
+    {
+        FieldType* field_type = new_node(FieldType);
+        if ((MysqlType)$3 == MYSQL_TYPE_FLOAT) {
+            field_type->type = MYSQL_TYPE_ARRAY_FLOAT;
+        } else if ((MysqlType)$3 == MYSQL_TYPE_DOUBLE) {
+            field_type->type = MYSQL_TYPE_ARRAY_DOUBLE;
+        } else {
+            sql_error(&@3, yyscanner, parser, "Invalid type for array.");
+            return -1;
+        }
+        $$ = field_type;
+    }
+    | ARRAY LT_OP StringType GT_OP
+    {
+        FieldType* field_type = new_node(FieldType);
+        field_type->type = MYSQL_TYPE_ARRAY_STRING;
+        $$ = field_type;
+    }
+    ;
+
 OptFieldLen:
     /* empty == (-1) == unspecified field length*/
     {
@@ -4948,6 +4984,40 @@ StringList:
     | StringList ',' STRING_LIT
     {
         $1->children.push_back($3, parser->arena);
+        $$ = $1;
+    }
+    ;
+
+SignedLiteralList:
+    SignedLiteral
+    {
+        LiteralExpr* new_value = (LiteralExpr*)$1;
+        if (new_value->literal_type != parser::LT_BOOL
+                && new_value->literal_type != parser::LT_INT
+                && new_value->literal_type != parser::LT_DOUBLE 
+                && new_value->literal_type != parser::LT_STRING) {
+            sql_error(&@1, yyscanner, parser, "not support type in array.");
+            return -1;
+        }
+        LiteralExpr* list = (LiteralExpr*)new_node(LiteralExpr);
+        list->literal_type = parser::LT_ARRAY;
+        list->children.push_back($1, parser->arena);
+        list->array_type_mask |= (1 << new_value->literal_type);
+        $$ = list;
+    }
+    | SignedLiteralList ',' SignedLiteral
+    {
+        LiteralExpr* list = (LiteralExpr*)$1;
+        LiteralExpr* new_value = (LiteralExpr*)$3;
+        if (new_value->literal_type != parser::LT_BOOL
+                && new_value->literal_type != parser::LT_INT
+                && new_value->literal_type != parser::LT_DOUBLE 
+                && new_value->literal_type != parser::LT_STRING) {
+            sql_error(&@1, yyscanner, parser, "not support type in array.");
+            return -1;
+        }
+        list->array_type_mask |= (1 << new_value->literal_type);
+        list->children.push_back($3, parser->arena);
         $$ = $1;
     }
     ;
@@ -5167,19 +5237,32 @@ PartitionRangeListOpt:
     }
     ;
 InsertMethodOpt:
-    NO | FIRST | LAST
+    NO { $$ = nullptr; }
+    | FIRST { $$ = nullptr; }
+    | LAST { $$ = nullptr; }
     ;
 
 RowFormatOpt:
-    DEFAULT | DYNAMIC | FIXED | COMPRESSED | REDUNDANT | COMPACT
+    DEFAULT { $$ = nullptr; }
+    | DYNAMIC { $$ = nullptr; }
+    | FIXED { $$ = nullptr; }
+    | COMPRESSED { $$ = nullptr; }
+    | REDUNDANT { $$ = nullptr; }
+    | COMPACT { $$ = nullptr; }
     ;
 
 AlgorithmVal:
-    DEFAULT | INSTANT | INPLACE | COPY
+    DEFAULT { $$ = nullptr; }
+    | INSTANT { $$ = nullptr; }
+    | INPLACE { $$ = nullptr; }
+    | COPY { $$ = nullptr; }
     ;
 
 IndexLockVal:
-    DEFAULT | NONE | SHARED | EXCLUSIVE
+    DEFAULT { $$ = nullptr; }
+    | NONE { $$ = nullptr; }
+    | SHARED { $$ = nullptr; }
+    | EXCLUSIVE { $$ = nullptr; }
     ;
 
 IgnoreTableOption:

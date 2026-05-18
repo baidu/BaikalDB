@@ -179,12 +179,6 @@ int del_meta_info(pb::ScanNode& scan_node) {
         del_meta_info(possible_index);
         possible_index.SerializeToString(scan_node.mutable_indexes(i));
     }
-    if (scan_node.has_learner_index()) {
-        pb::PossibleIndex possible_index;
-        possible_index.ParseFromString(scan_node.learner_index());
-        del_meta_info(possible_index);
-        possible_index.SerializeToString(scan_node.mutable_learner_index());
-    }
     for (int i = 0; i < scan_node.use_indexes_size(); ++i) {
         scan_node.set_use_indexes(i, get_del_meta_id(scan_node.use_indexes(i)));
     }

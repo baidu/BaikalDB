@@ -539,14 +539,12 @@ int LogicalPlanner::generate_sql_sign(QueryContext* ctx, parser::StmtNode* stmt)
             butil::MurmurHash3_x64_128(str.c_str(), str.size(), 0x1234, out);
             stat_info->sign = out[0];
         }
-        if (!ctx->sign_blacklist.empty()) {
-            if (ctx->sign_blacklist.count(stat_info->sign) > 0) {
-                DB_WARNING("sql sign[%lu] in blacklist, sample_sql[%s]", stat_info->sign, 
-                    str.c_str());
-                ctx->stat_info.error_code = ER_SQL_REFUSE;
-                ctx->stat_info.error_msg << "sql sign: " << stat_info->sign << " in blacklist";
-                return -1;
-            }
+        if (SchemaFactory::get_instance()->is_sign_in_blacklist(stat_info->sign) > 0) {
+            DB_WARNING("sql sign[%lu] in blacklist, sample_sql[%s]", stat_info->sign,
+                str.c_str());
+            ctx->stat_info.error_code = ER_SQL_REFUSE;
+            ctx->stat_info.error_msg << "sql sign: " << stat_info->sign << " in blacklist";
+            return -1;
         }
         if (!ctx->need_learner_backup && !ctx->sign_forcelearner.empty()) {
             if (ctx->sign_forcelearner.count(stat_info->sign) > 0) {
@@ -674,7 +672,6 @@ int LogicalPlanner::gen_subquery_plan(parser::DmlNode* subquery, SmartPlanTableC
     if (_cur_sub_ctx->table_can_use_arrow_vectorize == false) {
         _ctx->table_can_use_arrow_vectorize = false;
     }
-    _ctx->sign_blacklist.insert(_cur_sub_ctx->sign_blacklist.begin(), _cur_sub_ctx->sign_blacklist.end());
     _ctx->sign_forcelearner.insert(_cur_sub_ctx->sign_forcelearner.begin(), _cur_sub_ctx->sign_forcelearner.end());
     _ctx->sign_rolling.insert(_cur_sub_ctx->sign_rolling.begin(), _cur_sub_ctx->sign_rolling.end());
     _ctx->sign_forceindex.insert(_cur_sub_ctx->sign_forceindex.begin(), _cur_sub_ctx->sign_forceindex.end());
@@ -850,7 +847,8 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
                 return -1;                
             }
         }
-        if (tbl_ptr->engine == pb::ROCKSDB_CSTORE || tbl_ptr->has_vector_index) {
+        // 表有向量索引或者array列, 先暂不支持向量化执行
+        if (tbl_ptr->engine == pb::ROCKSDB_CSTORE || tbl_ptr->has_vector_index || tbl_ptr->has_array_column) {
             _ctx->table_can_use_arrow_vectorize = false; 
         }
         _ctx->stat_info.resource_tag = tbl_ptr->resource_tag;
@@ -867,7 +865,6 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
             }
         }
 
-        _ctx->sign_blacklist.insert(tbl_ptr->sign_blacklist.begin(), tbl_ptr->sign_blacklist.end());
         _ctx->sign_forcelearner.insert(tbl_ptr->sign_forcelearner.begin(), tbl_ptr->sign_forcelearner.end());
         _ctx->sign_rolling.insert(tbl_ptr->sign_rolling.begin(), tbl_ptr->sign_rolling.end());
         for (auto& sign_index : tbl_ptr->sign_forceindex) {
@@ -2802,6 +2799,59 @@ int LogicalPlanner::create_scala_func_expr(const parser::FuncExpr* item,
     return 0;
 }
 
+template<typename T>
+static void add_array_values_to_pb_impl(const ExprValue& value, pb::ExprNode* node) {
+    auto array = value.get_array<T>();
+    if (array == nullptr) {
+        DB_FATAL("array is nullptr");
+        return;
+    }
+    auto* derive_node = node->mutable_derive_node();
+    
+    if constexpr (std::is_same_v<T, bool>) {
+        for (const auto& v : array->data) {
+            derive_node->add_array_bool_vals(v);
+        }
+    } else if constexpr (std::is_same_v<T, std::string>) {
+        for (const auto& v : array->data) {
+            derive_node->add_array_string_vals(v);
+        }
+    } else if constexpr (std::is_floating_point_v<T>) {
+        for (const auto& v : array->data) {
+            derive_node->add_array_double_vals(v);
+        }
+    } else {
+        // uint64_t 也使用 array_int_vals，通过 reinterpret_cast 存储
+        for (const auto& v : array->data) {
+            derive_node->add_array_int_vals(v);
+        }
+    }
+}
+
+void add_array_values_to_pb(const ExprValue& value, pb::ExprNode* node) {
+    switch (value.type) {
+        case pb::ARRAY_BOOL:
+            add_array_values_to_pb_impl<bool>(value, node);
+            break;
+        case pb::ARRAY_INT64:
+        case pb::ARRAY_UINT64:
+            add_array_values_to_pb_impl<int64_t>(value, node);
+            break;
+        case pb::ARRAY_FLOAT:
+            add_array_values_to_pb_impl<float>(value, node);
+            break;
+        case pb::ARRAY_DOUBLE:
+            add_array_values_to_pb_impl<double>(value, node);
+            break;
+        case pb::ARRAY_STRING:
+            add_array_values_to_pb_impl<std::string>(value, node);
+            break;
+        default:
+            DB_FATAL("Unsupported array type: %d", value.type);
+            break;
+    }
+}
+
 void LogicalPlanner::construct_literal_expr(const ExprValue& value, pb::ExprNode* node) {
     Literal literal = Literal(value);
     node->set_num_children(0);
@@ -2829,6 +2879,9 @@ void LogicalPlanner::construct_literal_expr(const ExprValue& value, pb::ExprNode
             break;
         case pb::DATETIME_LITERAL:
             node->mutable_derive_node()->set_int_val(value.get_numberic<int64_t>());
+            break;
+        case pb::ARRAY_LITERAL:
+            add_array_values_to_pb(value, node);
             break;
         default:
             DB_WARNING("expr:%s", value.get_string().c_str());
@@ -3792,6 +3845,40 @@ int LogicalPlanner::create_term_slot_ref_node(
     return 0;
 }
 
+void LogicalPlanner::parse_array_literal(pb::ExprNode* node, const parser::LiteralExpr* literal) {
+    node->set_node_type(pb::ARRAY_LITERAL);
+    int value_size = literal->children.size();
+    if (value_size == 0) {
+        node->set_col_type(pb::ARRAY_INT64); // 空数组默认为 INT64 类型
+        return;
+    }
+    
+    if (literal->array_type_mask & (1 << parser::LT_STRING)) {
+        node->set_col_type(pb::ARRAY_STRING);
+        for (int i = 0; i < value_size; ++i) {
+            node->mutable_derive_node()->add_array_string_vals(static_cast<parser::LiteralExpr*>(literal->children[i])->to_string());
+        }
+    } else if (literal->array_type_mask & (1 << parser::LT_DOUBLE)) {
+        node->set_col_type(pb::ARRAY_DOUBLE);
+        for (int i = 0; i < value_size; ++i) {
+            node->mutable_derive_node()->add_array_double_vals(static_cast<parser::LiteralExpr*>(literal->children[i])->get_numberic<double>());
+        }
+    } else if (literal->array_type_mask & (1 << parser::LT_INT)) {
+        node->set_col_type(pb::ARRAY_INT64);
+        for (int i = 0; i < value_size; ++i) {
+            node->mutable_derive_node()->add_array_int_vals(static_cast<parser::LiteralExpr*>(literal->children[i])->get_numberic<int64_t>());
+        }
+    } else if (literal->array_type_mask & (1 << parser::LT_BOOL)) {
+        node->set_col_type(pb::ARRAY_BOOL);
+        for (int i = 0; i < value_size; ++i) {
+            node->mutable_derive_node()->add_array_bool_vals(static_cast<parser::LiteralExpr*>(literal->children[i])->get_numberic<bool>());
+        }
+    } else {
+        DB_WARNING("array data type not support: %d", literal->array_type_mask);
+    }
+    return;
+}
+
 //TODO: primitive len for STRING, BOOL and NULL
 int LogicalPlanner::create_term_literal_node(const parser::LiteralExpr* literal, pb::Expr& expr, const CreateExprOptions& options) {
     pb::ExprNode* node = nullptr;
@@ -3846,6 +3933,9 @@ int LogicalPlanner::create_term_literal_node(const parser::LiteralExpr* literal,
         case parser::LT_MAXVALUE:
             node->set_node_type(pb::MAXVALUE_LITERAL);
             node->set_col_type(pb::MAXVALUE_TYPE);
+            break;
+        case parser::LT_ARRAY:
+            parse_array_literal(node, literal);
             break;
         default:
             DB_WARNING("create_term_literal_node failed: %d", literal->literal_type);

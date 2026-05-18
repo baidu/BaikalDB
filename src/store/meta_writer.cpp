@@ -338,6 +338,11 @@ int MetaWriter::ingest_meta_sst(const std::string& meta_sst_file, int64_t region
             return -1;
         }
     }
+    if (!iter->status().ok()) {
+        DB_FATAL("Iterator error during ingest meta sst: %s, region_id: %ld",
+                 iter->status().ToString().c_str(), region_id);
+        return -1;
+    }
     return 0;
 }
 

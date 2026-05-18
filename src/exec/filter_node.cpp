@@ -654,23 +654,8 @@ bool FilterNode::need_check_memory() {
 
 void FilterNode::transfer_pb(int64_t region_id, pb::PlanNode* pb_node) {
     ExecNode::transfer_pb(region_id, pb_node);
-    std::vector<ExecNode*> scan_nodes;
-    ScanNode* scan_node = nullptr;
-    get_node(pb::SCAN_NODE, scan_nodes);
-    if (scan_nodes.size() == 1) {
-        scan_node = static_cast<ScanNode*>(scan_nodes[0]);
-    }
     if (!_is_explain) {
-        if (scan_node != nullptr && scan_node->current_use_global_backup()) {
-            pb::FilterNode filter_node;
-            for (const auto& conjunct : _raw_filter_node.conjuncts_learner()) {
-                auto c = filter_node.add_conjuncts();
-                c->CopyFrom(conjunct);
-            }
-            std::string filter_string;
-            filter_node.SerializeToString(&filter_string);
-            pb_node->mutable_derive_node()->set_filter_node(filter_string);
-        } else if (region_id != 0) {
+        if (region_id != 0) {
 #ifdef BAIDU_INTERNAL
 #ifndef NDEBUG
             // 调试日志

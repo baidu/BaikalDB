@@ -34,3 +34,12 @@ message RaftControlResponse {
     optional string errmsg = 4;
     repeated string peers = 5;
 };
+
+message RegionRaftLogidPair {
+    required int64 region_id = 1;
+    required int64 max_logid = 2;
+};
+
+message RaftLogMeta {
+    repeated RegionRaftLogidPair region_max_log_id_map = 1;
+};

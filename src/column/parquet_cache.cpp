@@ -10,7 +10,7 @@ rocksdb::Cache::CacheItemHelper BlockContents::kBasicHelper{
 
 int ParquetArrowReader::init() {
     if (_is_afs_file) {
-        auto ext_fs = SstExtLinker::get_instance()->get_exteranl_filesystem();
+        auto ext_fs = RocksWrapper::get_instance()->get_exteranl_filesystem();
         if (ext_fs == nullptr) {
             DB_WARNING("ext fs is nullptr");
             return -1;

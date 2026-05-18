@@ -484,15 +484,14 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             if (record->is_null(field)) {
                 continue;
             }
-            std::string word;
-            ret = record->get_reverse_word(info, word);
+            std::vector<float> vectors;
+            ret = record->get_float_vector(info, vectors);
             if (ret < 0) {
                 DB_WARNING_STATE(state, "index_info to word fail for index_id: %ld", 
                                  info.id);
                 return ret;
             }
-            //DB_NOTICE("word:%s", str_to_hex(word).c_str());
-            ret = vector_index_map[info.id]->insert_vector(_txn, word, pk_str, record);
+            ret = vector_index_map[info.id]->insert_vector(_txn, vectors, pk_str, record);
             if (ret < 0) {
                 DB_WARNING_STATE(state, "vector_index fail insert, index_id: %ld", info.id);
                 return ret;
@@ -627,8 +626,8 @@ int DMLNode::remove_row(RuntimeState* state, SmartRecord record,
             if (record->is_null(field)) {
                 continue;
             }
-            std::string word;
-            ret = record->get_reverse_word(info, word);
+            std::vector<float> word;
+            ret = record->get_float_vector(info, word);
             if (ret < 0) {
                 DB_WARNING_STATE(state, "index_info to word fail for index_id: %ld", info.id);
                 return ret;
@@ -764,7 +763,7 @@ int DMLNode::update_row(RuntimeState* state, SmartRecord record, MemRow* row) {
             return -1;
         }
         if (field->type == pb::FLOAT || field->type == pb::DOUBLE || field->type == pb::DATETIME) {
-            auto& expr_value = expr->get_value(row).cast_to(slot.slot_type());
+            auto expr_value = expr->get_value(row).cast_to(slot.slot_type());
             expr_value.set_precision_len(field->float_precision_len);
             record->set_value(record->get_field_by_tag(slot.field_id()), expr_value);
         } else {

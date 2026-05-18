@@ -19,12 +19,21 @@
 #include "table_key.h"
 #include "table_record.h"
 #include "external_filesystem.h"
+#include "rocksdb_compaction_ctrl.h"
 
 namespace baikaldb {
 #define FS_LOG(level, _fmt_, args...) \
     do {\
         DB_##level("filesystem: %s; " _fmt_, _name.c_str(), ##args); \
     } while (0);
+class SstExtLinker;
+std::shared_ptr<SstExtLinker> get_sst_ext_linker();
+std::shared_ptr<SstExtLinker> get_cold_sst_ext_linker();
+int copy_file(const std::string& local_file, const std::string& user_define_path, std::string& external_file, uint64_t size);
+
+bool is_sst(const std::string& full_name, std::string& short_name);
+bool is_sst(const std::string& full_name);
+bool is_extsst(const std::string& full_name);
 
 class ExtRandomAccessFile : public rocksdb::FSRandomAccessFile {
 public:
@@ -56,6 +65,19 @@ private:
     std::shared_ptr<ExtFileReader> _file_reader;
 };
 
+class ExtWritableFile : public rocksdb::FSWritableFile {
+public:
+    explicit ExtWritableFile(std::shared_ptr<ExtFileWriter> file_writer) { 
+        _file_writer = std::move(file_writer);
+    }
+    virtual ~ExtWritableFile() { 
+        _file_writer->close();
+        _file_writer.reset();
+    }
+private:
+    std::shared_ptr<ExtFileWriter> _file_writer;
+};
+
 class ExtSequentialFile : public rocksdb::FSSequentialFile {
 public:
     explicit ExtSequentialFile(std::shared_ptr<ExtFileReader> file_reader) { 
@@ -85,16 +107,16 @@ class SstExtLinker {
 public:
 static const std::string SST_EXT_MAP_FILE_PREFIX;
 struct ExtFileInfo {
-    std::string full_name;
+    // 例如：afs://yinglong.afs.baidu.com:9902/user/baikal/baikal_cloud/xxxx
+    std::string full_name; 
     uint64_t size = 0;
     uint64_t modify_time = 0;
 };
-    static SstExtLinker* get_instance() {
-        static SstExtLinker instance;
-        return &instance;
-    }
 
-    int init(const std::shared_ptr<ExtFileSystem>& ext_fs, const std::string& rocksdb_path);
+    SstExtLinker(const std::string& rocksdb_path, const std::shared_ptr<ExtFileSystem>& ext_fs) : 
+        _rocksdb_path(rocksdb_path), _ext_fs(ext_fs) {}
+
+    int init();
 
     int sst_size(const std::string& short_name, uint64_t* size);
 
@@ -107,18 +129,34 @@ struct ExtFileInfo {
     int sst_files(std::vector<std::string>& files);
 
     void sst_ext_map(std::map<std::string, ExtFileInfo>& sst_ext_map) {
-        std::lock_guard<bthread::Mutex> l(_lock);
+        std::lock_guard<std::mutex> l(_lock);
         sst_ext_map = _sst_ext_map;
+    }
+
+    bool sst_ext_map_empty() {
+        std::lock_guard<std::mutex> l(_lock);
+        return _sst_ext_map.empty();
+    }
+
+    int get_ext_file_info(const std::string& short_name, ExtFileInfo& ext_file_info) {
+        std::lock_guard<std::mutex> l(_lock);
+        auto iter = _sst_ext_map.find(short_name);
+        if (iter == _sst_ext_map.end()) {
+            return -1;
+        }
+        
+        ext_file_info = iter->second;
+        return 0;
     }
 
     // -1：失败；0：不存在；1：存在
     int sst_exists(const std::string& short_name);
 
-    int sst_delete(const std::string& short_name);
+    int sst_delete(const std::string& short_name, bool delete_remote);
 
     int sst_rename(const std::string& src_short_name, const std::string& dst_short_name);
 
-    int sst_link(const std::string& ext_src_name, const std::string& dst_short_name);
+    int sst_link(const std::string& ext_src_name, const std::string& dst_short_name, uint64_t ext_file_size);
 
     // GetIngestedFileInfo中会调用到
     int new_ext_random_access_file(const std::string& ext_file_name,
@@ -126,6 +164,8 @@ struct ExtFileInfo {
 
     int new_sst_random_access_file(const std::string& short_name, 
                                 std::unique_ptr<rocksdb::FSRandomAccessFile>* result);
+
+    int new_sst_write_able_file(const std::string& shot_name, std::unique_ptr<rocksdb::FSWritableFile>* result);
 
     // 需要外部加锁
     int append_file(const std::string& record);
@@ -141,7 +181,7 @@ struct ExtFileInfo {
     std::shared_ptr<ExtFileSystem> get_exteranl_filesystem() { return _ext_fs; }
 
     void TESTclear() {
-        std::lock_guard<bthread::Mutex> l(_lock);
+        std::lock_guard<std::mutex> l(_lock);
         _sst_ext_map.clear();
         _link_num = 0;
         _delete_num = 0;
@@ -149,10 +189,9 @@ struct ExtFileInfo {
     }
 
 private:
-    SstExtLinker() {}
-    std::shared_ptr<ExtFileSystem> _ext_fs;
-    bthread::Mutex _lock;
     std::string _rocksdb_path;
+    std::shared_ptr<ExtFileSystem> _ext_fs;
+    std::mutex _lock;
     int _link_num = 0;
     int _delete_num = 0;
     int _rename_num = 0;
@@ -207,71 +246,33 @@ public:
                             std::shared_ptr<CompactionSstExtLinkerData>& linker_data);
 private:
     CompactionSstExtLinker() {}
-    bthread::Mutex _mutex;
+    std::mutex _mutex;
     DISALLOW_COPY_AND_ASSIGN(CompactionSstExtLinker);
     std::map<std::string, std::shared_ptr<CompactionSstExtLinkerData> > _linker_data_map;
 };
 
 class RocksdbFileSystemWrapper : public rocksdb::FileSystemWrapper {
  public:
-    explicit RocksdbFileSystemWrapper(bool use_ext_fs) 
-            : rocksdb::FileSystemWrapper(rocksdb::FileSystem::Default()), _use_ext_fs(use_ext_fs) { 
+    explicit RocksdbFileSystemWrapper(std::shared_ptr<SstExtLinker> linker, bool use_ext_fs) 
+            : rocksdb::FileSystemWrapper(rocksdb::FileSystem::Default()), _linker(linker), _use_ext_fs(use_ext_fs) { 
         if (_use_ext_fs) {
             _name = "Ext" + std::string(kClassName());
         } else {
             _name = "Local" + std::string(kClassName());
         }
-        _linker = SstExtLinker::get_instance();
     }
     ~RocksdbFileSystemWrapper() override {}
+
+    std::shared_ptr<SstExtLinker> get_linker() {
+        return _linker;
+    }
 
     static const char* kClassName() { 
         return "RocksdbFileSystemWrapper"; 
     }
-    const char* Name() const override { 
+    const char* Name() const override {
         return _name.c_str();
     }
-
-    bool is_sst(const std::string& full_name, std::string& short_name) {
-        std::vector<std::string> split_vec;
-        boost::split(split_vec, full_name, boost::is_any_of("."));
-        if (split_vec.size() > 0 && split_vec.back() == "sst") {
-            std::vector<std::string> path_vec;
-            boost::split(path_vec, full_name, boost::is_any_of("/"));
-            if (path_vec.empty()) {
-                FS_LOG(FATAL, "Invalid file name: %s", full_name.c_str());
-                return false;
-            }
-            short_name = path_vec.back();
-            return true;
-        } else {
-            return false;
-        }
-    }
-
-    bool is_sst(const std::string& full_name) {
-        std::vector<std::string> split_vec;
-        boost::split(split_vec, full_name, boost::is_any_of("."));
-        if (split_vec.size() > 0 && split_vec.back() == "sst") {
-            return true;
-        } else {
-            return false;
-        }
-    }
-
-    bool is_extsst(const std::string& full_name) {
-        std::vector<std::string> split_vec;
-        boost::split(split_vec, full_name, boost::is_any_of("."));
-        if (split_vec.size() > 0 
-                && (split_vec.back() == "extsst" 
-                        || split_vec.back() == "binlogsst" 
-                        || split_vec.back() == "datasst")) {
-            return true;
-        } else {
-            return false;
-        }
-    }
-
 
 // enum class IOType : uint8_t {
 //     kData,     // 0
@@ -503,7 +504,7 @@ class RocksdbFileSystemWrapper : public rocksdb::FileSystemWrapper {
             bool is_ext_file = true;
             std::string short_name;
             if (is_sst(f, short_name)) {
-                ret = _linker->sst_delete(short_name);
+                ret = _linker->sst_delete(short_name, false);
             } else if (is_extsst(f)) {
                 FS_LOG(WARNING, "delete external file: %s", f.c_str());
                 return rocksdb::IOStatus::OK();
@@ -641,7 +642,13 @@ class RocksdbFileSystemWrapper : public rocksdb::FileSystemWrapper {
                             const rocksdb::IOOptions& options, rocksdb::IODebugContext* dbg) override {
         std::string t_short_name;
         if (_use_ext_fs && is_sst(t, t_short_name)) {
-            int ret = _linker->sst_link(s, t_short_name);
+            uint64_t ext_file_size = 0;
+            int ret = get_size_by_external_file_name(&ext_file_size, nullptr, s);
+            if (ret != 0) {
+                FS_LOG(FATAL, "get_size_by_external_file_name file: %s failed", s.c_str());
+                return rocksdb::IOStatus::IOError("get_size_by_external_file_name failed");
+            }
+            ret = _linker->sst_link(s, t_short_name, ext_file_size);
             if (ret < 0) {
                 FS_LOG(FATAL, "LinkFile file: %s => %s, t_short_name: %s failed", s.c_str(), t.c_str(), t_short_name.c_str());
                 return rocksdb::IOStatus::IOError("LinkFile failed");
@@ -713,7 +720,7 @@ class RocksdbFileSystemWrapper : public rocksdb::FileSystemWrapper {
 private:
     const bool _use_ext_fs = false; // 使用外部的Filesystem不支持write
     std::string _name;
-    SstExtLinker* _linker = nullptr;
+    std::shared_ptr<SstExtLinker> _linker = nullptr;
 };
 
 class CompactionFileSystemWrapper : public rocksdb::FileSystemWrapper {
@@ -994,6 +1001,538 @@ private:
     std::string _name;
     std::string _remote_compaction_id;
     CompactionSstExtLinker* _compaction_linker = nullptr;
+};
+
+class DSCRocksdbFileSystemWrapper : public rocksdb::FileSystemWrapper {
+ public:
+    explicit DSCRocksdbFileSystemWrapper(std::shared_ptr<SstExtLinker> linker) 
+            : rocksdb::FileSystemWrapper(rocksdb::FileSystem::Default()), _linker(linker) { 
+        _name = std::string(kClassName());
+    }
+    ~DSCRocksdbFileSystemWrapper() override {}
+
+    std::shared_ptr<SstExtLinker> get_linker() {
+        return _linker;
+    }
+
+    static const char* kClassName() { 
+        return "DSCRocksdbFileSystemWrapper"; 
+    }
+    const char* Name() const override { 
+        return kClassName();
+    }
+
+// enum class IOType : uint8_t {
+//     kData,     // 0
+//     kFilter, // 1
+//     kIndex,     // 2
+//     kMetadata, // 3
+//     kWAL,            // 4
+//     kManifest, // 5
+//     kLog,            // 6
+//     kUnknown,    // 7
+//     kInvalid,     // 8
+// };
+    // The following text is boilerplate that forwards all methods to target()
+    rocksdb::IOStatus NewSequentialFile(const std::string& f,
+                                    const rocksdb::FileOptions& file_opts,
+                                    std::unique_ptr<rocksdb::FSSequentialFile>* r,
+                                    rocksdb::IODebugContext* dbg) override {
+        if (is_extsst(f)) {
+            FS_LOG(FATAL, "file: %s is extsst", f.c_str());
+            return rocksdb::IOStatus::IOError("NewSequentialFile failed");
+        }
+
+        std::string short_name;
+        bool sst = is_sst(f, short_name);
+        if (sst && _linker->sst_exists(short_name) == 1) {
+            FS_LOG(WARNING, "NotSupported file: %s, iotype: %d", f.c_str(), (int)file_opts.io_options.type);
+            return rocksdb::IOStatus::NotSupported("NewSequentialFile");
+        }
+
+        auto s = target_->NewSequentialFile(f, file_opts, r, dbg);
+        FS_LOG(WARNING, "file: %s, iotype: %d, status: %s", f.c_str(), (int)file_opts.io_options.type, s.ToString().c_str());
+        return s;
+    }
+
+    rocksdb::IOStatus NewRandomAccessFile(const std::string& f,
+                                        const rocksdb::FileOptions& file_opts,
+                                        std::unique_ptr<rocksdb::FSRandomAccessFile>* r,
+                                        rocksdb::IODebugContext* dbg) override {
+        int ret = 0;
+        std::string short_name;
+        if (is_extsst(f)) {
+            ret = _linker->new_ext_random_access_file(f, r);
+            if (ret < 0) {
+                FS_LOG(FATAL, "new random access file: %s failed", f.c_str());
+                return rocksdb::IOStatus::IOError("NewRandomAccessFile failed");
+            } else {
+                FS_LOG(WARNING, "file: %s, iotype: %d", f.c_str(), (int)file_opts.io_options.type);
+                return rocksdb::IOStatus::OK();
+            }
+        } else if (is_sst(f, short_name)) {
+            if (_linker->sst_exists(short_name) == 1) {
+                ret = _linker->new_sst_random_access_file(short_name, r);
+                if (ret < 0) {
+                    FS_LOG(FATAL, "new random access file: %s failed", f.c_str());
+                    return rocksdb::IOStatus::IOError("NewRandomAccessFile failed");
+                } else {
+                    FS_LOG(WARNING, "file: %s, iotype: %d", f.c_str(), (int)file_opts.io_options.type);
+                    return rocksdb::IOStatus::OK();
+                }
+            }
+        }
+
+        auto s = target_->NewRandomAccessFile(f, file_opts, r, dbg);
+        FS_LOG(WARNING, "file: %s, iotype: %d, status: %s", f.c_str(), (int)file_opts.io_options.type, s.ToString().c_str());
+        return s;
+    }
+
+    rocksdb::IOStatus NewWritableFile(const std::string& f, const rocksdb::FileOptions& file_opts,
+                                    std::unique_ptr<rocksdb::FSWritableFile>* r,
+                                    rocksdb::IODebugContext* dbg) override {
+        if (is_extsst(f)) {
+            FS_LOG(FATAL, "file: %s is extsst", f.c_str());
+            return rocksdb::IOStatus::IOError("NewWritableFile failed");
+        }
+
+        std::string short_name;
+        bool sst = is_sst(f, short_name);
+        if (sst && _linker->sst_exists(short_name) == 1) {
+            FS_LOG(WARNING, "NotSupported file: %s, iotype: %d", f.c_str(), (int)file_opts.io_options.type);
+            return rocksdb::IOStatus::NotSupported("NewWritableFile");
+        }
+
+        auto s = target_->NewWritableFile(f, file_opts, r, dbg);
+        FS_LOG(WARNING, "file: %s, iotype: %d, status: %s", f.c_str(), (int)file_opts.io_options.type, s.ToString().c_str());
+        return s;
+    }
+
+    // link之后会调用进行sync文件，返回not supported不支持
+    rocksdb::IOStatus ReopenWritableFile(const std::string& fname,
+                                        const rocksdb::FileOptions& file_opts,
+                                        std::unique_ptr<rocksdb::FSWritableFile>* result,
+                                        rocksdb::IODebugContext* dbg) override {
+        if (is_extsst(fname)) {
+            FS_LOG(FATAL, "file: %s is extsst", fname.c_str());
+            return rocksdb::IOStatus::IOError("ReopenWritableFile failed");
+        }
+
+        std::string short_name;
+        bool sst = is_sst(fname, short_name);
+        if (sst && _linker->sst_exists(short_name) == 1) {
+            FS_LOG(WARNING, "NotSupported file: %s, iotype: %d", fname.c_str(), (int)file_opts.io_options.type);
+            return rocksdb::IOStatus::NotSupported("ReopenWritableFile");
+        }
+
+        auto s = target_->ReopenWritableFile(fname, file_opts, result, dbg);
+        FS_LOG(WARNING, "file: %s, iotype: %d, status: %s", fname.c_str(), (int)file_opts.io_options.type, s.ToString().c_str());
+        return s;
+    }
+
+    // db_impl_open.cc:1730
+    rocksdb::IOStatus ReuseWritableFile(const std::string& fname,
+                                        const std::string& old_fname,
+                                        const rocksdb::FileOptions& file_opts,
+                                        std::unique_ptr<rocksdb::FSWritableFile>* r,
+                                        rocksdb::IODebugContext* dbg) override {
+        if (is_extsst(old_fname)) {
+            FS_LOG(FATAL, "file: %s is extsst", old_fname.c_str());
+            return rocksdb::IOStatus::IOError("ReuseWritableFile failed");
+        }
+
+        std::string short_name;
+        bool sst = is_sst(old_fname, short_name);
+        if (sst && _linker->sst_exists(short_name) == 1) {
+            FS_LOG(WARNING, "NotSupported file: %s, iotype: %d", old_fname.c_str(), (int)file_opts.io_options.type);
+            return rocksdb::IOStatus::NotSupported("ReuseWritableFile");
+        }
+
+        auto s = target_->ReuseWritableFile(fname, old_fname, file_opts, r, dbg);
+        FS_LOG(WARNING, "file: %s, old_file: %s, iotype: %d, status: %s", 
+                fname.c_str(), old_fname.c_str(), (int)file_opts.io_options.type, s.ToString().c_str());
+        return s;
+    }
+
+    // external_sst_file_ingestion_job.cc:895
+    rocksdb::IOStatus NewRandomRWFile(const std::string& fname,
+                                    const rocksdb::FileOptions& file_opts,
+                                    std::unique_ptr<rocksdb::FSRandomRWFile>* result,
+                                    rocksdb::IODebugContext* dbg) override {
+        if (is_extsst(fname)) {
+            FS_LOG(FATAL, "file: %s is extsst", fname.c_str());
+            return rocksdb::IOStatus::IOError("NewRandomRWFile failed");
+        }
+
+        std::string short_name;
+        bool sst = is_sst(fname, short_name);
+        if (sst && _linker->sst_exists(short_name) == 1) {
+            FS_LOG(WARNING, "NotSupported file: %s, iotype: %d", fname.c_str(), (int)file_opts.io_options.type);
+            return rocksdb::IOStatus::NotSupported("NewRandomRWFile");
+        }
+
+        auto s = target_->NewRandomRWFile(fname, file_opts, result, dbg);
+        FS_LOG(WARNING, "file: %s, iotype: %d, status: %s", fname.c_str(), (int)file_opts.io_options.type, s.ToString().c_str());
+        return s;
+    }
+
+    rocksdb::IOStatus NewMemoryMappedFileBuffer(
+                                const std::string& fname,
+                                std::unique_ptr<rocksdb::MemoryMappedFileBuffer>* result) override {
+        if (_linker->sst_exists(fname) != 0) {
+            FS_LOG(FATAL, "file: %s is not sst or extsst", fname.c_str());
+            return rocksdb::IOStatus::IOError("NewMemoryMappedFileBuffer failed");
+        }
+ 
+        auto s = target_->NewMemoryMappedFileBuffer(fname, result);
+        FS_LOG(WARNING, "file: %s, status: %s", fname.c_str(), s.ToString().c_str());
+        return s;
+    }
+
+    rocksdb::IOStatus NewDirectory(const std::string& name, const rocksdb::IOOptions& io_opts,
+                                std::unique_ptr<rocksdb::FSDirectory>* result,
+                                rocksdb::IODebugContext* dbg) override {
+        auto s = target_->NewDirectory(name, io_opts, result, dbg);
+        FS_LOG(WARNING, "file: %s, iotype: %d, status: %s", name.c_str(), (int)io_opts.type, s.ToString().c_str());
+        return s;
+    }
+
+    //  Returns OK if the named file exists.
+    //         NotFound if the named file does not exist,
+    //             the calling process does not have permission to determine
+    //             whether this file exists, or if the path is invalid.
+    //         IOError if an IO Error was encountered
+    rocksdb::IOStatus FileExists(const std::string& f, const rocksdb::IOOptions& io_opts,
+                                rocksdb::IODebugContext* dbg) override {
+        std::string short_name;
+        if (is_sst(f, short_name)) {
+            int ret = _linker->sst_exists(short_name);
+            if (ret == 1) {
+                FS_LOG(WARNING, "Found ext file: %s short_name: %s, iotype: %d", f.c_str(), short_name.c_str(), (int)io_opts.type);
+                return rocksdb::IOStatus::OK();
+            }
+        }
+
+        auto s = target_->FileExists(f, io_opts, dbg);
+        FS_LOG(WARNING, "FileExists local file: %s status: %s", f.c_str(), s.ToString().c_str());
+        return s;
+    }
+
+    // Store in *result the names of the children of the specified directory.
+    // The names are relative to "dir".
+    // Original contents of *results are dropped.
+    // Returns OK if "dir" exists and "*result" contains its children.
+    //                 NotFound if "dir" does not exist, the calling process does not have
+    //                                    permission to access "dir", or if "dir" is invalid.
+    //                 IOError if an IO Error was encountered
+    rocksdb::IOStatus GetChildren(const std::string& dir, const rocksdb::IOOptions& io_opts,
+                                std::vector<std::string>* r,
+                                rocksdb::IODebugContext* dbg) override {
+        r->clear();
+        std::vector<std::string> result;
+        auto s = target_->GetChildren(dir, io_opts, &result, dbg);
+        if (!s.ok()) {
+            FS_LOG(FATAL, "dir: %s, error: %s", dir.c_str(), s.ToString().c_str());
+            return s;
+        }
+
+        std::vector<std::string> ext_result;
+        int ret = _linker->sst_files(ext_result);
+        if (ret < 0) {
+            FS_LOG(FATAL, "GetChildren failed dir: %s", dir.c_str());
+            return rocksdb::IOStatus::IOError("GetChildren failed");
+        }
+
+        std::set<std::string> ext_result_set;
+        for (const std::string& c : ext_result) {
+            ext_result_set.insert(c);
+        }
+
+        std::ostringstream os1;
+        for (const std::string& c : result) {
+            // 剔除映射文件
+            if (c.find(SstExtLinker::SST_EXT_MAP_FILE_PREFIX) == c.npos) {
+                if (ext_result_set.count(c) > 0) {
+                    ext_result_set.erase(c);
+                }
+                os1 << c << " ";
+                r->emplace_back(c);
+            }
+        }
+
+        std::ostringstream os2;
+        for (const std::string& c : ext_result_set) {
+            r->emplace_back(c);
+            os2 << c << " ";
+        }
+
+        // FS_LOG(WARNING, "dir: %s, local file count: %ld, ext file count: %ld, child name1: %s ext name2: %s", 
+        //         dir.c_str(), result.size(), ext_result.size(), os1.str().c_str(), os2.str().c_str());
+        return rocksdb::IOStatus::OK();
+    }
+
+    // 该接口默认会调用GetChildren、GetFileSize、FileExists来实现，并且只在backup流程中使用，此处不实现
+
+    // rocksdb::IOStatus GetChildrenFileAttributes(const std::string& dir,
+    //                                            const rocksdb::IOOptions& options,
+    //                                            std::vector<rocksdb::FileAttributes>* result,
+    //                                            rocksdb::IODebugContext* dbg) override {}
+
+    rocksdb::IOStatus DeleteFile(const std::string& f, const rocksdb::IOOptions& options,
+                                rocksdb::IODebugContext* dbg) override {
+
+        int ret = 0;
+        std::string short_name;
+        if (is_extsst(f)) {
+            // _linker->extsst_delete(f);
+            // link结束后删除外部文件，此处不能删除
+            FS_LOG(WARNING, "delete external file: %s", f.c_str());
+            return rocksdb::IOStatus::OK();
+        } else if (is_sst(f, short_name)) {
+            if (_linker->sst_exists(short_name) == 1) {
+                ret = _linker->sst_delete(short_name, true);
+                if (ret < 0) {
+                    FS_LOG(FATAL, "delete ext file: %s failed", f.c_str());
+                    return rocksdb::IOStatus::IOError("DeleteFile failed");
+                }
+                FS_LOG(WARNING, "delete ext file: %s", f.c_str());
+                return rocksdb::IOStatus::OK();
+            }
+        }
+
+        auto s = target_->DeleteFile(f, options, dbg);
+        FS_LOG(WARNING, "delete local file: %s, status: %s", f.c_str(), s.ToString().c_str());
+        return s;
+    }
+
+    // writable_file_writer.cc:259
+    // delete_scheduler.cc:320
+    rocksdb::IOStatus Truncate(const std::string& fname, size_t size,
+                            const rocksdb::IOOptions& options, rocksdb::IODebugContext* dbg) override {
+        if (_linker->sst_exists(fname)) {
+            FS_LOG(FATAL, "NotSupported Truncate file: %s", fname.c_str());
+            return rocksdb::IOStatus::NotSupported("Truncate");
+        }
+
+        auto s = target_->Truncate(fname, size, options, dbg);
+        FS_LOG(WARNING, "file: %s, size: %ld, iotype: %d, status: %s", fname.c_str(), size, (int)options.type, s.ToString().c_str());
+        return s;
+    }
+
+    rocksdb::IOStatus CreateDir(const std::string& d, const rocksdb::IOOptions& options,
+                                rocksdb::IODebugContext* dbg) override {
+        auto s = target_->CreateDir(d, options, dbg);
+        FS_LOG(WARNING, "dir: %s, status: %s", d.c_str(), s.ToString().c_str());
+        return s;
+    }
+
+    rocksdb::IOStatus CreateDirIfMissing(const std::string& d, const rocksdb::IOOptions& options,
+                                        rocksdb::IODebugContext* dbg) override {
+        auto s = target_->CreateDirIfMissing(d, options, dbg);
+        FS_LOG(WARNING, "dir: %s, status: %s", d.c_str(), s.ToString().c_str());
+        return s;
+    }
+
+    rocksdb::IOStatus DeleteDir(const std::string& d, const rocksdb::IOOptions& options,
+                            rocksdb::IODebugContext* dbg) override {
+        auto s = target_->DeleteDir(d, options, dbg);
+        FS_LOG(FATAL, "dir: %s, status: %s", d.c_str(), s.ToString().c_str());
+        return s;
+    }
+
+    rocksdb::IOStatus GetFileSize(const std::string& f, const rocksdb::IOOptions& options,
+                                uint64_t* s, rocksdb::IODebugContext* dbg) override {
+        int ret = 0;
+        std::string short_name;
+        if (is_extsst(f)) {
+            ret = _linker->extsst_size(f, s);
+            if (ret < 0) {
+                FS_LOG(FATAL, "GetFileSize file: %s failed", f.c_str());
+                return rocksdb::IOStatus::IOError("GetFileSize failed");
+            }
+            FS_LOG(WARNING, "ext file: %s size: %lu", f.c_str(), *s);
+            return rocksdb::IOStatus::OK();
+        } else if (is_sst(f, short_name)) {
+            if (_linker->sst_exists(short_name) == 1) {
+                ret = _linker->sst_size(short_name, s);
+                if (ret < 0) {
+                    FS_LOG(FATAL, "GetFileSize file: %s short_name: %s failed", f.c_str(), short_name.c_str());
+                    return rocksdb::IOStatus::IOError("GetFileSize failed");
+                }
+                FS_LOG(WARNING, "ext file: %s size: %lu", f.c_str(), *s);
+                return rocksdb::IOStatus::OK();
+            }
+        }
+
+        auto status = target_->GetFileSize(f, options, s, dbg);
+        FS_LOG(WARNING, "local file: %s, size: %lu, status: %s", f.c_str(), *s, status.ToString().c_str());
+        return status;
+    }
+
+    rocksdb::IOStatus GetFileModificationTime(const std::string& fname,
+                                            const rocksdb::IOOptions& options,
+                                            uint64_t* file_mtime,
+                                            rocksdb::IODebugContext* dbg) override {
+        int ret = 0;
+        std::string short_name;
+        if (is_extsst(fname)) {
+            FS_LOG(FATAL, "NotSupported GetFileModificationTime file: %s", fname.c_str());
+            return rocksdb::IOStatus::NotSupported("GetFileModificationTime");
+        }
+        if (is_sst(fname, short_name)) {
+            if (_linker->sst_exists(short_name) == 1) {
+                ret = _linker->sst_modify_time(short_name, file_mtime);
+                if (ret < 0) {
+                    FS_LOG(FATAL, "GetFileModificationTime file: %s short_name: %s failed", fname.c_str(), short_name.c_str());
+                    return rocksdb::IOStatus::IOError("GetFileModificationTime failed");
+                }
+                FS_LOG(WARNING, "ext file: %s modify_time: %lu", fname.c_str(), *file_mtime);
+                return rocksdb::IOStatus::OK();
+            }
+        }
+
+        auto s = target_->GetFileModificationTime(fname, options, file_mtime, dbg);
+        FS_LOG(WARNING, "local file: %s, modify_time: %lu, status: %s", fname.c_str(), *file_mtime, s.ToString().c_str());
+        return s;
+    }
+
+    // auto_roll_logger.cc:44
+    // auto_roll_logger.cc:284
+    rocksdb::IOStatus GetAbsolutePath(const std::string& db_path, const rocksdb::IOOptions& options,
+                                    std::string* output_path,
+                                    rocksdb::IODebugContext* dbg) override {
+        auto s = target_->GetAbsolutePath(db_path, options, output_path, dbg);
+        FS_LOG(WARNING, "db_path: %s, output_path: %s, status: %s", db_path.c_str(), output_path->c_str(), s.ToString().c_str());
+        return s;
+    }
+
+    rocksdb::IOStatus RenameFile(const std::string& s, const std::string& t,
+                                const rocksdb::IOOptions& options, rocksdb::IODebugContext* dbg) override {
+        std::string s_short_name;
+        std::string t_short_name;
+        if (is_sst(t, t_short_name)) {
+            if (is_extsst(s)) {
+                // remote compaction之后调用RenameFile将ext文件重命名为sst文件
+                uint64_t ext_file_size = 0;
+                int ret = get_size_by_external_file_name(&ext_file_size, nullptr, s);
+                if (ret != 0) {
+                    FS_LOG(FATAL, "get_size_by_external_file_name file: %s failed", s.c_str());
+                    return rocksdb::IOStatus::IOError("get_size_by_external_file_name failed");
+                }
+                // compaction_service_job.cc:184 剔除 "/"
+                std::string external_file = s;
+                while (external_file.front() == '/') {
+                    external_file = external_file.substr(1);
+                }
+                ret = _linker->sst_link(external_file, t_short_name, ext_file_size);
+                if (ret < 0) {
+                    FS_LOG(FATAL, "LinkFile file: %s => %s, t_short_name: %s failed", external_file.c_str(), t.c_str(), t_short_name.c_str());
+                    return rocksdb::IOStatus::IOError("LinkFile failed");
+                }
+                FS_LOG(WARNING, "LinkFile ext file: %s => %s, t_short_name: %s", external_file.c_str(), t.c_str(), t_short_name.c_str());
+                return rocksdb::IOStatus::OK();
+            } else if (is_sst(s, s_short_name)) {
+                if (_linker->sst_exists(s_short_name) == 1) {
+                    int ret = _linker->sst_rename(s_short_name, t_short_name);
+                    if (ret < 0) {
+                        FS_LOG(FATAL, "RenameFile file: %s => %s, short_name: %s => %s failed", 
+                            s.c_str(), s_short_name.c_str(), t.c_str(), t_short_name.c_str());
+                        return rocksdb::IOStatus::IOError("RenameFile failed");
+                    }
+                    FS_LOG(WARNING, "RenameFile ext file: %s => %s", s.c_str(), t.c_str());
+                    return rocksdb::IOStatus::OK();
+                }
+            }
+        }
+
+        auto status = target_->RenameFile(s, t, options, dbg);
+        FS_LOG(WARNING, "RenameFile local file: %s => %s, status: %s", s.c_str(), t.c_str(), status.ToString().c_str());
+        return status;
+    }
+
+    rocksdb::IOStatus LinkFile(const std::string& s, const std::string& t,
+                            const rocksdb::IOOptions& options, rocksdb::IODebugContext* dbg) override {
+        std::string t_short_name;
+        if (is_extsst(s) && is_sst(t, t_short_name)) {
+            uint64_t ext_file_size = 0;
+            int ret = get_size_by_external_file_name(&ext_file_size, nullptr, s);
+            if (ret != 0) {
+                FS_LOG(FATAL, "get_size_by_external_file_name file: %s failed", s.c_str());
+                return rocksdb::IOStatus::IOError("get_size_by_external_file_name failed");
+            }
+
+            ret = _linker->sst_link(s, t_short_name, ext_file_size);
+            if (ret < 0) {
+                FS_LOG(FATAL, "LinkFile file: %s => %s, t_short_name: %s failed", s.c_str(), t.c_str(), t_short_name.c_str());
+                return rocksdb::IOStatus::IOError("LinkFile failed");
+            }
+            FS_LOG(WARNING, "LinkFile ext file: %s => %s, t_short_name: %s", s.c_str(), t.c_str(), t_short_name.c_str());
+            return rocksdb::IOStatus::OK();
+        }
+
+        auto status = target_->LinkFile(s, t, options, dbg);
+        FS_LOG(WARNING, "s: %s, t: %s, status: %s", s.c_str(), t.c_str(), status.ToString().c_str());
+        return status;
+    }
+
+    // delete_scheduler.cc:312
+    rocksdb::IOStatus NumFileLinks(const std::string& fname, const rocksdb::IOOptions& options,
+                                uint64_t* count, rocksdb::IODebugContext* dbg) override {
+        if (is_extsst(fname) || _linker->sst_exists(fname) != 0) {
+            FS_LOG(FATAL, "fname: %s, ext: %d, exists: %d", fname.c_str(), is_extsst(fname), _linker->sst_exists(fname));
+            return rocksdb::IOStatus::IOError("NumFileLinks failed");
+        }
+        auto s = target_->NumFileLinks(fname, options, count, dbg);
+        FS_LOG(WARNING, "fname: %s, count: %lu, status: %s", fname.c_str(), *count, s.ToString().c_str());
+        return s;
+    }
+
+    // db_options.cc:944
+    // blob_db_impl.cc:232
+    // 应该不会调用
+    rocksdb::IOStatus AreFilesSame(const std::string& first, const std::string& second,
+                                const rocksdb::IOOptions& options, bool* res,
+                                rocksdb::IODebugContext* dbg) override {
+        auto s = target_->AreFilesSame(first, second, options, res, dbg);
+        FS_LOG(FATAL, "first: %s, second: %s, res: %d, status: %s", first.c_str(), second.c_str(), *res, s.ToString().c_str());
+        return s;
+    }
+
+    rocksdb::IOStatus LockFile(const std::string& f, const rocksdb::IOOptions& options,
+                            rocksdb::FileLock** l, rocksdb::IODebugContext* dbg) override {
+        auto s = target_->LockFile(f, options, l, dbg);
+        FS_LOG(WARNING, "file: %s, status: %s", f.c_str(), s.ToString().c_str());
+        return s;
+    }
+
+    rocksdb::IOStatus UnlockFile(rocksdb::FileLock* l, const rocksdb::IOOptions& options,
+                                rocksdb::IODebugContext* dbg) override {
+        return target_->UnlockFile(l, options, dbg);
+    }
+
+    rocksdb::IOStatus GetTestDirectory(const rocksdb::IOOptions& options, std::string* path,
+                                    rocksdb::IODebugContext* dbg) override {
+        auto s = target_->GetTestDirectory(options, path, dbg);
+        FS_LOG(FATAL, "file: %s, status: %s", path->c_str(), s.ToString().c_str());
+        return s;
+    }
+    rocksdb::IOStatus NewLogger(const std::string& fname, const rocksdb::IOOptions& options,
+                            std::shared_ptr<rocksdb::Logger>* result,
+                            rocksdb::IODebugContext* dbg) override {
+        auto s = target_->NewLogger(fname, options, result, dbg);
+        FS_LOG(WARNING, "file: %s, status: %s", fname.c_str(), s.ToString().c_str());
+        return s;
+    }
+
+    rocksdb::IOStatus IsDirectory(const std::string& path, const rocksdb::IOOptions& options,
+                                bool* is_dir, rocksdb::IODebugContext* dbg) override {
+        auto s = target_->IsDirectory(path, options, is_dir, dbg);
+        FS_LOG(WARNING, "path: %s, status: %s", path.c_str(), s.ToString().c_str());
+        return s;                             
+    }
+private:
+    std::string _name;
+    std::shared_ptr<SstExtLinker> _linker = nullptr;
 };
 
 }    // namespace baikaldb

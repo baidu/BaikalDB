@@ -773,7 +773,8 @@ int SchemaManager::pre_process_for_create_table(const pb::MetaManagerRequest* re
     for (auto& index_info : request->table_info().indexs()) {
         if (index_info.is_global() 
                 && index_info.index_type() != pb::I_UNIQ 
-                && index_info.index_type() != pb::I_KEY) {
+                && index_info.index_type() != pb::I_KEY
+                ) {
             ERROR_SET_RESPONSE(response, pb::INPUT_PARAM_ERROR,
                     "global index only support I_UNIQ or I_KEY", request->op_type(), log_id);
             return -1;

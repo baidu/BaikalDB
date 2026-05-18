@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "memory_profile.h"
+
 namespace baikaldb {
+DECLARE_int64(reverse_index_memory_used_alert);
 template <typename Schema>
 int ReverseIndex<Schema>::reverse_merge_func(pb::RegionInfo info, bool need_remove_third) {
     _key_range = KeyRange(info.start_key(), info.end_key());
@@ -167,10 +170,11 @@ int ReverseIndex<Schema>::search(
                        SmartTable& table_info,
                        const std::string& search_data,
                        pb::MatchMode mode,
-                       std::vector<ExprNode*> conjuncts, 
+                       std::vector<ExprNode*> conjuncts,
+                       uint64_t logid,
                        bool is_fast) {
     TimeCost time;
-    int ret = create_executor(txn, index_info, table_info, search_data, mode, conjuncts, is_fast);
+    int ret = create_executor(txn, index_info, table_info, search_data, mode, conjuncts, logid, is_fast);
     if (ret < 0) {
         return -1;
     }
@@ -264,7 +268,8 @@ int ReverseIndex<Schema>::create_executor(
                             SmartTable& table_info,
                             const std::string& search_data, 
                             pb::MatchMode mode,
-                            std::vector<ExprNode*> conjuncts, 
+                            std::vector<ExprNode*> conjuncts,
+                            uint64_t logid,
                             bool is_fast) {
     TimeCost timer;
     auto schema_info = create_bthread_local_schema_if_null();
@@ -287,6 +292,17 @@ int ReverseIndex<Schema>::create_executor(
     if (ret < 0) {
         DB_WARNING("create_executor fail, region:%ld, index:%ld", _region_id, _index_id);
         return -1;
+    }
+    int64_t mem_allocaterd = schema_info->schema->statistic().mem_allocated;
+    if (mem_allocaterd > FLAGS_reverse_index_memory_used_alert) {
+        DB_WARNING("create_executor allocated %ld bytes memory, region:%ld, index:%ld, log_id:%lu",
+            schema_info->schema->statistic().mem_allocated, _region_id, _index_id, logid);
+        auto mem_tracker = MemTrackerPool::get_instance()->get_mem_tracker(logid);
+        mem_tracker->consume(mem_allocaterd);
+        if (mem_tracker->any_limit_exceeded()) {
+            DB_WARNING("create_executor fail, reverse index exceeded memory limit, log_id:%lu", logid);
+            return -1;
+        }
     }
     return 0;
 }
@@ -411,7 +427,7 @@ int ReverseIndex<Schema>::_reverse_remove_range_for_third_level(uint8_t prefix) 
                 return -1;
             }
         }
-        auto s = txn->commit();
+        auto s = txn->commit(0, 0);
         if (!s.ok()) {
             DB_WARNING("remove_range commit failed: %s", s.ToString().c_str());
             return -1;
@@ -483,7 +499,7 @@ int ReverseIndex<Schema>::_reverse_merge_to_second_level(
                 put_res.code(), put_res.ToString().c_str());
         return -1;
     }
-    auto s = txn->commit();
+    auto s = txn->commit(0, 0);
     if (!s.ok()) {
         DB_WARNING("merge commit failed: %s", s.ToString().c_str());
         return -1;
@@ -537,7 +553,7 @@ int ReverseIndex<Schema>::_reverse_merge_to_second_level(
             DB_WARNING("delete reverse list failed");
             return -1;
         }
-        auto s = txn_level2->commit();
+        auto s = txn_level2->commit(0, 0);
         if (!s.ok()) {
             DB_WARNING("merge commit failed: %s", s.ToString().c_str());
             return -1;
@@ -567,11 +583,13 @@ int ReverseIndex<Schema>::_get_level_reverse_list(
         return -1;
     }
     ItemStatistic* item_statistic = nullptr;
+    ReverseSearchStatistic* reverse_search_statistic = nullptr;
     if (is_statistic) {
         auto schema_info = bthread_local_schema();
         if (schema_info && schema_info->schema) {
-            item_statistic = 
-                &schema_info->schema->statistic().term_times[schema_info->schema->statistic().term_times.size() - 1];
+            reverse_search_statistic = &schema_info->schema->statistic();
+            item_statistic =
+                &reverse_search_statistic->term_times[schema_info->schema->statistic().term_times.size() - 1];
         }
     }
     TimeCost time;
@@ -601,6 +619,9 @@ int ReverseIndex<Schema>::_get_level_reverse_list(
             item_statistic->parse += time.get_time();
         }
         list_ptr = tmp_ptr;
+        if (reverse_search_statistic != nullptr) {
+            reverse_search_statistic->allocate(tmp_ptr->ByteSizeLong());
+        }
         if (_is_over_cache) {
             if (is_over_cache) {
                 if (((ReverseList*)tmp_ptr.get())->reverse_nodes_size() >= _cached_list_length) {

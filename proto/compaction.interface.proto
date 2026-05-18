@@ -30,6 +30,19 @@ message RemoteCompactionResponse {
     repeated CompactionFileInfo output_file_info = 3;
 };
 
+message GetRemoteFilesRequest {
+    required int64 region_id  = 1;
+    required int64 raft_index = 2;
+    required string dst_address = 3;
+};
+
+message GetRemoteFilesResponse {
+    required ErrCode errcode = 1;
+    repeated CompactionFileInfo remote_files = 2;
+    optional string errmsg = 3;
+};
+
 service CompactionService {
     rpc do_compaction(RemoteCompactionRequest) returns (RemoteCompactionResponse);
+    rpc get_remote_files(GetRemoteFilesRequest) returns (GetRemoteFilesResponse);
 };

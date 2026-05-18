@@ -429,13 +429,6 @@ private:
     bool _need_check_memory = false;
 };
 
-// 全局二级索引降级使用，将主备请求分别发往不同集群
-enum GlobalBackupType {
-    GBT_INIT = 0, // 默认值，不是全局索引降级的请求
-    GBT_MAIN,     // 主索引强制访问主集群
-    GBT_LEARNER,  // 降级backup请求强制访问learner
-};
-
 class PeerStatus {
 public:
     void set_cannot_access(int64_t region_id, const std::string& peer) {
@@ -540,17 +533,15 @@ public:
             ExecNode* store_request,
             int start_seq_id,
             int current_seq_id,
-            pb::OpType op_type, 
-            GlobalBackupType backup_type);
+            pb::OpType op_type);
 
     int run(RuntimeState* state,
                     std::map<int64_t, pb::RegionInfo>& region_infos,
                     ExecNode* store_request,
                     int start_seq_id,
                     int current_seq_id,
-                    pb::OpType op_type,
-                    GlobalBackupType backup_type = GBT_INIT) {
-        int ret = run_not_set_state(state, region_infos, store_request, start_seq_id, current_seq_id, op_type, backup_type);
+                    pb::OpType op_type) {
+        int ret = run_not_set_state(state, region_infos, store_request, start_seq_id, current_seq_id, op_type);
         update_state_info(state);
         if (ret < 0) {
             state->error_code = error_code;
@@ -767,7 +758,6 @@ public:
     std::set<brpc::CallId> callids;
     bool need_send_rollback = true;
     WriteBinlogParam write_binlog_param;
-    GlobalBackupType global_backup_type = GBT_INIT;
     // vectorized
     std::shared_ptr<arrow::Schema> arrow_schema;
     std::map<int64_t, std::shared_ptr<pb::StoreRes>> region_vectorized_response;

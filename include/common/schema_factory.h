@@ -133,12 +133,12 @@ inline size_t double_buffer_table_region_update_leader(
 
 struct FieldInfo {
     int32_t             id;
-    int32_t             size = -1;// STRING类型的size为-1，表示变长
+    int32_t             size = -1;          // STRING类型的size为-1，表示变长
     int64_t             table_id;
     int                 pb_idx = 0; 
-    std::string         name;   // db.table.field
-    std::string         lower_name;   // db.table.(lower)field
-    std::string         short_name; // field
+    std::string         name;               // db.table.field
+    std::string         lower_name;         // db.table.(lower)field
+    std::string         short_name;         // field
     std::string         lower_short_name;   // (lower)field
     std::string         default_value;
     ExprValue           default_expr_value;
@@ -215,6 +215,7 @@ struct TableInfo {
     bool                    has_fulltext = false;
     bool                    has_rollup_index = false;
     bool                    has_vector_index = false;
+    bool                    has_array_column = false;
     std::set<int64_t>       rollup_indexs;
     // 该表是否已和 binlog 表关联
     bool is_linked = false;
@@ -1078,6 +1079,7 @@ using SqlStatMap = std::unordered_map<uint64_t, std::shared_ptr<SqlStatistics>>;
 using DoubleBufferedSql = butil::DoublyBufferedData<SqlStatMap>;
 using DoublBufferedMetaMap = butil::DoublyBufferedData<MetaMap>;
 using DoublBufferedDBAddresses = butil::DoublyBufferedData<BaikalAddresses>;
+using DoubleBufferedBlacklist = butil::DoublyBufferedData<std::map<uint64_t, std::set<uint64_t>>>;
 
 class SchemaFactory {
 typedef ::google::protobuf::RepeatedPtrField<pb::RegionInfo> RegionVec;
@@ -1171,7 +1173,8 @@ public:
     double get_eq_field_ratio(int64_t table_id, int field_id, const ExprValue& value);
     SmartStatistics get_statistics_ptr(int64_t table_id);
     int64_t get_histogram_sample_cnt(int64_t table_id);
-    int64_t get_histogram_distinct_cnt(int64_t table_id, int field_id); 
+    int64_t get_histogram_distinct_cnt(int64_t table_id, int field_id);
+    void update_blacklist(int64_t table_id, const std::set<uint64_t>& add, const std::set<uint64_t>& remove);
     void schema_info_scope_read(std::function<void(const SchemaMapping&)> callback) {
         DoubleBufferedTable::ScopedPtr table_ptr;
         if (_double_buffer_table.Read(&table_ptr) != 0) {
@@ -1256,7 +1259,7 @@ public:
     int get_tail_split_step(int64_t table_id);
     int get_binlog_backup_days(int64_t table_id);
     void get_cost_switch_open(std::vector<std::string>& database_table);
-    void get_schema_conf_open(const std::string& conf_name, std::vector<std::string>& database_table);
+    void get_schema_conf_open(const std::string& conf_name, std::vector<std::string>& database_table, std::set<int64_t>& table_ids);
     void get_table_by_filter(std::vector<std::string>& database_table,
             const std::function<bool(const SmartTable&)>& select_table);
     void table_with_statistics_info(std::vector<std::string>& database_table);
@@ -1780,6 +1783,7 @@ public:
     void set_db_unavailable(const std::string& db_address);
     void update_meta_map(const std::string& meta_name);
     bool table_suitable_for_broadcast_join(const int64_t table_id);
+    bool is_sign_in_blacklist(uint64_t sign);
     std::string get_address() const {
         return _my_address;
     }
@@ -1860,6 +1864,7 @@ private:
 
     bthread::Mutex  _special_signs_mutex;
     std::unordered_map<uint64_t, std::string> _special_signs;
+    DoubleBufferedBlacklist _blacklist; // sign -> table_ids, table_ids is a set
 };
 }
 

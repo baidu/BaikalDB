@@ -33,7 +33,6 @@ struct FetcherInfo {
         S_FAIL
     };
     int64_t dynamic_timeout_ms = -1;
-    GlobalBackupType global_backup_type = GBT_INIT;
     ScanIndexInfo* scan_index = nullptr;
     std::atomic<Status> status = { S_INIT };
     FetcherStore fetcher_store;
@@ -84,8 +83,6 @@ public:
     }
     int single_fetcher_store_open(FetcherInfo* fetcher, RuntimeState* state, ExecNode* exec_node);
 
-    void multi_fetcher_store_open(FetcherInfo* self_fetcher, FetcherInfo* other_fetcher,
-        RuntimeState* state, ExecNode* exec_node);
     int fetcher_store_run(RuntimeState* state, ExecNode* exec_node);
     int merge_fetcher_store_run(RuntimeState* state, ExecNode* exec_node);
 

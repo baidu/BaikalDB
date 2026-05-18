@@ -495,7 +495,7 @@ int AggNode::open(RuntimeState* state) {
             std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
             uint8_t null_flag = 0;
             MutTableKey key;
-            key.append_u8(null_flag);
+            key.append_null_flag(null_flag);
             int64_t used_size= 0;
             AggFnCall::initialize_all(_agg_fn_calls, key.data(), row.get(), used_size, true);
             _hash_map.insert(key.data(), row.release());
@@ -509,7 +509,7 @@ void AggNode::process_row_batch(RuntimeState* state, RowBatch& batch, int64_t& u
         std::unique_ptr<MemRow>& row = batch.get_row();
         MutTableKey key;
         MemRow* cur_row = row.get();
-        encode_exprs_key(_group_exprs, cur_row, key);
+        encode_agg_exprs_key(_group_exprs, cur_row, key);
         MemRow** agg_row = _hash_map.seek(key.data());
         
         if (agg_row == nullptr) { //不存在则新建

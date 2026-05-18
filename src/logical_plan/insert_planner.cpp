@@ -288,7 +288,7 @@ int InsertPlanner::parse_olap_sign_field_value(SmartRecord record) {
         MutTableKey key;
         for (const auto& uniq_field_id : _olap_uniq_field_ids) {
             ExprValue value = record->get_value(record->get_field_by_tag(uniq_field_id));
-            key.append_value(value);
+            key.append_value(value, false);
             key.append_char(identify.c_str(), 1);
         }
         uint64_t out[2];

@@ -190,7 +190,7 @@ void InformationSchema::init_partition_split_info() {
             for (auto& region_info : region_infos) {
                 TableKey start_key(region_info.start_key());
                 int pos = 0;
-                partition_key = start_key.decode_start_key_string(type1, pos);
+                partition_key = start_key.decode_start_key_string(type1, pos, index_ptr->storage_type == pb::ST_NULL_KEY);
                 if (partition_key != last_partition_key) {
                     if (last_keys.size() > 1) {
                         for (auto id : last_region_ids) {
@@ -209,7 +209,7 @@ void InformationSchema::init_partition_split_info() {
                     last_region_ids.clear();
                     last_region_ids.emplace_back(last_id);
                 }
-                last_keys.emplace_back(start_key.decode_start_key_string(type2, pos));
+                last_keys.emplace_back(start_key.decode_start_key_string(type2, pos, index_ptr->storage_type == pb::ST_NULL_KEY));
                 last_region_ids.emplace_back(region_info.region_id());
                 last_id = region_info.region_id();
             }

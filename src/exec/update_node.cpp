@@ -137,7 +137,7 @@ int UpdateNode::open(RuntimeState* state) {
                 //batch单独走raft,raft on_apply中commit
                 state->raft_func(state, _txn);
             } else {
-                _txn->commit();                
+                _txn->commit(state->region_id(), 0);                
             }
         }
         if (state->txn_id != 0 && num_affected_rows > FLAGS_txn_kv_max_dml_row_size) {

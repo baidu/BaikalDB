@@ -86,7 +86,7 @@ int TransactionNode::open(RuntimeState* state) {
             DB_WARNING_STATE(state, "get txn failed, no txn in pool, txn_id: %lu", state->txn_id);
             return -1;
         }
-        auto res = txn->commit();
+        auto res = txn->commit(region_id, 0);
         if (res.ok()) {
             //DB_WARNING_STATE(state, "txn commit success, region_id: %ld, txn_id: %lu, seq_id:%d", 
             //    region_id, state->txn_id, state->seq_id);

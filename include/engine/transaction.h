@@ -104,7 +104,7 @@ public:
 
     rocksdb::Status prepare();
 
-    rocksdb::Status commit();
+    rocksdb::Status commit(int64_t region_id, int64_t raft_index);
     
     rocksdb::Status rollback();
 
@@ -460,7 +460,7 @@ public:
         _watt_stats_version = version;
     }
 
-    void set_use_normal_ttl(bool use_normal_ttl) { _use_normal_ttl = use_normal_ttl; }
+    bool use_ttl() const { return _use_ttl; }
     bool use_normal_ttl() const { return _use_normal_ttl; }
     bool use_cold_db() const { return _use_cold_db; }
     static int get_full_primary_key(
@@ -677,6 +677,7 @@ private:
     std::set<int32_t>               _pri_field_ids; // for cstore
 
     bthread_mutex_t                 _txn_mutex;
+    bool                            _use_ttl = false;
     bool                            _use_normal_ttl = false;
     bool                            _is_separate = false;
     int64_t                         _read_ttl_timestamp_us = 0; //ttl读取时间

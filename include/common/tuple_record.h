@@ -91,6 +91,9 @@ public:
         int32_t tuple_id, 
         std::shared_ptr<Chunk>);
     int verification_fields(int32_t max_field_id);
+
+    int decode_one_value(int32_t field_id, const google::protobuf::FieldDescriptor* field,
+        google::protobuf::Message* message, int& str_size);
 private:
     const char*   _data;
     size_t  _size;

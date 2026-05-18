@@ -96,7 +96,7 @@ TEST(test_parser, case_option) {
     {
         parser::SqlParser parser;
         //select distict
-        std::string sql_opt1 = "select field_a, '1.1', 1+1, count(*), (select 1 +1), (('1.1')), ((1.1+1)), count(*) as A";
+        std::string sql_opt1 = "select field_a, '1.1', 1+1, count(*), (select 1 +1), (('1.1')), ((1.1+1)), count(*) as A, field_a->'$.name'";
         parser.parse(sql_opt1);
         ASSERT_EQ(0, parser.error);
         ASSERT_EQ(1, parser.result.size());
@@ -117,6 +117,7 @@ TEST(test_parser, case_option) {
         ASSERT_STREQ(select_stmt->fields[6]->org_name.c_str(), "((1.1+1))");
         ASSERT_STREQ(select_stmt->fields[7]->org_name.c_str(), "count(*)");
         ASSERT_STREQ(select_stmt->fields[7]->as_name.c_str(), "A");
+        ASSERT_STREQ(select_stmt->fields[8]->org_name.c_str(), "field_a->'$.name'");
     }
     {
         parser::SqlParser parser;
@@ -960,7 +961,7 @@ TEST(test_parser, case_where) {
         parser::SqlParser parser;
         std::string sql_where = "select *, tablea.*, field_a, field_a as alias_1, {OJ field_a + 3}"
                                 " as alias_2 from table_a where expr1 > 10 and "
-                                "expr2 = 3 or expr3 = 4 or expr4 = 5 order by field_a asc,"
+                                "expr2 = 3 or expr3 = 4 or expr4 = 5 and expr5->>'$.id'=1  order by field_a asc,"
                                 " field_b desc limit 10, 100 lock in share mode";
         parser.parse(sql_where);
         ASSERT_EQ(0, parser.error);

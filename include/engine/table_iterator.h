@@ -158,6 +158,7 @@ protected:
     int                     _upper_sufix = 0;
 
     bool                    _valid = true;
+    bool                    _use_ttl = false;
     bool                    _use_normal_ttl = false;
     bool                    _is_cstore = false;
     bool                    _is_offline_binlog = false;
@@ -225,14 +226,14 @@ public:
 
     virtual ~IndexIterator() {}
 
-    int get_next(SmartRecord& record) {
-        return get_next_internal(&record, 0, nullptr, nullptr);
+    int get_next(SmartRecord& record, const std::vector<int>& check_null_fields) {
+        return get_next_internal(&record, 0, nullptr, nullptr, check_null_fields);
     }
-    int get_next(int32_t tuple_id, std::unique_ptr<MemRow>& mem_row) {
-        return get_next_internal(nullptr, tuple_id, &mem_row, nullptr);
+    int get_next(int32_t tuple_id, std::unique_ptr<MemRow>& mem_row, const std::vector<int>& check_null_fields) {
+        return get_next_internal(nullptr, tuple_id, &mem_row, nullptr, check_null_fields);
     }
-    int get_next_for_chunk(int32_t tuple_id, std::shared_ptr<Chunk> chunk) {
-        return get_next_internal(nullptr, tuple_id, nullptr, chunk);
+    int get_next_for_chunk(int32_t tuple_id, std::shared_ptr<Chunk> chunk, const std::vector<int>& check_null_fields) {
+        return get_next_internal(nullptr, tuple_id, nullptr, chunk, check_null_fields);
     }
 
     // get the index slice and primary key slice
@@ -241,6 +242,9 @@ public:
         return -1;
     }
 private:
-    int get_next_internal(SmartRecord* record, int32_t tuple_id, std::unique_ptr<MemRow>* mem_row, std::shared_ptr<Chunk> chunk);
+    int get_next_internal(SmartRecord* record, int32_t tuple_id, std::unique_ptr<MemRow>* mem_row,
+        std::shared_ptr<Chunk> chunk, const std::vector<int>& check_null_field_idxs);
+
+    bool key_contains_null(const TableKey& key, const std::vector<int>& field_idxs) const;
 };
 } // end of namespace

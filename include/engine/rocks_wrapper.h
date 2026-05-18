@@ -15,6 +15,7 @@
 #pragma once
  
 #include <string>
+#include "port/port.h"
 #include "rocksdb/db.h"
 #include "rocksdb/convenience.h"
 #include "rocksdb/slice.h"
@@ -26,10 +27,12 @@
 #include "rocksdb/utilities/transaction.h"
 #include "rocksdb/utilities/transaction_db.h"
 #include "key_encoder.h"
+#include "table_key.h"
+#include "mut_table_key.h"
 #include "common.h"
 #include "rocksdb/advanced_cache.h"
 #include "rocksdb_compaction_service.h"
-//#include "proto/store.interface.pb.h"
+#include "rocksdb_compaction_ctrl.h"
 
 namespace baikaldb {
 DECLARE_int32(rocks_max_background_compactions);
@@ -45,7 +48,9 @@ DECLARE_double(rocks_high_pri_pool_ratio);
 DECLARE_int32(rocks_block_size);
 DECLARE_bool(rocks_use_hyper_clock_cache);
 DECLARE_bool(enable_remote_compaction);
-
+DECLARE_bool(enable_compute_storage_decoupled_mode);
+extern thread_local std::shared_ptr<RemoteCompactionInfo> g_remote_compaction_info;
+const int64_t rocksdb_sst_invalid_raft_index = INT64_MAX;
 enum KVMode {
     KEY_ONLY,
     VAL_ONLY,
@@ -57,6 +62,30 @@ enum GetMode {
     LOCK_ONLY,
     GET_LOCK
 };
+void print_metadata_info(const rocksdb::LiveFileMetaData& metadata);
+inline uint64_t MinInputFileOldestAncesterTime(std::vector<rocksdb::LiveFileMetaData*> input_file_metadatas) {
+    uint64_t min_oldest_ancester_time = UINT64_MAX;
+    for (const auto& meta : input_file_metadatas) {
+        if (meta == nullptr) {
+            continue;
+        }
+        if (meta->oldest_ancester_time != 0) {
+            min_oldest_ancester_time = std::min(min_oldest_ancester_time, meta->oldest_ancester_time);
+        }
+    }
+    return min_oldest_ancester_time == UINT64_MAX ? 0 : min_oldest_ancester_time;
+}
+
+inline uint64_t MinInputFileEpochNumber(std::vector<rocksdb::LiveFileMetaData*> input_file_metadatas) {
+    uint64_t min_epoch_number = UINT64_MAX;
+    for (const auto& meta : input_file_metadatas) {
+        if (meta == nullptr) {
+            continue;
+        }
+        min_epoch_number = std::min(min_epoch_number, meta->epoch_number);
+    }
+    return min_epoch_number == UINT64_MAX ? 1 : min_epoch_number;
+}
 
 class KeyPointsTblPropCollector : public rocksdb::TablePropertiesCollector {
  public:
@@ -67,11 +96,20 @@ class KeyPointsTblPropCollector : public rocksdb::TablePropertiesCollector {
     }
 
     rocksdb::Status Finish(rocksdb::UserCollectedProperties* properties) override {
+        std::map<std::string, std::string> props;
         if (_value_encoded.size() > 0) {
-            *properties = rocksdb::UserCollectedProperties {
-                {"key_point_lens", _size_encoded},
-                {"key_points", _value_encoded}
-            };
+            props["key_point_lens"] = _size_encoded;
+            props["key_points"] = _value_encoded;
+        } 
+
+        if (g_remote_compaction_info != nullptr) {
+            if (g_remote_compaction_info->options.output_level == 6) {
+                props["output_level"] = "l6";
+            }
+        }
+
+        if (props.size() > 0) {
+            *properties = props;
             DB_WARNING("CountingKeyTblPropCollector: total_key_count: %d, total_key_point_count: %d, keypoint total size: %lu", 
                     _key_count, _count, _value_encoded.size());
         } else {
@@ -80,12 +118,13 @@ class KeyPointsTblPropCollector : public rocksdb::TablePropertiesCollector {
         return rocksdb::Status::OK();
     }
 
-    rocksdb::Status AddUserKey(const rocksdb::Slice& user_key, const rocksdb::Slice& /*value*/,
+    rocksdb::Status AddUserKey(const rocksdb::Slice& user_key, const rocksdb::Slice& value,
                     rocksdb::EntryType type, rocksdb::SequenceNumber /*seq*/, 
                     uint64_t /*file_size*/) override {
         if (type == rocksdb::kEntryDelete) {
             return rocksdb::Status::OK();
         }
+
         if (FLAGS_key_point_collector_interval > 0 && _count % FLAGS_key_point_collector_interval == 0) {
             uint64_t size = KeyEncoder::to_endian_u64((uint64_t)user_key.size());
             _size_encoded.append((char*)&size, sizeof(size));
@@ -118,9 +157,93 @@ class KeyPointsTblPropCollectorFactory
   }
 };
 
+class NewRaftLogCollector: public rocksdb::TablePropertiesCollector {
+public:
+    const char* Name() const override { return "NewRaftLogCollector"; }
+    static const std::string RAFT_LOG_PROPERTIES;
+
+    rocksdb::UserCollectedProperties GetReadableProperties() const override {
+        return rocksdb::UserCollectedProperties{};
+    }
+
+    rocksdb::Status Finish(rocksdb::UserCollectedProperties* properties) override {
+        pb::RaftLogMeta meta;
+        for (auto it: region_max_log_idx_map) {
+            pb::RegionRaftLogidPair* region_max_id_pair = meta.add_region_max_log_id_map();
+            region_max_id_pair->set_region_id(it.first);
+            region_max_id_pair->set_max_logid(it.second);
+        }
+        std::string prop_string;
+        if (!meta.SerializeToString(&prop_string)) {
+            // should never happen
+            // 如果发生本次flush会失败，memtable会保留，之后尝试再次flush
+            DB_WARNING("Serialize pb meta failed");
+            return rocksdb::Status::Corruption("Serialize pb meta failed");
+        }
+        (*properties)[RAFT_LOG_PROPERTIES] = prop_string;
+        return rocksdb::Status::OK();
+    }
+
+    rocksdb::Status AddUserKey(const rocksdb::Slice& user_key, const rocksdb::Slice& /*value*/,
+                    rocksdb::EntryType type, rocksdb::SequenceNumber /*seq*/,
+                    uint64_t /*file_size*/) override {
+        if (type != rocksdb::kEntryPut) {
+            // should never reach here
+            DB_WARNING("raft sst entry type not kEntryPut");
+            return rocksdb::Status::OK();
+        }
+        int64_t region_id = 0, index = 0;
+        int ret = decode_log_data_key(user_key, region_id, index);
+        if (ret != 0) {
+            // should never reach here
+            DB_WARNING("raft log key corrupted");
+            return rocksdb::Status::Corruption();
+        }
+        region_max_log_idx_map[region_id] = std::max(region_max_log_idx_map[region_id], index);
+        return rocksdb::Status::OK();
+    }
+
+    static int decode_log_data_key(const rocksdb::Slice& user_key, int64_t& region_id, int64_t& index) {
+        if (user_key.size() != LOG_DATA_KEY_SIZE) {
+            // should never reach here
+            DB_FATAL("key of log data is corrupted");
+            return -1;
+        }
+        uint64_t region_id_tmp = 0;
+        memcpy(&region_id_tmp, user_key.data(), sizeof(uint64_t));
+        region_id = KeyEncoder::decode_i64(
+                            KeyEncoder::to_endian_u64(region_id_tmp));
+
+        uint64_t index_tmp = 0;
+        memcpy(&index_tmp, user_key.data() + sizeof(int64_t) + 1, sizeof(uint64_t));
+        index =  KeyEncoder::decode_i64(
+                        KeyEncoder::to_endian_u64(index_tmp));
+        return 0;
+    }
+private:
+    static constexpr size_t LOG_DATA_KEY_SIZE = sizeof(int64_t) + 1 + sizeof(int64_t);
+    std::unordered_map<int64_t, int64_t> region_max_log_idx_map;
+};
+
+class NewRaftLogCollectorFactory
+    : public rocksdb::TablePropertiesCollectorFactory {
+public:
+    NewRaftLogCollectorFactory() = default;
+
+    rocksdb::TablePropertiesCollector* CreateTablePropertiesCollector(
+        TablePropertiesCollectorFactory::Context context) override {
+        return new NewRaftLogCollector();
+    }
+
+    const char* Name() const override {
+        return "NewRaftLogCollectorFactory";
+    }
+};
+
 class RocksWrapper {
 public:
     static const std::string RAFT_LOG_CF;
+    static const std::string NEW_RAFT_LOG_CF;
     static const std::string BIN_LOG_CF;
     static const std::string DATA_CF;
     static const std::string METAINFO_CF;
@@ -136,8 +259,9 @@ public:
         return &_instance;
     }
 
-    int32_t init(const std::string& path);
-    int32_t init_cold_rocksdb(const std::string& path);
+    int32_t init(const std::string& path, std::shared_ptr<ExtFileSystem> ext_fs);
+    int32_t init_cold_rocksdb(const std::string& path, std::shared_ptr<ExtFileSystem> ext_fs);
+    int32_t init_new_raft_log_rocksdb(const std::string& path);
     void set_table_options(rocksdb::BlockBasedTableOptions& table_options,
                         const pb::RocksdbGFLAGS& rocksdb_gflags);
     rocksdb::Status write(const rocksdb::WriteOptions& options, rocksdb::WriteBatch* updates) {
@@ -166,6 +290,25 @@ public:
                         const rocksdb::Slice& key,
                         const rocksdb::Slice& value) {
         return _txn_db->Put(options, column_family, key, value);
+    }
+
+    rocksdb::Status new_log_write(const rocksdb::WriteOptions& options,
+                            rocksdb::WriteBatch* batch) {
+        return _new_log_db->Write(options, batch);
+    }
+
+    rocksdb::Status new_log_get(const rocksdb::ReadOptions& options,
+                        rocksdb::ColumnFamilyHandle* column_family,
+                        const rocksdb::Slice& key,
+                        std::string* value) {
+        return _new_log_db->Get(options, column_family, key, value);
+    }
+
+    rocksdb::Status new_log_put(const rocksdb::WriteOptions& options,
+                        rocksdb::ColumnFamilyHandle* column_family,
+                        const rocksdb::Slice& key,
+                        const rocksdb::Slice& value) {
+        return _new_log_db->Put(options, column_family, key, value);
     }
 
     rocksdb::Status merge(const rocksdb::WriteOptions& options,
@@ -254,6 +397,17 @@ public:
         }
         return _txn_db->NewIterator(options, _column_families[cf]);
     }
+
+    rocksdb::Iterator* new_log_iterator(const rocksdb::ReadOptions& options, const std::string cf) {
+        if (_new_log_db == nullptr) {
+            return nullptr;
+        }
+        if (NEW_RAFT_LOG_CF == cf) {
+            return _new_log_db->NewIterator(options, _new_log_cf);
+        }
+        return nullptr;
+    }
+
     rocksdb::Iterator* new_cold_iterator(const rocksdb::ReadOptions& options, const std::string cf) {
         if (nullptr == _cold_txn_db) {
             return nullptr;
@@ -270,6 +424,26 @@ public:
             const rocksdb::IngestExternalFileOptions& options) {
         return _txn_db->IngestExternalFile(family, external_files, options);
     }
+
+    rocksdb::Status ingest_external_file_to_datacf(const std::vector<std::string>& external_files) {
+        rocksdb::IngestExternalFileOptions options;
+        // WARNING! 不要调整以下options
+        // WARNING! 不要调整以下options
+        // WARNING! 不要调整以下options
+        options.move_files = true;                        // 为true时会调用rocksdb filesystem的Linke方法才能实现和外部文件的关联
+        options.snapshot_consistency = false;             // 新region ingest可以不用保证snapshot一致，避免内部设置global_seqno导致无法ingest到L6
+        options.failed_move_fall_back_to_copy = false;    // move失败也不能降级为copy，所以设置为false
+        // options.allow_blocking_flush = true;              // 设置为false时，如果和memtable有重叠则会失败
+        options.allow_global_seqno = true;                // 当外部文件的seqno不能用时会生成新的seqno，需要设置为true
+        options.write_global_seqno = false;               // 为true时会把seqno写入外部文件，需要设置为false禁止对外部文件进行修改
+        options.verify_checksums_before_ingest = false;   // 不用校验checksum，否则会影响ingest性能，rocksdb默认也为false
+#if ROCKSDB_MAJOR >= 7
+        options.fail_if_not_bottommost_level = true;
+        options.allow_db_generated_files = true;
+#endif
+        return _txn_db->IngestExternalFile(get_data_handle(), external_files, options);
+    }
+
     rocksdb::Status ingest_to_cold(const std::vector<std::string>& external_files) {
         rocksdb::IngestExternalFileOptions options;
         // WARNING! 不要调整以下options
@@ -360,6 +534,10 @@ public:
         return _cold_binlog_cf;
     }
 
+    rocksdb::ColumnFamilyHandle* get_new_raft_log_handle() {
+        return _new_log_cf;
+    }
+
     rocksdb::TransactionDB* get_db() {
         return _txn_db;
     }
@@ -368,8 +546,16 @@ public:
         return _cold_txn_db;
     }
 
+    rocksdb::DB* get_new_raft_db() {
+        return _new_log_db;
+    }
+
     bool has_init_cold_rocksdb() const {
         return _cold_txn_db != nullptr;
+    }
+
+    bool has_init_new_raft_rocksdb() const {
+        return _new_log_db != nullptr;
     }
 
     int32_t create_column_family(std::string cf_name);
@@ -418,11 +604,16 @@ public:
             delete _cold_txn_db;
             _cold_txn_db = nullptr;
         }
+        if (_new_log_db != nullptr) {
+            delete _new_log_db;
+            _new_log_db = nullptr;
+        }
         _is_init = false;
         _column_families.clear();
         _cold_column_family = nullptr;
         _cold_binlog_cf = nullptr;
         _old_binlog_cf = nullptr;
+        _new_log_cf = nullptr;
     }
     bool is_any_stall() {
         uint64_t value = 0;
@@ -493,6 +684,43 @@ public:
     void get_cold_sst_properties(const std::string& start, const std::string& end, rocksdb::TablePropertiesCollection& props);
     void decode_key_points(const std::string& region_start_key, const std::string& region_end_key, 
         const std::string& prefix, const rocksdb::TablePropertiesCollection& props, std::vector<rocksdb::Slice>& out_keys);
+    int64_t get_file_raft_index(const std::string& file, int64_t region_id);
+    int get_region_compaction_files(CompactionFiles& files) {
+        if (_remote_compaction_service == nullptr) {
+            return -1;
+        }
+        return _remote_compaction_service->pop_compaction_files(files);
+    }
+    void push_region_compaction_files(const CompactionFiles& files) {
+        if (_remote_compaction_service != nullptr) {
+            _remote_compaction_service->push_compaction_files(files);
+        }
+    }
+
+    std::shared_ptr<RemoteCompactionService> get_remote_compaction_service() {
+        return _remote_compaction_service;
+    }
+
+    std::shared_ptr<ExtFileSystem> get_exteranl_filesystem() {
+        return _external_filesystem;
+    }
+
+    std::shared_ptr<rocksdb::FileSystem> get_rocksdb_filesystem() {
+        if (_remote_env == nullptr) {
+            return nullptr;
+        }
+        
+        return _remote_env->GetFileSystem();
+    }
+
+    std::shared_ptr<rocksdb::FileSystem> get_cold_rocksdb_filesystem() {
+        if (_cold_env == nullptr) {
+            return nullptr;
+        }
+
+        return _cold_env->GetFileSystem();
+    }
+
 private:
 
     RocksWrapper();
@@ -504,14 +732,17 @@ private:
 
     rocksdb::TransactionDB* _txn_db;
     rocksdb::TransactionDB* _cold_txn_db; // 可以不初始化，使用时需要判断null
+    rocksdb::DB*            _new_log_db;
     rocksdb::Cache*         _cache;
 
     std::map<std::string, rocksdb::ColumnFamilyHandle*> _column_families;
     rocksdb::ColumnFamilyHandle* _cold_column_family = nullptr;
     rocksdb::ColumnFamilyHandle* _cold_binlog_cf = nullptr;
     rocksdb::ColumnFamilyHandle* _old_binlog_cf = nullptr;
+    rocksdb::ColumnFamilyHandle* _new_log_cf = nullptr;
 
     rocksdb::ColumnFamilyOptions _log_cf_option;
+    rocksdb::ColumnFamilyOptions _new_log_option;
     rocksdb::ColumnFamilyOptions _binlog_cf_option;
     rocksdb::ColumnFamilyOptions _data_cf_option;
     rocksdb::ColumnFamilyOptions _meta_info_option;
@@ -527,6 +758,12 @@ private:
     std::map<std::string, std::string> _defined_options;
     int64_t _oldest_ts_in_binlog_cf = 0;
     std::unique_ptr<rocksdb::Env> _cold_env;
+    std::unique_ptr<rocksdb::Env> _remote_env;
+    std::shared_ptr<ExtFileSystem> _external_filesystem = nullptr;
+    std::shared_ptr<RemoteCompactionService> _remote_compaction_service = nullptr;
     rocksdb::BlockBasedTableOptions _table_options;
 };
+
+rocksdb::Status check_new_log_sst_removeable(
+        std::shared_ptr<const rocksdb::TableProperties> table_properties, bool& expired);
 }

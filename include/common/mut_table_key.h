@@ -164,7 +164,32 @@ public:
         return *this;
     }
 
-    MutTableKey& append_value(ExprValue& value) {
+    // bitmap, 0 stand for null, 1 stand for not null
+    MutTableKey& append_null_flag(uint8_t val) {
+        _data.append((char*)&val, sizeof(uint8_t));
+        return *this;
+    }
+
+    MutTableKey& replace_null_flag(uint8_t val, int pos) {
+        _data.replace(pos, 1, (char*)&val, 1);
+        return *this;
+    }
+
+    // 0 stand for null, 1 stand for not null
+    MutTableKey& append_null_byte(bool val) {
+        uint8_t encode = val ? uint8_t(0) : uint8_t(1);
+        _data.append((char*)&encode, sizeof(uint8_t));
+        return *this;
+    }
+
+    MutTableKey& append_value(ExprValue& value, bool nullable) {
+        if (nullable) {
+            bool is_null = value.is_null();
+            append_null_byte(is_null);
+            if (is_null) {
+                return *this;
+            }
+        }
         switch (value.type) {
             case pb::BOOL:
                 return append_boolean(value._u.bool_val);
@@ -194,6 +219,13 @@ public:
                 return append_double(value._u.double_val);
             case pb::STRING:
                 return append_string(value.str_val);
+            case pb::ARRAY_BOOL:
+            case pb::ARRAY_INT64:
+            case pb::ARRAY_UINT64:
+            case pb::ARRAY_FLOAT:
+            case pb::ARRAY_DOUBLE:
+            case pb::ARRAY_STRING:
+                return append_string(value.get_string());
             default:
                 return *this;
         }

@@ -990,16 +990,117 @@ void Tokenizer::split_str_utf8(const std::string& word, std::vector<std::string>
     }
 }
 
-bool is_prefix_end(std::unique_ptr<myrocksdb::Iterator>& iterator, uint8_t level) {
-    if (iterator->Valid()) {
-        uint8_t level_ = get_level_from_reverse_key(iterator->key());
-        if (level == level_) {
-            return false;
+int Tokenizer::split_punct_space(
+    std::string word, std::map<std::string, float>& term_map, const pb::Charset& charset) {
+    switch (charset) {
+    case pb::GBK:
+        return split_punct_space_gbk(word, term_map);
+    case pb::UTF8:
+        return split_punct_space_utf8(word, term_map);
+    default:
+        if (FLAGS_enable_print_convert_log) {
+            DB_WARNING("Invalid charset[%d]", charset);
+        }
+        return -1;
+    }
+}
+
+// Split by ASCII punctuation and spaces; multi-byte GBK chars are treated as content.
+int Tokenizer::split_punct_space_gbk(std::string word, std::map<std::string, float>& term_map) {
+    if (word.empty()) {
+        return 0;
+    }
+    std::string term;
+    const size_t word_size = word.size();
+    for (size_t i = 0; i < word_size; ) {
+        unsigned char c = (unsigned char)word[i];
+        if (c > 0x7F) {
+            // GBK two-byte character — treat as content
+            if (i + 1 < word_size) {
+                term += word[i];
+                term += word[i + 1];
+                i += 2;
+            } else {
+                ++i;
+            }
         } else {
-            return true;
+            // ASCII
+            if (::ispunct(c) || ::isspace(c)) {
+                if (!term.empty()) {
+                    term_map[term] = 0;
+                    term.clear();
+                }
+            } else {
+                term += (char)c;
+            }
+            ++i;
         }
     }
-    return true;
+    if (!term.empty()) {
+        term_map[term] = 0;
+    }
+    if (!term_map.empty()) {
+        float weight = 1.0f / term_map.size();
+        for (auto& pair : term_map) {
+            pair.second = weight;
+        }
+    }
+    return 0;
+}
+
+// Split by ASCII punctuation and spaces; multi-byte UTF-8 chars are treated as content.
+int Tokenizer::split_punct_space_utf8(std::string word, std::map<std::string, float>& term_map) {
+    if (word.empty()) {
+        return 0;
+    }
+    const size_t bom_len = get_utf8_bom_len(word);
+    std::string term;
+    const size_t word_size = word.size();
+    for (size_t i = bom_len; i < word_size; ) {
+        const size_t utf8_len = get_utf8_len(word[i]);
+        const size_t nremaining = word_size - i;
+        const size_t advance_len = (utf8_len < nremaining ? utf8_len : nremaining);
+        if (utf8_len == 1) {
+            unsigned char c = (unsigned char)word[i];
+            if (::ispunct(c) || ::isspace(c)) {
+                if (!term.empty()) {
+                    term_map[term] = 0;
+                    term.clear();
+                }
+            } else {
+                term += (char)c;
+            }
+        } else {
+            // Multi-byte UTF-8 character — treat as content
+            term += word.substr(i, advance_len);
+        }
+        i += advance_len;
+    }
+    if (!term.empty()) {
+        term_map[term] = 0;
+    }
+    if (!term_map.empty()) {
+        float weight = 1.0f / term_map.size();
+        for (auto& pair : term_map) {
+            pair.second = weight;
+        }
+    }
+    return 0;
+}
+
+bool is_prefix_end(std::unique_ptr<myrocksdb::Iterator>& iterator, uint8_t level) {
+    if (!iterator->Valid()) {
+        if (!iterator->status().ok()) {
+            DB_FATAL("Iterator error in is_prefix_end: %s", iterator->status().ToString().c_str());
+        }
+        return true;
+    }
+    uint8_t level_ = get_level_from_reverse_key(iterator->key());
+    if (level == level_) {
+        return false;
+    } else {
+        return true;
+    }
 }
 
 void print_reverse_list_common(pb::CommonReverseList& list) {

@@ -100,108 +100,6 @@ bool Region::need_flush_to_cold_rocksdb() {
     return false;
 }
 
-// struct LiveFileMetaData : SstFileMetaData {
-//   std::string column_family_name;  // Name of the column family
-//   int level;                       // Level at which this file resides.
-//   LiveFileMetaData() : column_family_name(), level(0) {}
-// };
-
-/*
-struct SstFileMetaData : public FileStorageInfo {
-
-
-  SequenceNumber smallest_seqno = 0;  // Smallest sequence number in file.
-  SequenceNumber largest_seqno = 0;   // Largest sequence number in file.
-  std::string smallestkey;            // Smallest user defined key in the file.
-  std::string largestkey;             // Largest user defined key in the file.
-  uint64_t num_reads_sampled = 0;     // How many times the file is read.
-  bool being_compacted =
-      false;  // true if the file is currently being compacted.
-
-  uint64_t num_entries = 0;
-  uint64_t num_deletions = 0;
-
-  // Timestamp when the SST file is created, provided by
-  // SystemClock::GetCurrentTime(). 0 if the information is not available.
-  uint64_t file_creation_time = 0;
-
-  // DEPRECATED: The name of the file within its directory with a
-  // leading slash (e.g. "/123456.sst"). Use relative_filename from base struct
-  // instead.
-  std::string name;
-
-  // DEPRECATED: replaced by `directory` in base struct
-  std::string db_path;
-};
-*/
-/*
-struct FileStorageInfo {
-  // The name of the file within its directory (e.g. "123456.sst")
-  std::string relative_filename;
-  // The directory containing the file, without a trailing '/'. This could be
-  // a DB path, wal_dir, etc.
-  std::string directory;
-
-  // The id of the file within a single DB. Set to 0 if the file does not have
-  // a number (e.g. CURRENT)
-  uint64_t file_number = 0;
-
-  // File size in bytes. See also `trim_to_size`.
-  uint64_t size = 0;
-};
-*/
-template<typename T>
-bool set_diff(const std::set<T>& s1, const std::set<T>& s2) {
-    // typename std::set<T>::iterator it;
-    if (s1.size() != s2.size()) {
-        return true;
-    }
-
-    std::set<T> diff;
-    // 计算s1和s2的差集，并将结果保存到diff中
-    std::set_difference(s1.begin(), s1.end(), s2.begin(), s2.end(),
-                        std::inserter(diff, diff.begin()));
-    // 如果diff为空集，则说明s1和s2中的元素相同
-    return !diff.empty();
-}
-
-void print_metadata_info(const rocksdb::LiveFileMetaData& metadata) {
-    TableKey smallestkey(metadata.smallestkey);
-    TableKey largestkey(metadata.largestkey);
-    if (metadata.column_family_name == RocksWrapper::COLD_BINLOG_CF) {
-        int64_t smallest_region_id = smallestkey.extract_i64(0);
-        int64_t smallest_ts  = smallestkey.extract_i64(sizeof(int64_t));
-        int64_t largest_region_id  = largestkey.extract_i64(0);
-        int64_t largest_ts   = largestkey.extract_i64(sizeof(int64_t));
-        DB_WARNING("LiveFileMetaData[cf_name: %s level: %d];"
-            "smallestkey[region_id: %ld ts: %ld, %s]; largestkey[region_id: %ld ts: %ld, %s]; "
-            "SstFileMetaData[smallest_seqno: %lu largest_seqno: %lu num_reads_sampled: %lu being_compacted: %d "
-            "num_entries: %lu num_deletions: %lu file_creation_time: %lu name: %s db_path: %s]; "
-            "FileStorageInfo[relative_filename: %s directory: %s file_number: %lu size: %lu].", 
-            metadata.column_family_name.c_str(), metadata.level,
-            smallest_region_id, smallest_ts, ts_to_datetime_str(smallest_ts).c_str(), 
-            largest_region_id, largest_ts,  ts_to_datetime_str(largest_ts).c_str(),
-            metadata.smallest_seqno, metadata.largest_seqno, metadata.num_reads_sampled, (int)metadata.being_compacted,
-            metadata.num_entries, metadata.num_deletions, metadata.file_creation_time, metadata.name.c_str(), metadata.db_path.c_str(), 
-            metadata.relative_filename.c_str(), metadata.directory.c_str(), metadata.file_number, metadata.size);
-    } else {
-        int64_t smallest_region_id = smallestkey.extract_i64(0);
-        int64_t smallest_table_id  = smallestkey.extract_i64(sizeof(int64_t));
-        int64_t largest_region_id  = largestkey.extract_i64(0);
-        int64_t largest_table_id   = largestkey.extract_i64(sizeof(int64_t));
-        DB_WARNING("LiveFileMetaData[cf_name: %s level: %d]; "
-            "smallestkey[region_id: %ld table_id: %ld]; largestkey[region_id: %ld table_id: %ld]; "
-            "SstFileMetaData[smallest_seqno: %lu largest_seqno: %lu num_reads_sampled: %lu being_compacted: %d "
-            "num_entries: %lu num_deletions: %lu file_creation_time: %lu name: %s db_path: %s]; "
-            "FileStorageInfo[relative_filename: %s directory: %s file_number: %lu size: %lu].", 
-            metadata.column_family_name.c_str(), metadata.level,
-            smallest_region_id, smallest_table_id, largest_region_id, largest_table_id,
-            metadata.smallest_seqno, metadata.largest_seqno, metadata.num_reads_sampled, (int)metadata.being_compacted,
-            metadata.num_entries, metadata.num_deletions, metadata.file_creation_time, metadata.name.c_str(), metadata.db_path.c_str(), 
-            metadata.relative_filename.c_str(), metadata.directory.c_str(), metadata.file_number, metadata.size);
-    }
-}
-
 int Region::modify_olap_region_num_table_lines() {
     // 获取L6的sst预估num_table_lines
     int64_t estimate_lines = Store::get_instance()->get_region_estimate_lines(get_region_id(), get_version());
@@ -348,9 +246,15 @@ int Region::ingest_cold_sst(const std::vector<std::string>& external_files) {
         return -1;
     }
 
+    std::shared_ptr<SstExtLinker> linker = get_cold_sst_ext_linker();
+    if (linker == nullptr) {
+        DB_FATAL("region_id: %ld get linker failed", _region_id);
+        return -1;
+    }
+
     std::set<std::string> tmp_external_files;
     if (!sst_relative_filename.empty()) {
-        ret = SstExtLinker::get_instance()->list_external_full_name(sst_relative_filename, tmp_external_files);
+        ret = linker->list_external_full_name(sst_relative_filename, tmp_external_files);
         if (ret < 0) {
             DB_FATAL("region_id: %ld list external file failed", _region_id);
             return -1;
@@ -402,9 +306,15 @@ int Region::ingest_cold_index_sst(std::vector<std::string>& external_files, int6
         return -1;
     }
 
+    std::shared_ptr<SstExtLinker> linker = get_cold_sst_ext_linker();
+    if (linker == nullptr) {
+        DB_FATAL("region_id: %ld get linker failed", _region_id);
+        return -1;
+    }
+
     std::set<std::string> tmp_external_files;
     if (!sst_relative_filename.empty()) {
-        ret = SstExtLinker::get_instance()->list_external_full_name(sst_relative_filename, tmp_external_files);
+        ret = linker->list_external_full_name(sst_relative_filename, tmp_external_files);
         if (ret < 0) {
             DB_FATAL("region_id: %ld list external file failed", _region_id);
             return -1;
@@ -638,6 +548,11 @@ int Region::doing_cold_data_rollup(int64_t index_id) {
         }
         iter->Next();
         line_nums++;
+    }
+    if (!iter->status().ok()) {
+        DB_FATAL("Iterator error during cold data rollup: %s, table_id:%ld index:%ld region_id:%ld",
+                 iter->status().ToString().c_str(), get_table_id(), index_id, _region_id);
+        return -1;
     }
     s = _rocksdb->write(write_options, &batch);
     if (!s.ok()) {
@@ -1005,95 +920,6 @@ std::string make_relative_path(int64_t table_id, int64_t partition_id, int64_t r
     return path;
 }
 
-// 执行失败暂不删除
-int copy_file(const std::string& local_file, const std::string& user_define_path, std::string& external_file, uint64_t size) {
-    TimeCost cost;
-    std::shared_ptr<ExtFileSystem> fs = SstExtLinker::get_instance()->get_exteranl_filesystem();
-    external_file = fs->make_full_name("", false, user_define_path);
-    if (external_file.empty()) {
-        DB_FATAL("local_file: %s make full path failed", local_file.c_str());
-        return -1;
-    }
-    int ret = fs->path_exists(external_file);
-    if (ret < 0) {
-        DB_FATAL("path_exists: %s failed", external_file.c_str());
-        return -1;
-    } else if (ret == 1) {
-        DB_WARNING("path: %s exists", external_file.c_str());
-        return -1;
-    }
-
-    ret = fs->create(external_file);
-    if (ret < 0) {
-        DB_FATAL("create external_file: %s failed", external_file.c_str());
-        return -1;
-    }
-
-    ScopeGuard auto_decrease([&fs, &external_file]() {
-        DB_WARNING("delete external_file: %s", external_file.c_str());
-        fs->delete_path(external_file, false);
-    });
-
-    std::unique_ptr<ExtFileWriter> writer;
-    ret = fs->open_writer(external_file, &writer);
-    if (ret < 0) {
-        DB_WARNING("open writer: %s filed", external_file.c_str());
-        return -1;
-    }
-
-    butil::File f(butil::FilePath{local_file}, butil::File::FLAG_OPEN | butil::File::FLAG_READ);
-    if (!f.IsValid()) {
-        DB_WARNING("file[%s] is not valid.", local_file.c_str());
-        return -1;
-    }
-    int64_t length = f.GetLength();
-    if (length < 0 || length != size) {
-        DB_FATAL("sst: %s get length failed, len: %ld vs %lu", local_file.c_str(), length, size);
-        return -1;
-    }
-    int64_t read_ret = 0;
-    int64_t write_ret = 0;
-    int64_t read_offset = 0;
-    const static int BUF_SIZE {4 * 1024 * 1024LL};
-    std::unique_ptr<char[]> buf(new char[BUF_SIZE]);
-    do {
-        read_ret = f.Read(read_offset, buf.get(), BUF_SIZE);
-        if (read_ret < 0) {
-            DB_WARNING("read file[%s] error.", local_file.c_str());
-            return -1;
-        } 
-        if (read_ret != 0) {
-            write_ret = writer->append(buf.get(), read_ret);
-            if (write_ret != read_ret) {
-                DB_FATAL("append external_file: %s failed, offset: %ld, read_ret: %ld, write_ret: %ld", 
-                    external_file.c_str(), read_offset, read_ret, write_ret);
-                return -1;
-            }
-        }
-        read_offset += read_ret;
-    } while (read_ret == BUF_SIZE);
-
-    int64_t write_size = writer->tell();
-    if (write_size != length) {
-        DB_FATAL("sst_file: %s external_file: %s diff size %ld vs %ld", local_file.c_str(), external_file.c_str(), size, write_size);
-        return -1;
-    }
-
-    if (!writer->sync()) {
-        DB_FATAL("external file: %s sync failed", external_file.c_str());
-        return -1;
-    }
-
-    if (!writer->close()) {
-        DB_FATAL("external file: %s close failed", external_file.c_str());
-        return -1;
-    }
-
-    auto_decrease.release();
-    DB_NOTICE("copy %s to %s size: %ld, cost: %ld", local_file.c_str(), external_file.c_str(), size, cost.get_time());
-    return 0;
-}
-
 // struct ExternalSstFileInfo {
 //   std::string file_path;     // external sst file path
 //   std::string smallest_key;  // smallest user key in file
@@ -1283,7 +1109,11 @@ int Region::flush_hot_to_cold(std::vector<std::string>& external_files,
         int64_t fail_cnt = 0;
         ColdFileSstWriter sst_writer(get_table_id(), get_partition_id(), _region_id, index_id, FLAGS_num_lines_per_sst);
         ScopeGuard auto_decrease([&sst_writer]() {
-            auto fs = SstExtLinker::get_instance()->get_exteranl_filesystem();
+            auto fs = RocksWrapper::get_instance()->get_exteranl_filesystem();
+            if (fs == nullptr) {
+                DB_WARNING("ext fs is nullptr");
+                return;
+            }
             for (const std::string& external_file : sst_writer.external_files()) {
                 DB_WARNING("delete external_file: %s", external_file.c_str());
                 fs->delete_path(external_file, false);
@@ -1326,11 +1156,16 @@ int Region::flush_hot_to_cold(std::vector<std::string>& external_files,
             DB_FATAL("region_id: %ld finish failed", _region_id);
             return -1;
         }
+        if (!iter->status().ok()) {
+            DB_FATAL("Iterator error during flush hot index: %s, region_id: %ld, index_id: %ld",
+                     iter->status().ToString().c_str(), _region_id, index_id);
+            return -1;
+        }
         auto_decrease.release();
         for (const std::string& ext_file : sst_writer.external_files()) {
             external_files.push_back(ext_file);
         }
-        index_ext_paths_mapping[index_id] = sst_writer.external_files();;
+        index_ext_paths_mapping[index_id] = sst_writer.external_files();
         DB_NOTICE("region_id: %ld flush total_cnt: %ld, fail_cnt: %ld, cost: %ld", _region_id, total_cnt, fail_cnt, cost.get_time());
     }
     return 0;
@@ -1414,7 +1249,11 @@ int Region::flush_hot_index_to_cold(int64_t index_id,
     }
     ColdFileSstWriter sst_writer(get_table_id(), get_partition_id(), _region_id, index_id, FLAGS_num_lines_per_sst);
     ScopeGuard auto_decrease([&sst_writer]() {
-        auto fs = SstExtLinker::get_instance()->get_exteranl_filesystem();
+        auto fs = RocksWrapper::get_instance()->get_exteranl_filesystem();
+        if (fs == nullptr) {
+            DB_WARNING("ext fs is nullptr");
+            return;
+        }
         for (const std::string& external_file : sst_writer.external_files()) {
             DB_WARNING("delete external_file: %s", external_file.c_str());
             fs->delete_path(external_file, false);
@@ -1450,6 +1289,11 @@ int Region::flush_hot_index_to_cold(int64_t index_id,
     int ret = sst_writer.finish();
     if (ret < 0) {
         DB_FATAL("region_id: %ld finish failed", _region_id);
+        return -1;
+    }
+    if (!iter->status().ok()) {
+        DB_FATAL("Iterator error during flush to cold: %s, region_id: %ld, index_id: %ld",
+                 iter->status().ToString().c_str(), _region_id, index_id);
         return -1;
     }
     auto_decrease.release();
@@ -1491,7 +1335,11 @@ int Region::manual_link_external_sst() {
 
     std::string done_file = done_path + "/" + std::to_string(_region_id) + "_done";
 
-    std::shared_ptr<ExtFileSystem> fs = SstExtLinker::get_instance()->get_exteranl_filesystem();
+    std::shared_ptr<ExtFileSystem> fs = RocksWrapper::get_instance()->get_exteranl_filesystem();
+    if (fs == nullptr) {
+        DB_WARNING("ext fs is nullptr");
+        return -1;
+    }
     std::string external_done_file = fs->make_full_name("", false, done_file);
     if (external_done_file.empty()) {
         DB_FATAL("done_file: %s make full path failed", done_file.c_str());

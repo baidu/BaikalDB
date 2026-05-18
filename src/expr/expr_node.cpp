@@ -563,6 +563,7 @@ int ExprNode::create_expr_node(const pb::ExprNode& node, ExprNode** expr_node) {
         case pb::TIMESTAMP_LITERAL:
         case pb::PLACE_HOLDER_LITERAL:
         case pb::MAXVALUE_LITERAL:
+        case pb::ARRAY_LITERAL:
             *expr_node = new Literal;
             (*expr_node)->init(node);
             return 0;
