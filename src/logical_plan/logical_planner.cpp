@@ -539,14 +539,12 @@ int LogicalPlanner::generate_sql_sign(QueryContext* ctx, parser::StmtNode* stmt)
             butil::MurmurHash3_x64_128(str.c_str(), str.size(), 0x1234, out);
             stat_info->sign = out[0];
         }
-        if (!ctx->sign_blacklist.empty()) {
-            if (ctx->sign_blacklist.count(stat_info->sign) > 0) {
-                DB_WARNING("sql sign[%lu] in blacklist, sample_sql[%s]", stat_info->sign, 
-                    str.c_str());
-                ctx->stat_info.error_code = ER_SQL_REFUSE;
-                ctx->stat_info.error_msg << "sql sign: " << stat_info->sign << " in blacklist";
-                return -1;
-            }
+        if (SchemaFactory::get_instance()->is_sign_in_blacklist(stat_info->sign) > 0) {
+            DB_WARNING("sql sign[%lu] in blacklist, sample_sql[%s]", stat_info->sign,
+                str.c_str());
+            ctx->stat_info.error_code = ER_SQL_REFUSE;
+            ctx->stat_info.error_msg << "sql sign: " << stat_info->sign << " in blacklist";
+            return -1;
         }
         if (!ctx->need_learner_backup && !ctx->sign_forcelearner.empty()) {
             if (ctx->sign_forcelearner.count(stat_info->sign) > 0) {
@@ -674,7 +672,6 @@ int LogicalPlanner::gen_subquery_plan(parser::DmlNode* subquery, SmartPlanTableC
     if (_cur_sub_ctx->table_can_use_arrow_vectorize == false) {
         _ctx->table_can_use_arrow_vectorize = false;
     }
-    _ctx->sign_blacklist.insert(_cur_sub_ctx->sign_blacklist.begin(), _cur_sub_ctx->sign_blacklist.end());
     _ctx->sign_forcelearner.insert(_cur_sub_ctx->sign_forcelearner.begin(), _cur_sub_ctx->sign_forcelearner.end());
     _ctx->sign_rolling.insert(_cur_sub_ctx->sign_rolling.begin(), _cur_sub_ctx->sign_rolling.end());
     _ctx->sign_forceindex.insert(_cur_sub_ctx->sign_forceindex.begin(), _cur_sub_ctx->sign_forceindex.end());
@@ -868,7 +865,6 @@ int LogicalPlanner::add_table(const std::string& database, const std::string& ta
             }
         }
 
-        _ctx->sign_blacklist.insert(tbl_ptr->sign_blacklist.begin(), tbl_ptr->sign_blacklist.end());
         _ctx->sign_forcelearner.insert(tbl_ptr->sign_forcelearner.begin(), tbl_ptr->sign_forcelearner.end());
         _ctx->sign_rolling.insert(tbl_ptr->sign_rolling.begin(), tbl_ptr->sign_rolling.end());
         for (auto& sign_index : tbl_ptr->sign_forceindex) {

@@ -2953,7 +2953,7 @@ int Region::select(const pb::StoreReq& request,
         DB_FATAL("get_table_info_ptr fail, region_id: %ld", _region_id);
         return -1;
     }
-    if (table_ptr->sign_blacklist.count(request.sql_sign()) == 1) {
+    if (_factory->is_sign_in_blacklist(request.sql_sign())) {
         response.set_errcode(pb::EXEC_FAIL);
         response.set_errmsg("sql sign in blacklist");
         DB_FATAL("sql sign[%lu] in blacklist, region_id: %ld", request.sql_sign(), _region_id);

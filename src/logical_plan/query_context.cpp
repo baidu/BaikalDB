@@ -122,7 +122,6 @@ int QueryContext::copy_query_context(QueryContext* p_query_ctx) {
         }
     }
     // sql sign
-    sign_blacklist.insert(p_query_ctx->sign_blacklist.begin(), p_query_ctx->sign_blacklist.end());
     sign_forcelearner.insert(p_query_ctx->sign_forcelearner.begin(), p_query_ctx->sign_forcelearner.end());
     sign_rolling.insert(p_query_ctx->sign_rolling.begin(), p_query_ctx->sign_rolling.end());
     sign_forceindex.insert(p_query_ctx->sign_forceindex.begin(), p_query_ctx->sign_forceindex.end());

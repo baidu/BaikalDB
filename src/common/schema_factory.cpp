@@ -453,6 +453,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
     std::unordered_set<int64_t> last_indics;
 
     SmartTable tbl_info_ptr = std::make_shared<TableInfo>();
+    std::set<uint64_t> old_blacklist;
     if (table_info_mapping.count(table_id) == 0) {
         if (nullptr == (tbl_info_ptr->file_proto = new (std::nothrow)FileDescriptorProto)) {
             DB_FATAL("create FileDescriptorProto failed");
@@ -480,6 +481,7 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
         tbl_info.has_rollup_index = false;
         tbl_info.rollup_indexs.clear();
         tbl_info.has_index_write_only_or_write_local = false;
+        old_blacklist = std::move(tbl_info.sign_blacklist);
         tbl_info.sign_blacklist.clear();
         tbl_info.sign_forcelearner.clear();
         tbl_info.sign_rolling.clear();
@@ -544,6 +546,16 @@ int SchemaFactory::update_table_internal(SchemaMapping& background, const pb::Sc
                 DB_DEBUG("sign_num: %lu, sign_str: %s", sign_num, sign_str.c_str());
             }
         }
+        std::set<uint64_t> add_signs;
+        std::set<uint64_t> remove_signs;
+        std::set_difference(old_blacklist.begin(), old_blacklist.end(),
+                            tbl_info.sign_blacklist.begin(), tbl_info.sign_blacklist.end(),
+                            std::inserter(remove_signs, remove_signs.begin()));
+        std::set_difference(tbl_info.sign_blacklist.begin(), tbl_info.sign_blacklist.end(),
+                            old_blacklist.begin(), old_blacklist.end(),
+                            std::inserter(add_signs, add_signs.begin()));
+        update_blacklist(table_id, add_signs, remove_signs);
+
         if (tbl_info.schema_conf.has_sign_forcelearner() && tbl_info.schema_conf.sign_forcelearner() != "") {
             DB_DEBUG("sign_forcelearner: %s", tbl_info.schema_conf.sign_forcelearner().c_str());
             std::vector<std::string> vec;
@@ -3928,6 +3940,37 @@ bool SchemaFactory::table_suitable_for_broadcast_join(int64_t table_id) {
         return true;
     }
     return false;
+}
+
+void SchemaFactory::update_blacklist(int64_t table_id, const std::set<uint64_t>& adds, const std::set<uint64_t>& removes) {
+    if (adds.size() == 0 && removes.size() == 0) {
+        return;
+    }
+    auto update = [table_id, adds, removes] (std::map<uint64_t, std::set<uint64_t>>& blacklist_map) {
+        for (uint64_t add: adds) {
+            blacklist_map[add].insert(table_id);
+        }
+        for (uint64_t remove: removes) {
+            if (blacklist_map.count(remove) == 0) {
+                continue;
+            }
+            blacklist_map[remove].erase(table_id);
+            if (blacklist_map[remove].size() == 0) {
+                blacklist_map.erase(remove);
+            }
+        }
+        return 1;
+    };
+    _blacklist.Modify(update);
+}
+
+bool SchemaFactory::is_sign_in_blacklist(uint64_t sign) {
+    DoubleBufferedBlacklist::ScopedPtr blacklist_ptr;
+    if (_blacklist.Read(&blacklist_ptr)) {
+        DB_WARNING("DoubleBufferedBlacklist read scoped ptr error.");
+        return false;
+    }
+    return blacklist_ptr->count(sign) > 0;
 }
 }//namespace
 

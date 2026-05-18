@@ -148,7 +148,7 @@ int Store::init_before_listen(std::vector<std::int64_t>& init_region_ids) {
         DB_FATAL("get afs infos failed");
         return -1;
     }
-    ext_fs = new AfsExtFileSystem(ugi_infos);
+    ext_fs.reset(new AfsExtFileSystem(ugi_infos));
 
     ret = ext_fs->init();
     if (ret < 0) {

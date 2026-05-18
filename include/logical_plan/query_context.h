@@ -454,7 +454,6 @@ public:
     std::set<int64_t> index_ids;
     // 用于索引推荐
     std::map<int32_t, int> field_range_type;
-    std::set<uint64_t> sign_blacklist;
     std::set<uint64_t> sign_forcelearner;
     std::set<uint64_t> sign_rolling;
     std::map<uint64_t, std::map<int64_t, std::set<std::string>>> sign_forceindex; // sign => <table_id, index_name_set>
