@@ -258,7 +258,7 @@ int32_t RocksWrapper::init(const std::string& path, std::shared_ptr<ExtFileSyste
     db_options.max_background_flushes = 2;
     db_options.env->SetBackgroundThreads(2, rocksdb::Env::HIGH);
     db_options.listeners.emplace_back(my_listener);
-
+ #if defined(BAIDU_INTERNAL)
     if (FLAGS_enable_compute_storage_decoupled_mode) {
         _remote_compaction_service = std::make_shared<RemoteCompactionService>();
         db_options.compaction_service = _remote_compaction_service;
@@ -271,6 +271,7 @@ int32_t RocksWrapper::init(const std::string& path, std::shared_ptr<ExtFileSyste
             DB_NOTICE("init remote env. but dsc close");
         }
     }
+#endif
     
     rocksdb::TransactionDBOptions txn_db_options;
     DB_NOTICE("FLAGS_rocks_transaction_lock_timeout_ms:%d FLAGS_rocks_default_lock_timeout_ms:%d", FLAGS_rocks_transaction_lock_timeout_ms, FLAGS_rocks_default_lock_timeout_ms);
