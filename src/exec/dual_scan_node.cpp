@@ -116,7 +116,17 @@ int DualScanNode::open(RuntimeState* state) {
     ExecNode* join = _sub_query_node->get_node(pb::JOIN_NODE);
     _sub_query_runtime_state->is_simple_select = (join == nullptr);
     _sub_query_node->set_delay_fetcher_store(_delay_fetcher_store);
-
+    // 当 delay_fetcher_store=true（UNION 向量化并发执行）时，子查询内的 JoinNode 也需要感知 delay，
+    // 以便 index join 路径在打开 outer node 前正确设置 delay，使其进入 EXEC_ARROW_ACERO
+    if (_delay_fetcher_store) {
+        std::vector<ExecNode*> join_nodes;
+        _sub_query_node->get_node(pb::JOIN_NODE, join_nodes);
+        for (ExecNode* node : join_nodes) {
+            if (node != nullptr) {
+                node->set_delay_fetcher_store(true);
+            }
+        }
+    }
     ret = _sub_query_node->open(_sub_query_runtime_state);
     if (ret < 0) {
         DB_WARNING("Fail to open _sub_query_node");

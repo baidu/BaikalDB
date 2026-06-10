@@ -938,6 +938,9 @@ int JoinNode::hash_join(RuntimeState* state) {
             && (!_use_index_join || state->sign_exec_type == SignExecType::SIGN_EXEC_ARROW_FORCE_NO_INDEX_JOIN)) {
         return no_index_hash_join(state);
     }
+    if (is_delay_fetcher_store()) {
+        _outer_node->set_delay_fetcher_store(true);
+    }
     int ret = _outer_node->open(state);
     if (ret < 0) {
         DB_WARNING("ExecNode::outer table open fail");
@@ -1050,6 +1053,9 @@ int JoinNode::nested_loop_join(RuntimeState* state) {
     if (state->execute_type == pb::EXEC_ARROW_ACERO 
             && (!_use_index_join || state->sign_exec_type == SignExecType::SIGN_EXEC_ARROW_FORCE_NO_INDEX_JOIN)) {
         return no_index_hash_join(state);
+    }
+    if (is_delay_fetcher_store()) {
+        _outer_node->set_delay_fetcher_store(true);
     }
     int ret = _outer_node->open(state);
     if (ret < 0) {

@@ -316,7 +316,6 @@ void OnRPCDone::select_resource_insulate_read_addr(pb::RegionInfo& info,
                                                 bool& select_without_leader,
                                                 bool& resource_insulate_read) {
     // offline强制隔离
-    // TODO:全局索引update也会有SELECT，查询不在事务会不会有问题
     _state->txn_id = 0;
     std::vector<std::string> valid_addrs;
     if (info.learners_size() > 0) {
@@ -389,8 +388,12 @@ void OnRPCDone::select_addr(pb::RegionInfo& info,
         && !_state->client_conn()->user_info->resource_tag.empty()) {
         insulate_resource_tag = _state->client_conn()->user_info->resource_tag;
     }
-    if (!insulate_resource_tag.empty() && _op_type == pb::OP_SELECT) {
-        return select_resource_insulate_read_addr(info, addr, 
+    if (!insulate_resource_tag.empty() && _op_type == pb::OP_SELECT
+            && _state->client_conn() != nullptr
+            && _state->client_conn()->query_ctx != nullptr
+            && (_state->client_conn()->query_ctx->stmt_type == parser::NT_SELECT
+             || _state->client_conn()->query_ctx->stmt_type == parser::NT_UNION)) {
+        return select_resource_insulate_read_addr(info, addr,
                 insulate_resource_tag, select_without_leader, resource_insulate_read);
     }
 

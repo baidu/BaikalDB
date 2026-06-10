@@ -284,7 +284,7 @@ void GlobalArrowExecutor::execute(RuntimeState* state, arrow::Result<std::shared
         });
         {
             std::unique_lock<decltype(mu)> lock(mu);
-            if (!done) {
+            while (!done) {
                 cond.wait(lock);
             }
         }

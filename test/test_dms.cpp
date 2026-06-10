@@ -35,7 +35,11 @@ TEST(test_dms_utils, case_sql_rewrite) {
 
         std::vector<std::string> select_fields {"k1", "k2"};
         EXPECT_EQ(SqlRewrite::rewrite_to_select(stmt, select_fields, sql, rewrite_sql), 0);
-        EXPECT_EQ(rewrite_sql, "SELECT k1,k2 FROM  tbl WHERE k3 = v3 and k4 = v4");
+        EXPECT_EQ(rewrite_sql, "SELECT `k1`,`k2` FROM  tbl WHERE k3 = v3 and k4 = v4");
+
+        select_fields = {"k1", "1"};
+        EXPECT_EQ(SqlRewrite::rewrite_to_select(stmt, select_fields, sql, rewrite_sql), 0);
+        EXPECT_EQ(rewrite_sql, "SELECT `k1`,1 FROM  tbl WHERE k3 = v3 and k4 = v4");
     }
     {
         parser::SqlParser parser;
@@ -49,7 +53,7 @@ TEST(test_dms_utils, case_sql_rewrite) {
 
         std::vector<std::string> select_fields {"k1", "k2"};
         EXPECT_EQ(SqlRewrite::rewrite_to_select(stmt, select_fields, sql, rewrite_sql), 0);
-        EXPECT_EQ(rewrite_sql, "SELECT k1,k2 FROM tbl WHERE k3 = v3 and k4 = v4");
+        EXPECT_EQ(rewrite_sql, "SELECT `k1`,`k2` FROM tbl WHERE k3 = v3 and k4 = v4");
     }
     {
         parser::SqlParser parser;

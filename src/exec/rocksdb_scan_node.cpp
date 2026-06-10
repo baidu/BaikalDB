@@ -665,7 +665,10 @@ int RocksdbScanNode::open(RuntimeState* state) {
                                                _scan_conjuncts,
                                                _pre_filter_conjuncts);
         if (ret < 0) {
-            DB_FATAL("vector_index fail search, index:%ld, table:%ld", _index_info->id, _table_info->id);
+            if (ret != -2) {
+                // -2是向量维度对不上, 减少报警
+                DB_FATAL("vector_index fail search, index:%ld, table:%ld", _index_info->id, _table_info->id);
+            }
             return -1;
         }
         if (!_vector_filter_conjuncts.empty()) {
@@ -1270,7 +1273,10 @@ int RocksdbScanNode::index_ddl_work(RuntimeState* state, MemRow* row) {
         }
         ret = vector_index_map[index_id]->insert_vector(txn, word, pk_key.data(), record);
         if (ret < 0) {
-            DB_WARNING_STATE(state, "vector_index fail insert, index_id: %ld", index_id);
+            if (ret != -2) {
+                // -2是向量维度对不上, 减少报警
+                DB_WARNING_STATE(state, "vector_index fail insert, index_id: %ld", index_id);
+            }
             return ret;
         }
         return 0;

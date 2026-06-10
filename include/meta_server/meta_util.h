@@ -142,7 +142,7 @@ struct RangeComparator {
         }
         const pb::Expr& pre_right_value = left.range().right_value();
         const pb::Expr& next_right_value = right.range().right_value();
-        return compare(pre_right_value, next_right_value) <= 0;
+        return compare(pre_right_value, next_right_value) < 0;
     }
 };
 
@@ -156,7 +156,7 @@ struct PointerRangeComparator {
         const pb::Expr& next_right_value = right->range().right_value();
         int64_t res = compare(pre_right_value, next_right_value);
         if (res == 0) {
-            return left->type() <= right->type();
+            return left->type() < right->type();
         } else {
             return res < 0;
         }

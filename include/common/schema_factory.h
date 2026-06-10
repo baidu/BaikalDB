@@ -517,7 +517,7 @@ public:
         bool operator() (const Range& range1, const Range& range2) {
             int64_t res = range1.right_value.compare(range2.right_value);
             if (res == 0) {
-                return range1.partition_type <= range2.partition_type;
+                return range1.partition_type < range2.partition_type;
             } else {
                 return res < 0;
             }

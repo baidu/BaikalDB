@@ -739,7 +739,7 @@ int VectorIndex::add_to_faiss(SmartFaissIndex faiss_index,
     std::vector<int64_t> cache_idxs;
     if ((int)cache_vectors.size() != _dimension) {
         DB_FATAL("cache_vectors.size:%lu != _dimension:%d", cache_vectors.size(), _dimension);
-        return -1;
+        return -2;
     }
     cache_idxs.emplace_back(cache_idx++);
     std::unordered_set<int32_t> need_not_cache_fields;
@@ -925,7 +925,7 @@ int VectorIndex::search(
     from_chars_to_float_vec(search_data, search_vector);
     if ((int)search_vector.size() != _dimension) {
         DB_FATAL("search_vector.size:%lu != _dimension:%d", search_vector.size(), _dimension);
-        return -1;
+        return -2;
     }
     int64_t k = topk;
     std::vector<int64_t> flat_idxs;

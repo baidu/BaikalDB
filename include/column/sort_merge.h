@@ -101,7 +101,7 @@ struct UnorderRow {
             }
         }
         
-        return true;
+        return false;  // equal is not less-than
     }
 };
 
@@ -306,7 +306,7 @@ public:
             }
         }
         
-        return true;
+        return false;  // equal is not less-than
     }
 private:
     CacheRow* _row = nullptr;

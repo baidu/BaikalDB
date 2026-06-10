@@ -493,7 +493,10 @@ int DMLNode::insert_row(RuntimeState* state, SmartRecord record, bool is_update)
             }
             ret = vector_index_map[info.id]->insert_vector(_txn, vectors, pk_str, record);
             if (ret < 0) {
-                DB_WARNING_STATE(state, "vector_index fail insert, index_id: %ld", info.id);
+                if (ret != -2) {
+                    // -2是向量维度对不上, 减少报警
+                    DB_WARNING_STATE(state, "vector_index fail insert, index_id: %ld", info.id);
+                }
                 return ret;
             }
             continue;

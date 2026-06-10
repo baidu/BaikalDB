@@ -15,6 +15,7 @@
 #include "gtest/gtest.h"
 #include "schema_factory.h"
 #include "fetcher_store.h"
+#include "query_context.h"
 #include "proto/meta.interface.pb.h"
 #include "proto/store.interface.pb.h"
 #include <gflags/gflags.h>
@@ -85,8 +86,17 @@ protected:
             }
         }
     }
+    void set_select_client_conn(RuntimeState& state) {
+        auto ctx = std::make_shared<QueryContext>();
+        ctx->stmt_type = parser::NT_SELECT;
+        auto conn = std::make_shared<NetworkSocket>();
+        conn->query_ctx = ctx;
+        _select_conns.push_back(conn);
+        state.set_client_conn(conn.get());
+    }
     std::map<std::string, std::string> _instance_info;
     std::map<std::string, std::string> _instance_logical_map;
+    std::vector<std::shared_ptr<NetworkSocket>> _select_conns;
 };
 
 // 非select一定选leader
@@ -245,6 +255,7 @@ TEST_F(FetcherStoreTest, test_resource_insulate_read_without_learner) {
         // 选watt peer
         FetcherStore fetcher_store;
         RuntimeState state;
+        set_select_client_conn(state);
         ExecNode store_request;
         OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
         for (int i = 0; i < 5; ++i) {
@@ -257,6 +268,7 @@ TEST_F(FetcherStoreTest, test_resource_insulate_read_without_learner) {
         // watt peer返回not_leader读失败，选其他peer
         FetcherStore fetcher_store;
         RuntimeState state;
+        set_select_client_conn(state);
         ExecNode store_request;
         OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
         done.select_addr();
@@ -279,6 +291,7 @@ TEST_F(FetcherStoreTest, test_resource_insulate_read_without_learner) {
         // watt peer can not access，选其他peer
         FetcherStore fetcher_store;
         RuntimeState state;
+        set_select_client_conn(state);
         ExecNode store_request;
         OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
         done.select_addr();
@@ -321,6 +334,7 @@ TEST_F(FetcherStoreTest, test_resource_insulate_read_with_learner) {
         FLAGS_fetcher_learner_read = false;
         FetcherStore fetcher_store;
         RuntimeState state;
+        set_select_client_conn(state);
         ExecNode store_request;
         OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
         for (int i = 0; i < 5; ++i) {
@@ -335,6 +349,7 @@ TEST_F(FetcherStoreTest, test_resource_insulate_read_with_learner) {
         // learner方式失败选peer
         FetcherStore fetcher_store;
         RuntimeState state;
+        set_select_client_conn(state);
         ExecNode store_request;
         OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
         done.select_addr();
@@ -358,6 +373,7 @@ TEST_F(FetcherStoreTest, test_resource_insulate_read_with_learner) {
         // learner not access选peer, peer失败选其他peer
         FetcherStore fetcher_store;
         RuntimeState state;
+        set_select_client_conn(state);
         ExecNode store_request;
         OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
         done.select_addr();
@@ -534,6 +550,7 @@ TEST_F(FetcherStoreTest, test_retry_later_choose_other_peer_read2) {
         FLAGS_fetcher_resource_tag = "";
         FetcherStore fetcher_store;
         RuntimeState state;
+        set_select_client_conn(state);
         ExecNode store_request;
         OnSingleRPCDone done(&fetcher_store, &state, &store_request, &region, 1, 1, 0, 0, pb::OP_SELECT, false);
         done.select_addr();
